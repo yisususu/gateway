@@ -1,0 +1,289 @@
+use crate::GatewayError;
+use futures::Stream;
+use serde::{Deserialize, Serialize};
+use std::pin::Pin;
+
+// ============================================================
+// Message Types (OpenAI-compatible)
+// ============================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageRole {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    Text(String),
+    Parts(Vec<ContentPart>),
+}
+
+impl Default for MessageContent {
+    fn default() -> Self {
+        MessageContent::Text(String::new())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentPart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrl },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrl {
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub role: MessageRole,
+    #[serde(default)]
+    pub content: MessageContent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub call_type: String,
+    pub function: FunctionCall,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionCall {
+    pub name: String,
+    pub arguments: String,
+}
+
+// ============================================================
+// Chat Completion Request (OpenAI-compatible)
+// ============================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCompletionRequest {
+    pub model: String,
+    pub messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop: Option<StopSequence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub n: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<Tool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<serde_json::Value>,
+    /// Catch-all for provider-specific parameters.
+    #[serde(default, flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StopSequence {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tool {
+    #[serde(rename = "type")]
+    pub tool_type: String,
+    pub function: ToolFunction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolFunction {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub parameters: serde_json::Value,
+}
+
+// ============================================================
+// Chat Completion Response (OpenAI-compatible)
+// ============================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCompletionResponse {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<Choice>,
+    pub usage: Usage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Choice {
+    pub index: u32,
+    pub message: Message,
+    pub finish_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Usage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+}
+
+// ============================================================
+// Streaming Types (SSE chunks)
+// ============================================================
+
+pub type ChatStream = Pin<Box<dyn Stream<Item = Result<ChatStreamChunk, GatewayError>> + Send>>;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatStreamChunk {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<StreamChoice>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamChoice {
+    pub index: u32,
+    pub delta: StreamDelta,
+    pub finish_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<MessageRole>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCallDelta>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallDelta {
+    pub index: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub call_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function: Option<FunctionCallDelta>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionCallDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+}
+
+// ============================================================
+// Model Info
+// ============================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub owned_by: String,
+}
+
+// ============================================================
+// Auth Identity (resolved after key validation)
+// ============================================================
+
+#[derive(Debug, Clone)]
+pub struct AuthIdentity {
+    pub key_hash: String,
+    pub key_name: Option<String>,
+    pub user_id: Option<String>,
+    pub team_id: Option<String>,
+    /// Allowed models. Empty means all models are allowed.
+    pub models: Vec<String>,
+    pub rpm_limit: Option<u64>,
+    pub tpm_limit: Option<u64>,
+    pub max_budget: Option<f64>,
+    pub spend: f64,
+    pub blocked: bool,
+    pub expires_at: Option<chrono::NaiveDateTime>,
+    pub metadata: serde_json::Value,
+}
+
+impl AuthIdentity {
+    /// Check if this identity is allowed to call the given model.
+    pub fn can_call_model(&self, model: &str) -> bool {
+        if self.models.is_empty() {
+            return true;
+        }
+        self.models.iter().any(|m| m == model || m == "*")
+    }
+
+    /// Check if the key has expired.
+    pub fn is_expired(&self) -> bool {
+        match self.expires_at {
+            Some(exp) => chrono::Utc::now().naive_utc() > exp,
+            None => false,
+        }
+    }
+
+    /// Check if the budget is exceeded.
+    pub fn is_budget_exceeded(&self) -> bool {
+        match self.max_budget {
+            Some(budget) => self.spend >= budget,
+            None => false,
+        }
+    }
+}
+
+// ============================================================
+// Rate Limit Types
+// ============================================================
+
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+pub struct RateLimitKey {
+    pub key_hash: String,
+    pub model: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RateLimitDecision {
+    pub allowed: bool,
+    pub remaining: u64,
+    pub limit: u64,
+    pub reset_at: chrono::DateTime<chrono::Utc>,
+    pub retry_after_secs: Option<u64>,
+}
