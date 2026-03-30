@@ -249,22 +249,16 @@ pub struct AuthIdentity {
 impl AuthIdentity {
     /// Check if this identity is allowed to call the given model.
     ///
-    /// Checks key's models first (direct match or wildcard), then falls back
-    /// to team's models (resolved from model groups like "all-team-models").
+    /// Models list is pre-resolved during authenticate():
+    /// - "all-team-models" → expanded to team's models (empty = all allowed)
+    /// - "all-proxy-models" → cleared (all allowed)
+    /// - Empty list → all models allowed
+    /// - Non-empty list → exact match or wildcard "*"
     pub fn can_call_model(&self, model: &str) -> bool {
-        // Both empty = unrestricted (master key or no limits).
-        if self.models.is_empty() && self.team_models.is_empty() {
+        if self.models.is_empty() {
             return true;
         }
-        // Check key's own models.
-        if self.models.iter().any(|m| m == model || m == "*") {
-            return true;
-        }
-        // Fallback: check team's resolved models.
-        if self.team_models.iter().any(|m| m == model || m == "*") {
-            return true;
-        }
-        false
+        self.models.iter().any(|m| m == model || m == "*")
     }
 
     /// Check if the key has expired.

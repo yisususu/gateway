@@ -184,9 +184,10 @@ impl Authenticator for DbAuthenticator {
         // 4. Validate the token
         let mut identity = self.token_to_identity(token);
 
-        // 5. Resolve model groups: if key belongs to a team, look up team's models.
-        //    litellm stores model group names (e.g. "all-team-models") in key's models;
-        //    the actual model list comes from LiteLLM_TeamTable.models.
+        // 5. Resolve litellm special model names.
+        //    litellm stores special identifiers in key.models:
+        //    - "all-team-models" → use team's models (empty = all allowed)
+        //    - "all-proxy-models" → all models on this proxy (empty = all allowed)
         if let Some(ref team_id) = identity.team_id {
             match self.lookup_team_models(team_id).await {
                 Ok(team_models) => {
@@ -200,6 +201,22 @@ impl Authenticator for DbAuthenticator {
                     tracing::warn!("Failed to resolve team models: {}", e);
                 }
             }
+        }
+
+        // Resolve special model names: replace key.models with the expanded list.
+        if identity.models.contains(&"all-team-models".to_string()) {
+            tracing::info!(
+                "Key {:?}: resolving 'all-team-models' → {:?}",
+                identity.key_name, identity.team_models
+            );
+            identity.models = identity.team_models.clone();
+        }
+        if identity.models.contains(&"all-proxy-models".to_string()) {
+            tracing::info!(
+                "Key {:?}: resolving 'all-proxy-models' → all models allowed",
+                identity.key_name
+            );
+            identity.models = vec![];
         }
 
         if identity.blocked {
