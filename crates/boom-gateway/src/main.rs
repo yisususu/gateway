@@ -2,7 +2,7 @@ mod extractor;
 mod routes;
 mod state;
 
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use clap::Parser;
 use state::AppState;
@@ -75,7 +75,23 @@ fn build_router(state: AppState) -> Router {
         .route("/health/ready", get(routes::readiness_check));
 
     // Admin routes (require master key).
-    let admin_routes = Router::new().route("/admin/config/reload", post(routes::admin_reload_config));
+    let admin_routes = Router::new()
+        .route("/admin/config/reload", post(routes::admin_reload_config))
+        // Plan management.
+        .route(
+            "/admin/plans",
+            put(routes::admin_upsert_plan).get(routes::admin_list_plans),
+        )
+        .route("/admin/plans/{name}", delete(routes::admin_delete_plan))
+        .route("/admin/plans/assign", post(routes::admin_assign_key))
+        .route(
+            "/admin/plans/assign/{key_hash}",
+            delete(routes::admin_unassign_key),
+        )
+        .route(
+            "/admin/plans/assignments",
+            get(routes::admin_list_assignments),
+        );
 
     Router::new()
         .merge(api_routes)

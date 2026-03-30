@@ -17,6 +17,65 @@ pub struct Config {
     pub server: ServerSettings,
     #[serde(default)]
     pub rate_limit: RateLimitSettings,
+    #[serde(default)]
+    pub plan_settings: PlanSettings,
+}
+
+/// A single plan definition in YAML config (plan name comes from the HashMap key).
+#[derive(Debug, Deserialize, Clone)]
+pub struct PlanConfig {
+    #[serde(default)]
+    pub concurrency_limit: Option<u32>,
+    #[serde(default)]
+    pub rpm_limit: Option<u64>,
+    #[serde(default)]
+    pub window_limits: Vec<Vec<u64>>,
+    /// Optional time-based schedule overrides.
+    #[serde(default)]
+    pub schedule: Vec<ScheduleSlotConfig>,
+}
+
+/// A time-based schedule slot within a plan.
+///
+/// ```yaml
+/// schedule:
+///   - hours: "9:00-21:00"
+///     concurrency_limit: 4
+///     rpm_limit: 60
+///   - hours: "21:00-9:00"
+///     concurrency_limit: 8
+///     rpm_limit: 120
+/// ```
+#[derive(Debug, Deserialize, Clone)]
+pub struct ScheduleSlotConfig {
+    /// Time range, e.g. "9:00-21:00" or "21:00-9:00" (cross-midnight).
+    pub hours: String,
+    #[serde(default)]
+    pub concurrency_limit: Option<u32>,
+    #[serde(default)]
+    pub rpm_limit: Option<u64>,
+    #[serde(default)]
+    pub window_limits: Vec<Vec<u64>>,
+}
+
+/// Top-level plan settings section.
+///
+/// ```yaml
+/// plan_settings:
+///   default_plan: "basic"
+///   plans:
+///     basic:
+///       concurrency_limit: 4
+///       rpm_limit: 60
+///       window_limits: [[100, 18000]]
+/// ```
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct PlanSettings {
+    /// Name of the plan to use for keys without an explicit assignment.
+    pub default_plan: Option<String>,
+    /// Plan name → plan definition.
+    #[serde(default)]
+    pub plans: HashMap<String, PlanConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

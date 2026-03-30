@@ -308,6 +308,8 @@ dependencies = [
  "boom-core",
  "chrono",
  "dashmap",
+ "futures",
+ "serde",
  "thiserror",
  "tokio",
  "tracing",

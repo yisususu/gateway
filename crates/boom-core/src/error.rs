@@ -14,6 +14,9 @@ pub enum GatewayError {
         message: String,
     },
 
+    #[error("Concurrency limit exceeded: {message}")]
+    ConcurrencyExceeded { limit: u32, message: String },
+
     #[error("Model not found: {0}")]
     ModelNotFound(String),
 
@@ -50,7 +53,7 @@ impl GatewayError {
     pub fn status_code(&self) -> u16 {
         match self {
             Self::AuthError(_) => 401,
-            Self::RateLimitExceeded { .. } => 429,
+            Self::RateLimitExceeded { .. } | Self::ConcurrencyExceeded { .. } => 429,
             Self::ModelNotFound(_) => 404,
             Self::ProviderError(_) => 502,
             Self::BudgetExceeded => 402,
@@ -69,6 +72,7 @@ impl GatewayError {
         match self {
             Self::AuthError(_) => "authentication_error",
             Self::RateLimitExceeded { .. } => "rate_limit_exceeded",
+            Self::ConcurrencyExceeded { .. } => "concurrency_exceeded",
             Self::ModelNotFound(_) => "model_not_found",
             Self::BudgetExceeded => "budget_exceeded",
             Self::KeyExpired => "key_expired",

@@ -1,6 +1,6 @@
 use crate::extractor::RequiredAuth;
 use crate::state::AppState;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
@@ -10,9 +10,11 @@ use boom_core::anthropic::{
 use boom_core::provider::RateLimiter;
 use boom_core::types::*;
 use boom_core::GatewayError;
+use boom_limiter::{ConcurrencyGuard, GuardedStream, PlanStore, RateLimitPlan};
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::sync::Arc;
 
 // ============================================================
 // Chat Completions
@@ -30,12 +32,7 @@ pub async fn chat_completions(
     check_model_access(identity, &req.model, &inner.deployments, &inner.model_aliases)
         .map_err(GatewayErrorReply)?;
 
-    // 2. Rate limit check.
-    let rl_key = RateLimitKey {
-        key_hash: identity.key_hash.clone(),
-        model: req.model.clone(),
-    };
-
+    // 2. Plan-based or default rate limiting.
     let window_limits: Vec<(u64, u64)> = inner
         .config
         .rate_limit
@@ -50,21 +47,16 @@ pub async fn chat_completions(
         })
         .collect();
 
-    let decision = state
-        .limiter
-        .check_and_record(&rl_key, identity.rpm_limit, &window_limits)
-        .await
-        .map_err(GatewayErrorReply)?;
-
-    if !decision.allowed {
-        return Err(GatewayErrorReply(GatewayError::RateLimitExceeded {
-            retry_after_secs: decision.retry_after_secs,
-            message: format!(
-                "Rate limit exceeded. Limit: {} per minute.",
-                decision.limit
-            ),
-        }));
-    }
+    let guard = check_plan_or_default_limits(
+        &state.plan_store,
+        &state.limiter,
+        &identity.key_hash,
+        &req.model,
+        identity.rpm_limit,
+        &window_limits,
+    )
+    .await
+    .map_err(GatewayErrorReply)?;
 
     // 3. Select provider deployment.
     let provider = state
@@ -77,10 +69,12 @@ pub async fn chat_completions(
     if is_stream {
         let stream = provider.chat_stream(req).await.map_err(GatewayErrorReply)?;
         let sse_stream = sse_stream_from_chat_stream(stream);
-        let response = Sse::new(sse_stream).keep_alive(KeepAlive::default());
+        let guarded = GuardedStream::new(sse_stream, guard);
+        let response = Sse::new(guarded).keep_alive(KeepAlive::default());
         Ok(response.into_response())
     } else {
         let response = provider.chat(req).await.map_err(GatewayErrorReply)?;
+        // guard dropped here (non-streaming: request processing complete).
         Ok(Json(response).into_response())
     }
 }
@@ -112,7 +106,7 @@ pub async fn list_models(
             .collect()
     } else {
         // Restricted key — only show models the key has access to.
-        // Check both direct match and alias match (alias ↔ target).
+        // Check both direct match and alias match (alias <-> target).
         all_names
             .iter()
             .filter(|name| {
@@ -239,6 +233,130 @@ pub async fn admin_reload_config(
 }
 
 // ============================================================
+// Admin: Plan Management
+// ============================================================
+
+/// PUT /admin/plans — create or update a rate limit plan.
+pub async fn admin_upsert_plan(
+    State(state): State<AppState>,
+    auth: RequiredAuth,
+    Json(plan): Json<RateLimitPlan>,
+) -> Result<Json<serde_json::Value>, GatewayErrorReply> {
+    require_master(auth.identity())?;
+    let name = plan.name.clone();
+    state.plan_store.upsert_plan(plan);
+    tracing::info!(plan = %name, "Plan upserted");
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "message": format!("Plan '{}' saved", name),
+    })))
+}
+
+/// GET /admin/plans — list all plans.
+pub async fn admin_list_plans(
+    State(state): State<AppState>,
+    auth: RequiredAuth,
+) -> Result<Json<serde_json::Value>, GatewayErrorReply> {
+    require_master(auth.identity())?;
+    let plans = state.plan_store.list_plans();
+    Ok(Json(serde_json::json!({ "plans": plans })))
+}
+
+/// DELETE /admin/plans/{name} — delete a plan (clears key assignments).
+pub async fn admin_delete_plan(
+    State(state): State<AppState>,
+    auth: RequiredAuth,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, GatewayErrorReply> {
+    require_master(auth.identity())?;
+    if state.plan_store.delete_plan(&name) {
+        tracing::info!(plan = %name, "Plan deleted");
+        Ok(Json(serde_json::json!({
+            "status": "ok",
+            "message": format!("Plan '{}' deleted", name),
+        })))
+    } else {
+        Err(GatewayErrorReply(GatewayError::ConfigError(format!(
+            "Plan '{}' not found",
+            name
+        ))))
+    }
+}
+
+/// POST /admin/plans/assign — assign a key to a plan.
+#[derive(serde::Deserialize)]
+pub(crate) struct AssignRequest {
+    key_hash: String,
+    plan_name: String,
+}
+
+pub async fn admin_assign_key(
+    State(state): State<AppState>,
+    auth: RequiredAuth,
+    Json(body): Json<AssignRequest>,
+) -> Result<Json<serde_json::Value>, GatewayErrorReply> {
+    require_master(auth.identity())?;
+    state
+        .plan_store
+        .assign_key(&body.key_hash, &body.plan_name)
+        .map_err(|e| GatewayErrorReply(GatewayError::ConfigError(e)))?;
+    tracing::info!(key_hash = %body.key_hash, plan = %body.plan_name, "Key assigned to plan");
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "message": format!("Key '{}' assigned to plan '{}'", body.key_hash, body.plan_name),
+    })))
+}
+
+/// DELETE /admin/plans/assign/{key_hash} — unassign a key from its plan.
+pub async fn admin_unassign_key(
+    State(state): State<AppState>,
+    auth: RequiredAuth,
+    Path(key_hash): Path<String>,
+) -> Result<Json<serde_json::Value>, GatewayErrorReply> {
+    require_master(auth.identity())?;
+    if state.plan_store.unassign_key(&key_hash) {
+        tracing::info!(key_hash = %key_hash, "Key unassigned from plan");
+        Ok(Json(serde_json::json!({
+            "status": "ok",
+            "message": format!("Key '{}' unassigned", key_hash),
+        })))
+    } else {
+        Err(GatewayErrorReply(GatewayError::ConfigError(format!(
+            "Key '{}' not assigned to any plan",
+            key_hash
+        ))))
+    }
+}
+
+/// GET /admin/plans/assignments — list all key-to-plan assignments.
+pub async fn admin_list_assignments(
+    State(state): State<AppState>,
+    auth: RequiredAuth,
+) -> Result<Json<serde_json::Value>, GatewayErrorReply> {
+    require_master(auth.identity())?;
+    let assignments = state.plan_store.list_assignments();
+    let data: Vec<_> = assignments
+        .into_iter()
+        .map(|(key_hash, plan_name)| {
+            serde_json::json!({
+                "key_hash": key_hash,
+                "plan_name": plan_name,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "assignments": data })))
+}
+
+fn require_master(identity: &AuthIdentity) -> Result<(), GatewayErrorReply> {
+    if identity.key_hash != "master" {
+        return Err(GatewayErrorReply(GatewayError::AuthError(
+            "Only master key can manage plans".to_string(),
+        )));
+    }
+    Ok(())
+}
+
+// ============================================================
 // Error Response — wrapper to satisfy Rust's orphan rules.
 // ============================================================
 
@@ -286,15 +404,15 @@ impl From<GatewayError> for GatewayErrorReply {
 /// configured deployments and model aliases.
 ///
 /// Logic:
-/// 1. Unrestricted key (models empty after resolution) → allow
-/// 2. Model in key_models → allow (direct match)
+/// 1. Unrestricted key (models empty after resolution) -> allow
+/// 2. Model in key_models -> allow (direct match)
 /// 3. Alias match: if model is an alias, check if target is in key_models
-/// 4. Reverse alias: if key_models contains an alias that targets this model → allow
-/// 5. Model NOT in key_models but IS configured in gateway → REJECT
+/// 4. Reverse alias: if key_models contains an alias that targets this model -> allow
+/// 5. Model NOT in key_models but IS configured in gateway -> REJECT
 ///    (model exists, user has no access)
-/// 6. Model NOT in key_models and NOT in gateway, but key has "*" → allow
+/// 6. Model NOT in key_models and NOT in gateway, but key has "*" -> allow
 ///    (best-effort: route through catch-all deployment)
-/// 7. Otherwise → REJECT
+/// 7. Otherwise -> REJECT
 fn check_model_access<V>(
     identity: &AuthIdentity,
     model: &str,
@@ -319,11 +437,11 @@ fn check_model_access<V>(
         return Ok(());
     }
 
-    // Alias match: requested model is an alias → check if target is in key_models
+    // Alias match: requested model is an alias -> check if target is in key_models
     if let Some(target) = model_aliases.get(model) {
         if identity.models.iter().any(|m| m == target) {
             tracing::info!(
-                "check_model_access: key={:?}, model={}, result=allow (alias → target={})",
+                "check_model_access: key={:?}, model={}, result=allow (alias -> target={})",
                 identity.key_name, model, target
             );
             return Ok(());
@@ -335,7 +453,7 @@ fn check_model_access<V>(
         if let Some(target) = model_aliases.get(allowed) {
             if target == model {
                 tracing::info!(
-                    "check_model_access: key={:?}, model={}, result=allow (key has alias '{}' → this model)",
+                    "check_model_access: key={:?}, model={}, result=allow (key has alias '{}' -> this model)",
                     identity.key_name, model, allowed
                 );
                 return Ok(());
@@ -348,7 +466,7 @@ fn check_model_access<V>(
     let model_configured = deployments.contains_key(model);
 
     if model_configured {
-        // Model exists in config but user doesn't have access → REJECT
+        // Model exists in config but user doesn't have access -> REJECT
         tracing::warn!(
             "check_model_access: key={:?}, model={}, result=deny (configured model, not in key_models={:?})",
             identity.key_name, model, identity.models
@@ -357,7 +475,7 @@ fn check_model_access<V>(
     }
 
     if has_wildcard {
-        // Model not in config, user has "*" → allow (route through catch-all)
+        // Model not in config, user has "*" -> allow (route through catch-all)
         tracing::info!(
             "check_model_access: key={:?}, model={}, result=allow (wildcard fallback)",
             identity.key_name, model
@@ -370,6 +488,102 @@ fn check_model_access<V>(
         identity.key_name, model, identity.models
     );
     Err(GatewayError::ModelNotAllowed(model.to_string()))
+}
+
+// ============================================================
+// Plan-based Rate Limiting Helper
+// ============================================================
+
+/// Check plan-based limits if a plan is assigned, otherwise fall back to
+/// default per-model rate limits.
+///
+/// Returns `Some(ConcurrencyGuard)` when a plan with concurrency_limit is
+/// assigned (guard must live until the request completes / stream ends).
+async fn check_plan_or_default_limits(
+    plan_store: &Arc<PlanStore>,
+    limiter: &Arc<boom_limiter::SlidingWindowLimiter>,
+    key_hash: &str,
+    model: &str,
+    rpm_limit: Option<u64>,
+    window_limits: &[(u64, u64)],
+) -> Result<Option<ConcurrencyGuard>, GatewayError> {
+    // Three-level fallback: explicit assignment → default plan → config-level limits.
+    let plan = plan_store
+        .resolve_plan(key_hash)
+        .or_else(|| plan_store.get_default_plan());
+
+    match plan {
+        Some(plan) => {
+            let (concurrency_limit, rpm_limit, window_limits) = plan.effective_limits();
+            tracing::debug!(
+                key_hash = %key_hash,
+                plan = %plan.name,
+                "Using plan-based rate limits"
+            );
+
+            // 1. Concurrency check.
+            let guard = if let Some(limit) = concurrency_limit {
+                Some(plan_store.try_acquire(key_hash, limit).ok_or_else(|| {
+                    GatewayError::ConcurrencyExceeded {
+                        limit,
+                        message: format!(
+                            "Concurrency limit exceeded. Limit: {}",
+                            limit
+                        ),
+                    }
+                })?)
+            } else {
+                None
+            };
+
+            // 2. Plan rate limits (per key, model set to __plan__ to isolate from per-model counters).
+            let rl_key = RateLimitKey {
+                key_hash: key_hash.to_string(),
+                model: "__plan__".to_string(),
+            };
+
+            let decision = limiter
+                .check_and_record(&rl_key, rpm_limit, &window_limits)
+                .await?;
+
+            if !decision.allowed {
+                // Window exceeded — release concurrency slot.
+                drop(guard);
+                return Err(GatewayError::RateLimitExceeded {
+                    retry_after_secs: decision.retry_after_secs,
+                    message: format!(
+                        "Rate limit exceeded. Limit: {} per minute.",
+                        decision.limit
+                    ),
+                });
+            }
+
+            Ok(guard)
+        }
+        None => {
+            // No plan assigned — use default per-model rate limits.
+            let rl_key = RateLimitKey {
+                key_hash: key_hash.to_string(),
+                model: model.to_string(),
+            };
+
+            let decision = limiter
+                .check_and_record(&rl_key, rpm_limit, window_limits)
+                .await?;
+
+            if !decision.allowed {
+                return Err(GatewayError::RateLimitExceeded {
+                    retry_after_secs: decision.retry_after_secs,
+                    message: format!(
+                        "Rate limit exceeded. Limit: {} per minute.",
+                        decision.limit
+                    ),
+                });
+            }
+
+            Ok(None)
+        }
+    }
 }
 
 // ============================================================
@@ -410,12 +624,7 @@ pub async fn messages(
     check_model_access(identity, &openai_req.model, &inner.deployments, &inner.model_aliases)
         .map_err(AnthropicErrorReply)?;
 
-    // 2. Rate limit check.
-    let rl_key = RateLimitKey {
-        key_hash: identity.key_hash.clone(),
-        model: openai_req.model.clone(),
-    };
-
+    // 2. Plan-based or default rate limiting.
     let window_limits: Vec<(u64, u64)> = inner
         .config
         .rate_limit
@@ -430,21 +639,16 @@ pub async fn messages(
         })
         .collect();
 
-    let decision = state
-        .limiter
-        .check_and_record(&rl_key, identity.rpm_limit, &window_limits)
-        .await
-        .map_err(AnthropicErrorReply)?;
-
-    if !decision.allowed {
-        return Err(AnthropicErrorReply(GatewayError::RateLimitExceeded {
-            retry_after_secs: decision.retry_after_secs,
-            message: format!(
-                "Rate limit exceeded. Limit: {} per minute.",
-                decision.limit
-            ),
-        }));
-    }
+    let guard = check_plan_or_default_limits(
+        &state.plan_store,
+        &state.limiter,
+        &identity.key_hash,
+        &openai_req.model,
+        identity.rpm_limit,
+        &window_limits,
+    )
+    .await
+    .map_err(AnthropicErrorReply)?;
 
     // 3. Select provider deployment.
     let provider = state
@@ -458,7 +662,8 @@ pub async fn messages(
         let model = openai_req.model.clone();
         let stream = provider.chat_stream(openai_req).await.map_err(AnthropicErrorReply)?;
         let sse_stream = sse_stream_from_anthropic_chat_stream(stream, model);
-        let response = Sse::new(sse_stream).keep_alive(KeepAlive::default());
+        let guarded = GuardedStream::new(sse_stream, guard);
+        let response = Sse::new(guarded).keep_alive(KeepAlive::default());
         Ok(response.into_response())
     } else {
         let response = provider.chat(openai_req).await.map_err(AnthropicErrorReply)?;

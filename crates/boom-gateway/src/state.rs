@@ -2,7 +2,7 @@ use arc_swap::ArcSwap;
 use boom_auth::DbAuthenticator;
 use boom_config::Config;
 use boom_core::provider::{Authenticator, Provider};
-use boom_limiter::SlidingWindowLimiter;
+use boom_limiter::{PlanStore, RateLimitPlan, ScheduleSlot, SlidingWindowLimiter};
 use boom_provider;
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
@@ -27,6 +27,8 @@ pub struct AppState {
     pub db_pool: Option<PgPool>,
     /// Limiter survives reloads (preserves in-flight counters).
     pub limiter: Arc<SlidingWindowLimiter>,
+    /// Plan store survives reloads (preserves plan definitions and key assignments).
+    pub plan_store: Arc<PlanStore>,
 }
 
 /// The state that gets swapped on config reload.
@@ -93,6 +95,9 @@ impl AppState {
         // 2. Limiter survives across reloads.
         let limiter = Arc::new(SlidingWindowLimiter::new());
 
+        // 3. Plan store survives across reloads.
+        let plan_store = Arc::new(PlanStore::new());
+
         // 3. Build inner state.
         let inner = Self::build_inner(
             config,
@@ -102,11 +107,15 @@ impl AppState {
             0,
         )?;
 
+        // 4. Load plans from config into plan store.
+        load_plans_from_config(&plan_store, &inner.config);
+
         Ok(Self {
             config_path,
             inner: Arc::new(ArcSwap::from_pointee(inner)),
             db_pool,
             limiter,
+            plan_store,
         })
     }
 
@@ -152,7 +161,10 @@ impl AppState {
             new_reload_count,
         )?;
 
-        // 5. Atomic swap — new requests immediately see new state.
+        // 5. Reload plans from config.
+        load_plans_from_config(&self.plan_store, &new_inner.config);
+
+        // 6. Atomic swap — new requests immediately see new state.
         self.inner.store(Arc::new(new_inner));
 
         let summary = format!(
@@ -303,5 +315,78 @@ impl AppState {
         let selected = providers[*idx % providers.len()].clone();
         *idx = (*idx + 1) % providers.len();
         Some(selected)
+    }
+}
+
+/// Convert config schedule slots into limiter schedule slots.
+fn convert_schedule(slots: &[boom_config::ScheduleSlotConfig]) -> Vec<ScheduleSlot> {
+    slots
+        .iter()
+        .map(|s| ScheduleSlot {
+            hours: s.hours.clone(),
+            concurrency_limit: s.concurrency_limit,
+            rpm_limit: s.rpm_limit,
+            window_limits: s
+                .window_limits
+                .iter()
+                .filter_map(|w| {
+                    if w.len() >= 2 {
+                        Some((w[0], w[1]))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Load plans from YAML config into PlanStore.
+/// Upserts config-defined plans and sets the default plan.
+fn load_plans_from_config(plan_store: &Arc<PlanStore>, config: &Config) {
+    // Upsert plans defined in config.
+    for (name, pc) in &config.plan_settings.plans {
+        let window_limits: Vec<(u64, u64)> = pc
+            .window_limits
+            .iter()
+            .filter_map(|w| {
+                if w.len() >= 2 {
+                    Some((w[0], w[1]))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let plan = RateLimitPlan {
+            name: name.clone(),
+            concurrency_limit: pc.concurrency_limit,
+            rpm_limit: pc.rpm_limit,
+            window_limits,
+            schedule: convert_schedule(&pc.schedule),
+        };
+        plan_store.upsert_plan(plan);
+        tracing::info!(plan = %name, "Loaded plan from config");
+    }
+
+    // Set default plan.
+    match &config.plan_settings.default_plan {
+        Some(dp) => {
+            if plan_store.get_plan(dp).is_some() {
+                plan_store.set_default_plan(Some(dp.clone()));
+                tracing::info!(default_plan = %dp, "Default plan set");
+            } else {
+                tracing::warn!(
+                    default_plan = %dp,
+                    "default_plan '{}' not found in configured plans, ignoring",
+                    dp
+                );
+                plan_store.set_default_plan(None);
+            }
+        }
+        None => {
+            plan_store.set_default_plan(None);
+            tracing::warn!("没有默认套餐配置，所有用户将无套餐限制。");
+        }
     }
 }
