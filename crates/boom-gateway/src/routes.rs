@@ -96,25 +96,15 @@ pub async fn list_models(
     let identity = auth.identity();
     let inner = state.inner.load();
 
+    // Collect all explicitly configured model names (exclude the catch-all "*").
     let all_keys: Vec<&String> = inner
         .deployments
         .keys()
-        .filter(|k| *k != "*") // don't expose the catch-all entry itself
+        .filter(|k| *k != "*")
         .collect();
 
     let visible: Vec<ModelInfo> = if identity.models.is_empty() {
-        // Unrestricted — show all.
-        all_keys
-            .iter()
-            .map(|name| ModelInfo {
-                id: (*name).clone(),
-                object: "model".to_string(),
-                created: 0,
-                owned_by: "boom-gateway".to_string(),
-            })
-            .collect()
-    } else if identity.models.iter().any(|m| m == "*") {
-        // Has wildcard — show all (user can access any via fallback).
+        // Unrestricted key — show all models.
         all_keys
             .iter()
             .map(|name| ModelInfo {
@@ -125,10 +115,11 @@ pub async fn list_models(
             })
             .collect()
     } else {
-        // Only show models the user has explicit access to.
+        // Restricted key — only show models explicitly in the allowed list.
+        // "*" is a routing fallback, NOT a display wildcard.
         all_keys
             .iter()
-            .filter(|name| identity.models.iter().any(|m| m == **name))
+            .filter(|name| identity.models.iter().any(|m| m == **name && m != "*"))
             .map(|name| ModelInfo {
                 id: (*name).clone(),
                 object: "model".to_string(),
