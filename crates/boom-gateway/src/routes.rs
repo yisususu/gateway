@@ -11,6 +11,7 @@ use boom_core::provider::RateLimiter;
 use boom_core::types::*;
 use boom_core::GatewayError;
 use futures::StreamExt;
+use std::collections::HashMap;
 use std::convert::Infallible;
 
 // ============================================================
@@ -25,10 +26,8 @@ pub async fn chat_completions(
     let identity = auth.identity();
     let inner = state.inner.load();
 
-    // 1. Model access check.
-    inner
-        .auth
-        .check_model_access(identity, &req.model)
+    // 1. Model access check (deployment-aware).
+    check_model_access(identity, &req.model, &inner.deployments)
         .map_err(GatewayErrorReply)?;
 
     // 2. Rate limit check.
@@ -239,6 +238,73 @@ impl From<GatewayError> for GatewayErrorReply {
 }
 
 // ============================================================
+// Model Access Check (deployment-aware)
+// ============================================================
+
+/// Check if an identity can access the given model, considering the gateway's
+/// configured deployments.
+///
+/// Logic:
+/// 1. Unrestricted key (models empty after resolution) → allow
+/// 2. Model in key_models → allow (direct match)
+/// 3. Model NOT in key_models but IS configured in gateway → REJECT
+///    (model exists, user has no access)
+/// 4. Model NOT in key_models and NOT in gateway, but key has "*" → allow
+///    (best-effort: route through catch-all deployment)
+/// 5. Otherwise → REJECT
+fn check_model_access<V>(
+    identity: &AuthIdentity,
+    model: &str,
+    deployments: &HashMap<String, V>,
+) -> Result<(), GatewayError> {
+    // Unrestricted key
+    if identity.models.is_empty() {
+        tracing::info!(
+            "check_model_access: key={:?}, model={}, result=allow (unrestricted)",
+            identity.key_name, model
+        );
+        return Ok(());
+    }
+
+    // Direct match
+    if identity.models.iter().any(|m| m == model) {
+        tracing::info!(
+            "check_model_access: key={:?}, model={}, result=allow (direct match)",
+            identity.key_name, model
+        );
+        return Ok(());
+    }
+
+    // Not in key_models — check if it's a configured model or a wildcard case
+    let has_wildcard = identity.models.iter().any(|m| m == "*");
+    let model_configured = deployments.contains_key(model);
+
+    if model_configured {
+        // Model exists in config but user doesn't have access → REJECT
+        tracing::warn!(
+            "check_model_access: key={:?}, model={}, result=deny (configured model, not in key_models={:?})",
+            identity.key_name, model, identity.models
+        );
+        return Err(GatewayError::ModelNotAllowed(model.to_string()));
+    }
+
+    if has_wildcard {
+        // Model not in config, user has "*" → allow (route through catch-all)
+        tracing::info!(
+            "check_model_access: key={:?}, model={}, result=allow (wildcard fallback)",
+            identity.key_name, model
+        );
+        return Ok(());
+    }
+
+    tracing::warn!(
+        "check_model_access: key={:?}, model={}, result=deny (no match, no wildcard, key_models={:?})",
+        identity.key_name, model, identity.models
+    );
+    Err(GatewayError::ModelNotAllowed(model.to_string()))
+}
+
+// ============================================================
 // Helpers
 // ============================================================
 
@@ -272,10 +338,8 @@ pub async fn messages(
     let identity = auth.identity();
     let inner = state.inner.load();
 
-    // 1. Model access check.
-    inner
-        .auth
-        .check_model_access(identity, &openai_req.model)
+    // 1. Model access check (deployment-aware).
+    check_model_access(identity, &openai_req.model, &inner.deployments)
         .map_err(AnthropicErrorReply)?;
 
     // 2. Rate limit check.

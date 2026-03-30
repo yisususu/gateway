@@ -254,11 +254,13 @@ impl AuthIdentity {
     /// - "all-proxy-models" → cleared (all allowed)
     /// - Empty list → all models allowed
     /// - Non-empty list → exact match or wildcard "*"
+    /// Simple direct-match check (used internally).
+    /// Deployment-aware wildcard logic is handled in the route handler.
     pub fn can_call_model(&self, model: &str) -> bool {
         if self.models.is_empty() {
             return true;
         }
-        self.models.iter().any(|m| m == model || m == "*")
+        self.models.iter().any(|m| m == model)
     }
 
     /// Check if the key has expired.

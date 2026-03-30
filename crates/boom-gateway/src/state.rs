@@ -211,10 +211,23 @@ impl AppState {
         })
     }
 
-    /// Select a provider deployment for the given model (round-robin).
+    /// Select a provider deployment for the given model.
+    ///
+    /// 1. Try exact match on model name.
+    /// 2. If not found, fall back to the "*" catch-all deployment (if configured).
+    ///    Round-robin within the selected deployment group.
     pub fn select_deployment(&self, model: &str) -> Option<Arc<dyn Provider>> {
         let inner = self.inner.load();
-        let providers = inner.deployments.get(model)?;
+
+        // Exact match first, then fallback to catch-all "*".
+        let (key, providers) = if let Some(p) = inner.deployments.get(model) {
+            (model, p)
+        } else {
+            inner
+                .deployments
+                .get("*")
+                .map(|p| ("*", p))?
+        };
 
         if providers.is_empty() {
             return None;
@@ -224,7 +237,7 @@ impl AppState {
         }
 
         let mut counters = inner.rr_counters.lock().unwrap();
-        let idx = counters.entry(model.to_string()).or_insert(0);
+        let idx = counters.entry(key.to_string()).or_insert(0);
         let selected = providers[*idx % providers.len()].clone();
         *idx = (*idx + 1) % providers.len();
         Some(selected)
