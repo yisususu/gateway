@@ -16,6 +16,7 @@ use std::sync::Arc;
 ///   - `openai/gpt-4` → provider=openai, model=gpt-4
 ///   - `gpt-4` → auto-detected as openai, model=gpt-4
 ///   - `anthropic/claude-sonnet-4-20250514` → provider=anthropic
+///   - `hosted_vllm/my-model` → OpenAI-compatible provider
 pub fn create_provider(
     model: &str,
     api_key: Option<String>,
@@ -31,12 +32,49 @@ pub fn create_provider(
     let (provider_type, actual_model) = parse_model_provider(model);
 
     match provider_type {
-        "openai" => Ok(Arc::new(openai::OpenAIProvider::new(
-            client,
-            api_key,
-            api_base,
-            &actual_model,
-        ))),
+        // All OpenAI-compatible providers share the same API format.
+        // They just use different api_base / api_key.
+        "openai"
+        | "hosted_vllm"
+        | "vllm"
+        | "ollama"
+        | "ollama_chat"
+        | "deepseek"
+        | "groq"
+        | "together_ai"
+        | "fireworks_ai"
+        | "perplexity"
+        | "anyscale"
+        | "deepinfra"
+        | "lm_studio"
+        | "llamafile"
+        | "xinference"
+        | "sambanova"
+        | "cerebras"
+        | "nvidia_nim"
+        | "codestral"
+        | "volcengine"
+        | "dashscope"
+        | "moonshot"
+        | "xai"
+        | "ai21"
+        | "ai21_chat" => {
+            // hosted_vllm/ollama etc. may not require an API key.
+            // If none provided, use a placeholder so the provider still works.
+            let key = api_key.or_else(|| {
+                if provider_type != "openai" {
+                    Some("fake-api-key".to_string())
+                } else {
+                    None
+                }
+            });
+            Ok(Arc::new(openai::OpenAIProvider::new(
+                client,
+                key,
+                api_base,
+                &actual_model,
+            )))
+        }
         "anthropic" => Ok(Arc::new(anthropic::AnthropicProvider::new(
             client,
             api_key,
@@ -70,7 +108,7 @@ pub fn create_provider(
             )))
         }
         _ => Err(GatewayError::ConfigError(format!(
-            "Unknown provider: '{}'. Use prefix like openai/gpt-4, anthropic/claude-3, etc.",
+            "Unknown provider: '{}'. Supported: openai, anthropic, azure, gemini, bedrock, hosted_vllm, vllm, ollama, deepseek, groq, etc.",
             provider_type
         ))),
     }
@@ -109,6 +147,12 @@ fn auto_detect_provider(model: &str) -> &'static str {
         || lower.starts_with("mistral.")
     {
         "bedrock"
+    } else if lower.starts_with("deepseek") {
+        "deepseek"
+    } else if lower.starts_with("llama") || lower.starts_with("qwen") || lower.starts_with("yi-") {
+        // Common open-weights models typically served via vLLM/Ollama.
+        // Default to OpenAI-compatible since vLLM uses OpenAI format.
+        "openai"
     } else {
         tracing::warn!(
             "Cannot auto-detect provider for '{}', defaulting to openai",
