@@ -65,6 +65,7 @@ fn build_router(state: AppState) -> Router {
     // Public OpenAI-compatible API routes.
     let api_routes = Router::new()
         .route("/v1/chat/completions", post(routes::chat_completions))
+        .route("/v1/messages", post(routes::messages))
         .route("/v1/models", get(routes::list_models));
 
     // Health check routes (no auth required).

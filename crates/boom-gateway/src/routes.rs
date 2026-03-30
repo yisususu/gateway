@@ -4,6 +4,9 @@ use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
+use boom_core::anthropic::{
+    anthropic_request_to_openai, openai_response_to_anthropic, AnthropicStreamTranscoder,
+};
 use boom_core::provider::RateLimiter;
 use boom_core::types::*;
 use boom_core::GatewayError;
@@ -254,4 +257,165 @@ fn sse_stream_from_chat_stream(
             Ok(Event::default().data(error_data))
         }
     })
+}
+
+// ============================================================
+// Anthropic Messages
+// ============================================================
+
+pub async fn messages(
+    State(state): State<AppState>,
+    auth: RequiredAuth,
+    Json(req): Json<AnthropicMessagesRequest>,
+) -> Result<impl IntoResponse, AnthropicErrorReply> {
+    let openai_req = anthropic_request_to_openai(&req);
+    let identity = auth.identity();
+    let inner = state.inner.load();
+
+    // 1. Model access check.
+    inner
+        .auth
+        .check_model_access(identity, &openai_req.model)
+        .map_err(AnthropicErrorReply)?;
+
+    // 2. Rate limit check.
+    let rl_key = RateLimitKey {
+        key_hash: identity.key_hash.clone(),
+        model: openai_req.model.clone(),
+    };
+
+    let window_limits: Vec<(u64, u64)> = inner
+        .config
+        .rate_limit
+        .window_limits
+        .iter()
+        .filter_map(|w| {
+            if w.len() >= 2 {
+                Some((w[0], w[1]))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let decision = state
+        .limiter
+        .check_and_record(&rl_key, identity.rpm_limit, &window_limits)
+        .await
+        .map_err(AnthropicErrorReply)?;
+
+    if !decision.allowed {
+        return Err(AnthropicErrorReply(GatewayError::RateLimitExceeded {
+            retry_after_secs: decision.retry_after_secs,
+            message: format!(
+                "Rate limit exceeded. Limit: {} per minute.",
+                decision.limit
+            ),
+        }));
+    }
+
+    // 3. Select provider deployment.
+    let provider = state
+        .select_deployment(&openai_req.model)
+        .ok_or_else(|| AnthropicErrorReply(GatewayError::ModelNotFound(openai_req.model.clone())))?;
+
+    // 4. Route to provider.
+    let is_stream = openai_req.stream.unwrap_or(false);
+
+    if is_stream {
+        let model = openai_req.model.clone();
+        let stream = provider.chat_stream(openai_req).await.map_err(AnthropicErrorReply)?;
+        let sse_stream = sse_stream_from_anthropic_chat_stream(stream, model);
+        let response = Sse::new(sse_stream).keep_alive(KeepAlive::default());
+        Ok(response.into_response())
+    } else {
+        let response = provider.chat(openai_req).await.map_err(AnthropicErrorReply)?;
+        let anthropic_resp = openai_response_to_anthropic(&response);
+        Ok(Json(anthropic_resp).into_response())
+    }
+}
+
+/// Convert an OpenAI stream into Anthropic-format SSE events via a transcoder + channel.
+fn sse_stream_from_anthropic_chat_stream(
+    stream: ChatStream,
+    model: String,
+) -> impl futures::Stream<Item = Result<Event, Infallible>> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
+
+    tokio::spawn(async move {
+        let mut transcoder = AnthropicStreamTranscoder::new(model);
+        let mut stream = std::pin::pin!(stream);
+
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(chunk) => {
+                    let events = transcoder.transcode(&chunk);
+                    for ev in events {
+                        let axum_event = Event::default()
+                            .event(&ev.event)
+                            .data(ev.data);
+                        if tx.send(axum_event).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let error_data = serde_json::json!({
+                        "type": "error",
+                        "error": { "type": "api_error", "message": e.to_string() }
+                    });
+                    let _ = tx
+                        .send(
+                            Event::default()
+                                .event("error")
+                                .data(error_data.to_string()),
+                        )
+                        .await;
+                    return;
+                }
+            }
+        }
+    });
+
+    tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok)
+}
+
+// ============================================================
+// Anthropic Error Response
+// ============================================================
+
+pub struct AnthropicErrorReply(pub GatewayError);
+
+impl IntoResponse for AnthropicErrorReply {
+    fn into_response(self) -> axum::response::Response {
+        let status = axum::http::StatusCode::from_u16(self.0.status_code())
+            .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": self.0.error_type(),
+                "message": self.0.to_string(),
+            }
+        });
+
+        let mut response = (status, Json(body)).into_response();
+        if let GatewayError::RateLimitExceeded {
+            retry_after_secs: Some(secs),
+            ..
+        } = self.0
+        {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                secs.to_string().parse().unwrap(),
+            );
+        }
+        response
+    }
+}
+
+impl From<GatewayError> for AnthropicErrorReply {
+    fn from(e: GatewayError) -> Self {
+        AnthropicErrorReply(e)
+    }
 }
