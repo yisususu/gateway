@@ -5,7 +5,7 @@ use boom_core::provider::{Authenticator, Provider};
 use boom_limiter::SlidingWindowLimiter;
 use boom_provider;
 use sqlx::PgPool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Shared application state.
@@ -38,6 +38,31 @@ pub struct AppStateInner {
     pub rr_counters: std::sync::Mutex<HashMap<String, usize>>,
     pub auth: Arc<dyn Authenticator>,
     pub health: HealthStatus,
+    /// alias_name → target_model_name (all aliases, including hidden).
+    pub model_aliases: HashMap<String, String>,
+    /// Alias names that should NOT appear in model list.
+    pub hidden_aliases: HashSet<String>,
+}
+
+impl AppStateInner {
+    /// Return all model names that should be visible in the model list.
+    /// Includes deployment keys (except "*") plus non-hidden aliases.
+    pub fn visible_model_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .deployments
+            .keys()
+            .filter(|k| *k != "*")
+            .cloned()
+            .collect();
+
+        for alias in self.model_aliases.keys() {
+            if !self.hidden_aliases.contains(alias) {
+                names.push(alias.clone());
+            }
+        }
+
+        names
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -195,6 +220,30 @@ impl AppState {
             deployments.values().map(|v| v.len()).sum::<usize>(),
         );
 
+        // Build model alias mappings from config.
+        let mut model_aliases: HashMap<String, String> = HashMap::new();
+        let mut hidden_aliases: HashSet<String> = HashSet::new();
+        for (alias, alias_cfg) in &config.router_settings.model_group_alias {
+            let target = alias_cfg.target_model();
+            if !deployments.contains_key(target) {
+                tracing::warn!(
+                    "Skipping alias '{}' → '{}': target model not found in deployments",
+                    alias, target
+                );
+                continue;
+            }
+            tracing::info!("Model alias: '{}' → '{}'", alias, target);
+            model_aliases.insert(alias.clone(), target.to_string());
+            if alias_cfg.is_hidden() {
+                hidden_aliases.insert(alias.clone());
+            }
+        }
+        tracing::info!(
+            "Loaded {} model alias(es), {} hidden",
+            model_aliases.len(),
+            hidden_aliases.len(),
+        );
+
         let health = HealthStatus {
             started_at,
             last_reload_at: chrono::Utc::now(),
@@ -208,20 +257,33 @@ impl AppState {
             rr_counters: std::sync::Mutex::new(HashMap::new()),
             auth,
             health,
+            model_aliases,
+            hidden_aliases,
         })
     }
 
     /// Select a provider deployment for the given model.
     ///
     /// 1. Try exact match on model name.
-    /// 2. If not found, fall back to the "*" catch-all deployment (if configured).
+    /// 2. If not found, try resolving via model alias.
+    /// 3. If still not found, fall back to the "*" catch-all deployment (if configured).
     ///    Round-robin within the selected deployment group.
     pub fn select_deployment(&self, model: &str) -> Option<Arc<dyn Provider>> {
         let inner = self.inner.load();
 
-        // Exact match first, then fallback to catch-all "*".
+        // Exact match first, then alias resolution, then fallback to catch-all "*".
         let (key, providers) = if let Some(p) = inner.deployments.get(model) {
             (model, p)
+        } else if let Some(target) = inner.model_aliases.get(model) {
+            if let Some(p) = inner.deployments.get(target.as_str()) {
+                (target.as_str(), p)
+            } else {
+                // Alias target not in deployments — should have been warned during build.
+                inner
+                    .deployments
+                    .get("*")
+                    .map(|p| ("*", p))?
+            }
         } else {
             inner
                 .deployments

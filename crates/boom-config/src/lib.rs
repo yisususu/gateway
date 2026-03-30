@@ -152,11 +152,46 @@ impl Default for GeneralSettings {
     }
 }
 
+/// Model alias configuration — supports both simple string and extended format with `hidden`.
+///
+/// Examples in YAML:
+///   Simple:    `"gpt-4": "gpt-4o"`
+///   Extended:  `"GPT-4": { model: "gpt-4o", hidden: true }`
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum ModelGroupAlias {
+    Simple(String),
+    Extended {
+        model: String,
+        #[serde(default)]
+        hidden: bool,
+    },
+}
+
+impl ModelGroupAlias {
+    pub fn target_model(&self) -> &str {
+        match self {
+            ModelGroupAlias::Simple(s) => s,
+            ModelGroupAlias::Extended { model, .. } => model,
+        }
+    }
+
+    pub fn is_hidden(&self) -> bool {
+        match self {
+            ModelGroupAlias::Simple(_) => false,
+            ModelGroupAlias::Extended { hidden, .. } => *hidden,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct RouterSettings {
     /// Routing strategy: round_robin, least_latency, least_busy, fallback.
     #[serde(default = "default_routing_strategy")]
     pub routing_strategy: String,
+    /// Model group aliases: alias_name → target_model_name.
+    #[serde(default)]
+    pub model_group_alias: HashMap<String, ModelGroupAlias>,
 }
 
 fn default_routing_strategy() -> String {

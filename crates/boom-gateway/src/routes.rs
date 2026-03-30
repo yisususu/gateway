@@ -26,8 +26,8 @@ pub async fn chat_completions(
     let identity = auth.identity();
     let inner = state.inner.load();
 
-    // 1. Model access check (deployment-aware).
-    check_model_access(identity, &req.model, &inner.deployments)
+    // 1. Model access check (deployment-aware, alias-aware).
+    check_model_access(identity, &req.model, &inner.deployments, &inner.model_aliases)
         .map_err(GatewayErrorReply)?;
 
     // 2. Rate limit check.
@@ -96,32 +96,51 @@ pub async fn list_models(
     let identity = auth.identity();
     let inner = state.inner.load();
 
-    // Collect all explicitly configured model names (exclude the catch-all "*").
-    let all_keys: Vec<&String> = inner
-        .deployments
-        .keys()
-        .filter(|k| *k != "*")
-        .collect();
+    // Collect all visible model names (deployments + non-hidden aliases, excluding "*").
+    let all_names: Vec<String> = inner.visible_model_names();
 
     let visible: Vec<ModelInfo> = if identity.models.is_empty() {
-        // Unrestricted key — show all models.
-        all_keys
+        // Unrestricted key — show all visible models.
+        all_names
             .iter()
             .map(|name| ModelInfo {
-                id: (*name).clone(),
+                id: name.clone(),
                 object: "model".to_string(),
                 created: 0,
                 owned_by: "boom-gateway".to_string(),
             })
             .collect()
     } else {
-        // Restricted key — only show models explicitly in the allowed list.
-        // "*" is a routing fallback, NOT a display wildcard.
-        all_keys
+        // Restricted key — only show models the key has access to.
+        // Check both direct match and alias match (alias ↔ target).
+        all_names
             .iter()
-            .filter(|name| identity.models.iter().any(|m| m == **name && m != "*"))
+            .filter(|name| {
+                // Direct match in key's allowed list.
+                if identity.models.iter().any(|m| m == *name && m != "*") {
+                    return true;
+                }
+                // If name is an alias, check if key has access to target model.
+                if let Some(target) = inner.model_aliases.get(*name) {
+                    if identity.models.iter().any(|m| m == target && m != "*") {
+                        return true;
+                    }
+                }
+                // If name is a deployment (target), check if key has an alias that maps to it.
+                for allowed in &identity.models {
+                    if allowed == "*" {
+                        continue;
+                    }
+                    if let Some(target) = inner.model_aliases.get(allowed) {
+                        if target == *name {
+                            return true;
+                        }
+                    }
+                }
+                false
+            })
             .map(|name| ModelInfo {
-                id: (*name).clone(),
+                id: name.clone(),
                 object: "model".to_string(),
                 created: 0,
                 owned_by: "boom-gateway".to_string(),
@@ -264,20 +283,23 @@ impl From<GatewayError> for GatewayErrorReply {
 // ============================================================
 
 /// Check if an identity can access the given model, considering the gateway's
-/// configured deployments.
+/// configured deployments and model aliases.
 ///
 /// Logic:
 /// 1. Unrestricted key (models empty after resolution) → allow
 /// 2. Model in key_models → allow (direct match)
-/// 3. Model NOT in key_models but IS configured in gateway → REJECT
+/// 3. Alias match: if model is an alias, check if target is in key_models
+/// 4. Reverse alias: if key_models contains an alias that targets this model → allow
+/// 5. Model NOT in key_models but IS configured in gateway → REJECT
 ///    (model exists, user has no access)
-/// 4. Model NOT in key_models and NOT in gateway, but key has "*" → allow
+/// 6. Model NOT in key_models and NOT in gateway, but key has "*" → allow
 ///    (best-effort: route through catch-all deployment)
-/// 5. Otherwise → REJECT
+/// 7. Otherwise → REJECT
 fn check_model_access<V>(
     identity: &AuthIdentity,
     model: &str,
     deployments: &HashMap<String, V>,
+    model_aliases: &HashMap<String, String>,
 ) -> Result<(), GatewayError> {
     // Unrestricted key
     if identity.models.is_empty() {
@@ -295,6 +317,30 @@ fn check_model_access<V>(
             identity.key_name, model
         );
         return Ok(());
+    }
+
+    // Alias match: requested model is an alias → check if target is in key_models
+    if let Some(target) = model_aliases.get(model) {
+        if identity.models.iter().any(|m| m == target) {
+            tracing::info!(
+                "check_model_access: key={:?}, model={}, result=allow (alias → target={})",
+                identity.key_name, model, target
+            );
+            return Ok(());
+        }
+    }
+
+    // Reverse alias: key_models has an alias that targets the requested model
+    for allowed in &identity.models {
+        if let Some(target) = model_aliases.get(allowed) {
+            if target == model {
+                tracing::info!(
+                    "check_model_access: key={:?}, model={}, result=allow (key has alias '{}' → this model)",
+                    identity.key_name, model, allowed
+                );
+                return Ok(());
+            }
+        }
     }
 
     // Not in key_models — check if it's a configured model or a wildcard case
@@ -360,8 +406,8 @@ pub async fn messages(
     let identity = auth.identity();
     let inner = state.inner.load();
 
-    // 1. Model access check (deployment-aware).
-    check_model_access(identity, &openai_req.model, &inner.deployments)
+    // 1. Model access check (deployment-aware, alias-aware).
+    check_model_access(identity, &openai_req.model, &inner.deployments, &inner.model_aliases)
         .map_err(AnthropicErrorReply)?;
 
     // 2. Rate limit check.
