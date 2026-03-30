@@ -23,14 +23,15 @@ RUN touch src/main.rs && cargo build --release
 
 FROM openeuler/openeuler:24.03
 
-RUN dnf install -y ca-certificates && \
+RUN dnf install -y ca-certificates openssl-libs && \
     dnf clean all
 
 COPY --from=builder /app/target/release/gateway-lb /usr/bin/gateway-lb
 
-ENV BACKEND_ADDR=127.0.0.1:8080
-ENV LISTEN_PORT=6198
+COPY config.yaml /etc/gateway/routes.yaml
 
-EXPOSE 6198
+ENV CONFIG_PATH=/etc/gateway/routes.yaml
+
+EXPOSE 6198 6443
 
 CMD ["gateway-lb"]
