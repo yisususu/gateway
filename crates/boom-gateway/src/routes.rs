@@ -93,23 +93,54 @@ pub async fn list_models(
     State(state): State<AppState>,
     auth: RequiredAuth,
 ) -> Result<Json<serde_json::Value>, GatewayErrorReply> {
-    let _identity = auth.identity();
+    let identity = auth.identity();
     let inner = state.inner.load();
 
-    let models: Vec<ModelInfo> = inner
+    let all_keys: Vec<&String> = inner
         .deployments
         .keys()
-        .map(|name| ModelInfo {
-            id: name.clone(),
-            object: "model".to_string(),
-            created: 0,
-            owned_by: "boom-gateway".to_string(),
-        })
+        .filter(|k| *k != "*") // don't expose the catch-all entry itself
         .collect();
+
+    let visible: Vec<ModelInfo> = if identity.models.is_empty() {
+        // Unrestricted — show all.
+        all_keys
+            .iter()
+            .map(|name| ModelInfo {
+                id: (*name).clone(),
+                object: "model".to_string(),
+                created: 0,
+                owned_by: "boom-gateway".to_string(),
+            })
+            .collect()
+    } else if identity.models.iter().any(|m| m == "*") {
+        // Has wildcard — show all (user can access any via fallback).
+        all_keys
+            .iter()
+            .map(|name| ModelInfo {
+                id: (*name).clone(),
+                object: "model".to_string(),
+                created: 0,
+                owned_by: "boom-gateway".to_string(),
+            })
+            .collect()
+    } else {
+        // Only show models the user has explicit access to.
+        all_keys
+            .iter()
+            .filter(|name| identity.models.iter().any(|m| m == **name))
+            .map(|name| ModelInfo {
+                id: (*name).clone(),
+                object: "model".to_string(),
+                created: 0,
+                owned_by: "boom-gateway".to_string(),
+            })
+            .collect()
+    };
 
     Ok(Json(serde_json::json!({
         "object": "list",
-        "data": models,
+        "data": visible,
     })))
 }
 

@@ -219,6 +219,16 @@ impl Authenticator for DbAuthenticator {
             identity.models = vec![];
         }
 
+        // Fallback: if key.models is empty but team has models, use team's list.
+        // Matches litellm: key.models > team_models > proxy_model_list
+        if identity.models.is_empty() && !identity.team_models.is_empty() {
+            tracing::info!(
+                "Key {:?}: key.models empty, falling back to team_models → {:?}",
+                identity.key_name, identity.team_models
+            );
+            identity.models = identity.team_models.clone();
+        }
+
         if identity.blocked {
             return Err(GatewayError::KeyBlocked);
         }
