@@ -13,6 +13,7 @@ boom-config = { path = "../boom-config" }
 boom-auth = { path = "../boom-auth" }
 boom-provider = { path = "../boom-provider" }
 boom-limiter = { path = "../boom-limiter" }
+boom-dashboard = { path = "../boom-dashboard" }
 axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }

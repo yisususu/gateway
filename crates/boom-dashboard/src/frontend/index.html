@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BooMGateway Dashboard</title>
+  <link rel="stylesheet" href="/dashboard/style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Login Page -->
+    <div id="page-login" class="page active">
+      <div class="login-card">
+        <h1>BooMGateway</h1>
+        <p class="subtitle">API Gateway Dashboard</p>
+        <form id="login-form">
+          <div class="form-group">
+            <label for="user_id">User ID</label>
+            <input type="text" id="user_id" placeholder="admin" required>
+          </div>
+          <div class="form-group">
+            <label for="api_key">API Key</label>
+            <input type="password" id="api_key" placeholder="sk-... or master key" required>
+          </div>
+          <button type="submit" id="login-btn">Login</button>
+          <p id="login-error" class="error-msg hidden"></p>
+        </form>
+      </div>
+    </div>
+
+    <!-- User Dashboard -->
+    <div id="page-dashboard" class="page">
+      <div class="layout">
+        <aside class="sidebar">
+          <h2>Dashboard</h2>
+          <nav>
+            <a href="#/dashboard" class="nav-link active" data-section="user-overview">Overview</a>
+          </nav>
+          <div class="sidebar-footer">
+            <button id="logout-btn" class="btn-secondary">Logout</button>
+          </div>
+        </aside>
+        <main class="main-content">
+          <section id="user-overview" class="section active">
+            <h2>Plan & Usage</h2>
+            <div id="plan-card" class="card">
+              <h3>Current Plan</h3>
+              <div id="plan-info"><p class="loading">Loading...</p></div>
+            </div>
+            <div class="card">
+              <h3>Real-time Usage</h3>
+              <div id="usage-info"><p class="loading">Loading...</p></div>
+            </div>
+            <div class="card">
+              <h3>Key Information</h3>
+              <div id="key-info"><p class="loading">Loading...</p></div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <!-- Admin Panel -->
+    <div id="page-admin" class="page">
+      <div class="layout">
+        <aside class="sidebar">
+          <h2>Admin Panel</h2>
+          <nav>
+            <a href="#/admin/plans" class="nav-link" data-section="admin-plans">Plans</a>
+            <a href="#/admin/keys" class="nav-link" data-section="admin-keys">Keys</a>
+            <a href="#/admin/assignments" class="nav-link" data-section="admin-assignments">Assignments</a>
+          </nav>
+          <div class="sidebar-footer">
+            <button id="logout-btn-admin" class="btn-secondary">Logout</button>
+          </div>
+        </aside>
+        <main class="main-content">
+          <!-- Plans Section -->
+          <section id="admin-plans" class="section">
+            <div class="section-header">
+              <h2>Plans</h2>
+              <button class="btn-primary" id="btn-new-plan">+ New Plan</button>
+            </div>
+            <div id="plans-table-wrap"><p class="loading">Loading...</p></div>
+          </section>
+
+          <!-- Keys Section -->
+          <section id="admin-keys" class="section">
+            <div class="section-header">
+              <h2>API Keys</h2>
+              <button class="btn-primary" id="btn-new-key">+ Create Key</button>
+            </div>
+            <div id="keys-table-wrap"><p class="loading">Loading...</p></div>
+            <div id="keys-pagination" class="pagination"></div>
+          </section>
+
+          <!-- Assignments Section -->
+          <section id="admin-assignments" class="section">
+            <div class="section-header">
+              <h2>Key-Plan Assignments</h2>
+              <button class="btn-primary" id="btn-new-assignment">+ Assign</button>
+            </div>
+            <div id="assignments-table-wrap"><p class="loading">Loading...</p></div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <!-- Modal Overlay -->
+    <div id="modal-overlay" class="modal-overlay hidden">
+      <div class="modal" id="modal-content"></div>
+    </div>
+  </div>
+
+  <script src="/dashboard/app.js"></script>
+</body>
+</html>

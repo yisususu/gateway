@@ -3,8 +3,18 @@ use boom_core::types::{RateLimitDecision, RateLimitKey};
 use boom_core::GatewayError;
 use async_trait::async_trait;
 use dashmap::DashMap;
+use serde::Serialize;
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Read-only snapshot of a single window counter.
+#[derive(Debug, Clone, Serialize)]
+pub struct WindowUsage {
+    pub cache_key: String,
+    pub count: u64,
+    pub window_secs: u64,
+    pub elapsed_secs: u64,
+}
 
 /// In-memory sliding window rate limiter.
 ///
@@ -100,6 +110,40 @@ impl SlidingWindowLimiter {
         };
 
         (allowed, current_count, limit, reset_at)
+    }
+
+    // ── Read-only query methods (for dashboard) ────────────
+
+    /// Read the current counter for a specific cache key.
+    pub fn get_usage(&self, cache_key: &str) -> Option<WindowUsage> {
+        let now = Instant::now();
+        self.windows.get(cache_key).map(|counter| {
+            let elapsed = now.duration_since(counter.window_start).as_secs();
+            WindowUsage {
+                cache_key: cache_key.to_string(),
+                count: counter.count,
+                window_secs: counter.window_secs,
+                elapsed_secs: elapsed,
+            }
+        })
+    }
+
+    /// Read all window counters for a given key_hash.
+    pub fn get_usage_for_key(&self, key_hash: &str) -> Vec<WindowUsage> {
+        let now = Instant::now();
+        self.windows
+            .iter()
+            .filter(|entry| entry.key().starts_with(&format!("{}:", key_hash)))
+            .map(|entry| {
+                let elapsed = now.duration_since(entry.value().window_start).as_secs();
+                WindowUsage {
+                    cache_key: entry.key().clone(),
+                    count: entry.value().count,
+                    window_secs: entry.value().window_secs,
+                    elapsed_secs: elapsed,
+                }
+            })
+            .collect()
     }
 }
 

@@ -93,10 +93,22 @@ fn build_router(state: AppState) -> Router {
             get(routes::admin_list_assignments),
         );
 
+    // Dashboard router (Web UI + dashboard API).
+    // Returns Router<()> — state injected via Extension<Arc<DashboardState>>.
+    let master_key = state.inner.load().config.general_settings.master_key.clone();
+    let dashboard_state = boom_dashboard::DashboardState::new(
+        state.db_pool.clone(),
+        state.plan_store.clone(),
+        state.limiter.clone(),
+        master_key,
+    );
+    let dashboard_router = boom_dashboard::build_router(dashboard_state);
+
     Router::new()
         .merge(api_routes)
         .merge(health_routes)
         .merge(admin_routes)
+        .merge(dashboard_router)
         .with_state(state)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())

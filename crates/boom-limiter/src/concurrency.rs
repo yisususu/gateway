@@ -196,6 +196,14 @@ impl PlanStore {
             .map(|r| (r.key().clone(), r.value().clone()))
             .collect()
     }
+
+    /// Read the current concurrency count for a key.
+    pub fn get_concurrency(&self, key_hash: &str) -> u32 {
+        self.concurrency_counters
+            .get(key_hash)
+            .map(|c| c.value().load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
 }
 
 impl Default for PlanStore {
