@@ -224,16 +224,16 @@ impl Authenticator for DbAuthenticator {
     }
 
     fn check_model_access(&self, identity: &AuthIdentity, model: &str) -> Result<(), GatewayError> {
-        tracing::debug!(
-            "check_model_access: key={:?}, requested_model={}, allowed_models={:?}",
-            identity.key_name, model, identity.models
+        tracing::info!(
+            "check_model_access: key={:?}, requested={}, key_models={:?}, team_models={:?}",
+            identity.key_name, model, identity.models, identity.team_models
         );
         if identity.can_call_model(model) {
             Ok(())
         } else {
             tracing::warn!(
-                "Model not allowed: key={:?}, requested={}, allowed={:?}",
-                identity.key_name, model, identity.models
+                "Model not allowed: key={:?}, requested={}, key_models={:?}, team_models={:?}",
+                identity.key_name, model, identity.models, identity.team_models
             );
             Err(GatewayError::ModelNotAllowed(model.to_string()))
         }
