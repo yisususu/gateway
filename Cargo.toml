@@ -66,3 +66,6 @@ arc-swap = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 tokio-stream = "0.1"
 bytes = "1"
+
+# pin home to avoid rustc 1.88 requirement (home 0.5.12 needs 1.88+)
+home = "=0.5.9"
