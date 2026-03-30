@@ -1,4 +1,4 @@
-use crate::models::VerificationToken;
+use crate::models::{TeamRow, VerificationToken};
 use boom_core::provider::Authenticator;
 use boom_core::types::AuthIdentity;
 use boom_core::GatewayError;
@@ -112,6 +112,7 @@ impl DbAuthenticator {
             user_id: token.user_id,
             team_id: token.team_id,
             models: token.models,
+            team_models: vec![], // resolved later in authenticate()
             rpm_limit: token.rpm_limit.map(|v| v as u64),
             tpm_limit: token.tpm_limit.map(|v| v as u64),
             max_budget: token.max_budget,
@@ -120,6 +121,27 @@ impl DbAuthenticator {
             expires_at: token.expires,
             metadata: token.metadata.unwrap_or(serde_json::Value::Null),
         }
+    }
+
+    /// Query team's allowed models from LiteLLM_TeamTable.
+    async fn lookup_team_models(&self, team_id: &str) -> Result<Vec<String>, GatewayError> {
+        let db = match &self.db {
+            Some(pool) => pool,
+            None => return Ok(vec![]),
+        };
+
+        let result = sqlx::query_as::<_, TeamRow>(
+            r#"SELECT models FROM "LiteLLM_TeamTable" WHERE team_id = $1"#,
+        )
+        .bind(team_id)
+        .fetch_optional(db)
+        .await
+        .map_err(|e| {
+            tracing::warn!("Failed to query team models for team {}: {}", team_id, e);
+            GatewayError::InternalError(format!("Database error: {}", e))
+        })?;
+
+        Ok(result.map(|r| r.models).unwrap_or_default())
     }
 }
 
@@ -135,6 +157,7 @@ impl Authenticator for DbAuthenticator {
                 user_id: None,
                 team_id: None,
                 models: vec![], // master can access all models
+                team_models: vec![],
                 rpm_limit: None,
                 tpm_limit: None,
                 max_budget: None,
@@ -159,7 +182,25 @@ impl Authenticator for DbAuthenticator {
             .ok_or_else(|| GatewayError::AuthError("Invalid API key".to_string()))?;
 
         // 4. Validate the token
-        let identity = self.token_to_identity(token);
+        let mut identity = self.token_to_identity(token);
+
+        // 5. Resolve model groups: if key belongs to a team, look up team's models.
+        //    litellm stores model group names (e.g. "all-team-models") in key's models;
+        //    the actual model list comes from LiteLLM_TeamTable.models.
+        if let Some(ref team_id) = identity.team_id {
+            match self.lookup_team_models(team_id).await {
+                Ok(team_models) => {
+                    tracing::debug!(
+                        "Resolved team models for team {}: {:?}",
+                        team_id, team_models
+                    );
+                    identity.team_models = team_models;
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to resolve team models: {}", e);
+                }
+            }
+        }
 
         if identity.blocked {
             return Err(GatewayError::KeyBlocked);

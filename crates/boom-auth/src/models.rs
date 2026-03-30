@@ -14,7 +14,7 @@ pub struct VerificationToken {
     pub spend: f64,
     /// Expiration time (null = never expires).
     pub expires: Option<NaiveDateTime>,
-    /// Allowed models. Empty array = all models.
+    /// Allowed models. May contain model names or model group names (e.g. "all-team-models").
     pub models: Vec<String>,
     pub aliases: Option<serde_json::Value>,
     pub config: Option<serde_json::Value>,
@@ -40,4 +40,10 @@ pub struct VerificationToken {
     pub created_at: Option<NaiveDateTime>,
     pub created_by: Option<String>,
     pub updated_at: Option<NaiveDateTime>,
+}
+
+/// Maps to litellm's `LiteLLM_TeamTable` — only the fields we need.
+#[derive(Debug, Clone, FromRow)]
+pub struct TeamRow {
+    pub models: Vec<String>,
 }

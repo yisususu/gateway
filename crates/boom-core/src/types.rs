@@ -232,8 +232,11 @@ pub struct AuthIdentity {
     pub key_name: Option<String>,
     pub user_id: Option<String>,
     pub team_id: Option<String>,
-    /// Allowed models. Empty means all models are allowed.
+    /// Allowed models from key. May contain model group names (e.g. "all-team-models").
     pub models: Vec<String>,
+    /// Resolved models from the key's team (LiteLLM_TeamTable.models).
+    /// Used as fallback when key's models contain group names.
+    pub team_models: Vec<String>,
     pub rpm_limit: Option<u64>,
     pub tpm_limit: Option<u64>,
     pub max_budget: Option<f64>,
@@ -245,11 +248,23 @@ pub struct AuthIdentity {
 
 impl AuthIdentity {
     /// Check if this identity is allowed to call the given model.
+    ///
+    /// Checks key's models first (direct match or wildcard), then falls back
+    /// to team's models (resolved from model groups like "all-team-models").
     pub fn can_call_model(&self, model: &str) -> bool {
-        if self.models.is_empty() {
+        // Both empty = unrestricted (master key or no limits).
+        if self.models.is_empty() && self.team_models.is_empty() {
             return true;
         }
-        self.models.iter().any(|m| m == model || m == "*")
+        // Check key's own models.
+        if self.models.iter().any(|m| m == model || m == "*") {
+            return true;
+        }
+        // Fallback: check team's resolved models.
+        if self.team_models.iter().any(|m| m == model || m == "*") {
+            return true;
+        }
+        false
     }
 
     /// Check if the key has expired.
