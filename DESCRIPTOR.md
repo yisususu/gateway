@@ -18,20 +18,21 @@ BooMGateway 是一个高性能 LLM API 网关，提供统一的请求入口来�
 ## 项目结构
 
 ```
-crates/
+boom-gateway/
 ├── boom-core/         核心类型、接口定义、Anthropic 协议转换
 ├── boom-config/       YAML 配置加载、环境变量解析
 ├── boom-auth/         密钥认证（litellm DB 兼容）
 ├── boom-provider/     上游 LLM 提供商适配器
 ├── boom-limiter/      速率限制、并发控制、套餐管理
-└── boom-gateway/      HTTP 服务、路由、状态管理、启动入口
+├── boom-dashboard/    Web 管理面板（SPA + REST API）
+└── boom-main/         HTTP 服务、路由、状态管理、启动入口
 ```
 
 ## 模块分层
 
 ```
 ┌─────────────────────────────────────────────────┐
-│  boom-gateway (HTTP 层)                         │
+│  boom-main (HTTP 层)                            │
 │  路由 / 认证提取器 / 状态管理 / 热重载          │
 ├─────────────────────────────────────────────────┤
 │  boom-auth    boom-limiter    boom-provider     │
@@ -172,7 +173,7 @@ YAML 配置加载，兼容 litellm 的 `proxy_server_config.yaml` 格式。
 
 ---
 
-### boom-gateway
+### boom-main
 
 HTTP 服务器，路由处理，状态管理，启动入口。
 

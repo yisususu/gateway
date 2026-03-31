@@ -292,7 +292,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "boom-gateway"
+name = "boom-limiter"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "boom-core",
+ "chrono",
+ "dashmap",
+ "futures",
+ "serde",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "boom-main"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -318,21 +333,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
-]
-
-[[package]]
-name = "boom-limiter"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "boom-core",
- "chrono",
- "dashmap",
- "futures",
- "serde",
- "thiserror",
- "tokio",
- "tracing",
 ]
 
 [[package]]

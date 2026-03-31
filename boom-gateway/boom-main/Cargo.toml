@@ -1,5 +1,5 @@
 [package]
-name = "boom-gateway"
+name = "boom-main"
 version.workspace = true
 edition.workspace = true
 

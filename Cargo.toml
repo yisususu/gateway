@@ -1,13 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/boom-core",
-    "crates/boom-config",
-    "crates/boom-auth",
-    "crates/boom-provider",
-    "crates/boom-limiter",
-    "crates/boom-gateway",
-    "crates/boom-dashboard",
+    "boom-gateway/boom-core",
+    "boom-gateway/boom-config",
+    "boom-gateway/boom-auth",
+    "boom-gateway/boom-provider",
+    "boom-gateway/boom-limiter",
+    "boom-gateway/boom-main",
+    "boom-gateway/boom-dashboard",
 ]
 
 [workspace.package]
