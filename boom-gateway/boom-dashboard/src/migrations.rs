@@ -3,6 +3,11 @@ use sqlx::PgPool;
 /// Run database migrations for BooMGateway persistence tables.
 /// Called once at startup; uses CREATE TABLE IF NOT EXISTS for idempotency.
 pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
+    // Ensure pgcrypto extension for gen_random_uuid() (PG < 13 compat).
+    sqlx::query(r#"CREATE EXTENSION IF NOT EXISTS pgcrypto"#)
+        .execute(pool)
+        .await
+        .ok(); // Ignore errors — PG 13+ has it built-in.
     // 1. Rate limit state checkpoint table.
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS boom_rate_limit_state (

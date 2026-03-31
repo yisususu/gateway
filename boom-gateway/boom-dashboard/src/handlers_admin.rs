@@ -171,11 +171,7 @@ pub async fn list_keys(
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Database not available",
-            )
-                .into_response();
+            return Json(json!({"error": "Database not available"})).into_response();
         }
     };
 
@@ -269,11 +265,7 @@ pub async fn create_key(
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Database not available",
-            )
-                .into_response();
+            return Json(json!({"error": "Database not available"})).into_response();
         }
     };
 
@@ -379,11 +371,7 @@ pub async fn update_key(
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Database not available",
-            )
-                .into_response();
+            return Json(json!({"error": "Database not available"})).into_response();
         }
     };
 
@@ -447,11 +435,7 @@ pub async fn block_key(
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Database not available",
-            )
-                .into_response();
+            return Json(json!({"error": "Database not available"})).into_response();
         }
     };
 
@@ -488,11 +472,7 @@ pub async fn unblock_key(
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Database not available",
-            )
-                .into_response();
+            return Json(json!({"error": "Database not available"})).into_response();
         }
     };
 
@@ -648,11 +628,7 @@ pub async fn batch_create_keys(
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Database not available",
-            )
-                .into_response();
+            return Json(json!({"error": "Database not available"})).into_response();
         }
     };
 
@@ -813,11 +789,7 @@ pub async fn list_models(
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Database not available",
-            )
-                .into_response();
+            return Json(json!({"error": "Database not available"})).into_response();
         }
     };
 
@@ -835,11 +807,7 @@ pub async fn list_models(
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Dashboard list_models query failed: {}", e);
-            return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("DB error: {}", e),
-            )
-                .into_response();
+            return Json(json!({"error": format!("DB error: {}", e)})).into_response();
         }
     };
 
@@ -878,11 +846,7 @@ pub async fn create_model(
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Database not available",
-            )
-                .into_response();
+            return Json(json!({"error": "Database not available"})).into_response();
         }
     };
 
@@ -920,11 +884,7 @@ pub async fn create_model(
         Ok(row) => row.get("id"),
         Err(e) => {
             tracing::error!("Dashboard create_model insert failed: {}", e);
-            return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to create model: {}", e),
-            )
-                .into_response();
+            return Json(json!({"error": format!("Failed to create model: {}", e)})).into_response();
         }
     };
 
@@ -948,11 +908,7 @@ pub async fn update_model(
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Database not available",
-            )
-                .into_response();
+            return Json(json!({"error": "Database not available"})).into_response();
         }
     };
 
@@ -999,18 +955,10 @@ pub async fn update_model(
             }
             Json(json!({"ok": true})).into_response()
         }
-        Ok(_) => (
-            axum::http::StatusCode::NOT_FOUND,
-            "Model deployment not found",
-        )
-            .into_response(),
+        Ok(_) => Json(json!({"error": "Model deployment not found"})).into_response(),
         Err(e) => {
             tracing::error!("Dashboard update_model failed: {}", e);
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("DB error: {}", e),
-            )
-                .into_response()
+            Json(json!({"error": format!("DB error: {}", e)})).into_response()
         }
     }
 }
@@ -1023,11 +971,7 @@ pub async fn delete_model(
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Database not available",
-            )
-                .into_response();
+            return Json(json!({"error": "Database not available"})).into_response();
         }
     };
 
@@ -1050,25 +994,14 @@ pub async fn delete_model(
 
     match result {
         Ok(r) if r.rows_affected() > 0 => {
-            // Note: we don't remove from deployment_store here because
-            // there may be other deployments for the same model_name.
-            // A full rebuild would be needed for accurate cleanup.
             let name = model_name.unwrap_or_default();
             tracing::info!(model = %name, "Model deployment deleted");
             Json(json!({"ok": true, "model_name": name})).into_response()
         }
-        Ok(_) => (
-            axum::http::StatusCode::NOT_FOUND,
-            "Model deployment not found",
-        )
-            .into_response(),
+        Ok(_) => Json(json!({"error": "Model deployment not found"})).into_response(),
         Err(e) => {
             tracing::error!("Dashboard delete_model failed: {}", e);
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("DB error: {}", e),
-            )
-                .into_response()
+            Json(json!({"error": format!("DB error: {}", e)})).into_response()
         }
     }
 }
@@ -1126,11 +1059,7 @@ pub async fn list_aliases(
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Database not available",
-            )
-                .into_response();
+            return Json(json!({"error": "Database not available"})).into_response();
         }
     };
 
@@ -1154,11 +1083,7 @@ pub async fn list_aliases(
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Dashboard list_aliases query failed: {}", e);
-            return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("DB error: {}", e),
-            )
-                .into_response();
+            return Json(json!({"error": format!("DB error: {}", e)})).into_response();
         }
     };
 
@@ -1186,11 +1111,7 @@ pub async fn create_alias(
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Database not available",
-            )
-                .into_response();
+            return Json(json!({"error": "Database not available"})).into_response();
         }
     };
 
@@ -1211,11 +1132,7 @@ pub async fn create_alias(
 
     if let Err(e) = result {
         tracing::error!("Dashboard create_alias failed: {}", e);
-        return (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("DB error: {}", e),
-        )
-            .into_response();
+        return Json(json!({"error": format!("DB error: {}", e)})).into_response();
     }
 
     // Update in-memory alias store.
@@ -1238,11 +1155,7 @@ pub async fn update_alias(
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Database not available",
-            )
-                .into_response();
+            return Json(json!({"error": "Database not available"})).into_response();
         }
     };
 
@@ -1268,18 +1181,10 @@ pub async fn update_alias(
             );
             Json(json!({"ok": true})).into_response()
         }
-        Ok(_) => (
-            axum::http::StatusCode::NOT_FOUND,
-            "Alias not found",
-        )
-            .into_response(),
+        Ok(_) => Json(json!({"error": "Alias not found"})).into_response(),
         Err(e) => {
             tracing::error!("Dashboard update_alias failed: {}", e);
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("DB error: {}", e),
-            )
-                .into_response()
+            Json(json!({"error": format!("DB error: {}", e)})).into_response()
         }
     }
 }
@@ -1292,11 +1197,7 @@ pub async fn delete_alias(
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Database not available",
-            )
-                .into_response();
+            return Json(json!({"error": "Database not available"})).into_response();
         }
     };
 
@@ -1313,18 +1214,10 @@ pub async fn delete_alias(
             tracing::info!(alias = %alias_name, "Alias deleted");
             Json(json!({"ok": true, "alias_name": alias_name})).into_response()
         }
-        Ok(_) => (
-            axum::http::StatusCode::NOT_FOUND,
-            "Alias not found",
-        )
-            .into_response(),
+        Ok(_) => Json(json!({"error": "Alias not found"})).into_response(),
         Err(e) => {
             tracing::error!("Dashboard delete_alias failed: {}", e);
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("DB error: {}", e),
-            )
-                .into_response()
+            Json(json!({"error": format!("DB error: {}", e)})).into_response()
         }
     }
 }
@@ -1340,11 +1233,7 @@ pub async fn get_config(
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Database not available",
-            )
-                .into_response();
+            return Json(json!({"error": "Database not available"})).into_response();
         }
     };
 
@@ -1365,11 +1254,7 @@ pub async fn get_config(
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Dashboard get_config query failed: {}", e);
-            return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("DB error: {}", e),
-            )
-                .into_response();
+            return Json(json!({"error": format!("DB error: {}", e)})).into_response();
         }
     };
 
@@ -1395,11 +1280,7 @@ pub async fn patch_config(
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Database not available",
-            )
-                .into_response();
+            return Json(json!({"error": "Database not available"})).into_response();
         }
     };
 
@@ -1414,11 +1295,7 @@ pub async fn patch_config(
 
     if let Err(e) = result {
         tracing::error!("Dashboard patch_config failed: {}", e);
-        return (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("DB error: {}", e),
-        )
-            .into_response();
+        return Json(json!({"error": format!("DB error: {}", e)})).into_response();
     }
 
     tracing::info!(key = %req.key, "Config updated");
