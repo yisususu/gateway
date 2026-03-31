@@ -139,6 +139,7 @@
       ]);
       renderPlan(plan);
       renderUsage(usage);
+      renderTokenInfo(keyInfo);
       renderKeyInfo(keyInfo);
     } catch (err) {
       console.error("Failed to load user data:", err);
@@ -185,6 +186,38 @@
       html += "</table>";
     }
     el.innerHTML = html;
+  }
+
+  function renderTokenInfo(info) {
+    const el = document.getElementById("token-info");
+    const input = info.total_input_tokens;
+    const output = info.total_output_tokens;
+    // If both are null the SpendLogs table doesn't exist — hide the card.
+    if (input == null && output == null) {
+      el.innerHTML = '<p style="color:var(--text3)">Token usage data not available.</p>';
+      return;
+    }
+    const total = (input || 0) + (output || 0);
+    const inputPct = total > 0 ? ((input || 0) / total * 100).toFixed(1) : 0;
+    const outputPct = total > 0 ? ((output || 0) / total * 100).toFixed(1) : 0;
+    el.innerHTML = `
+      <div class="token-stats">
+        <div class="token-stat">
+          <div class="token-stat-label">Input Tokens</div>
+          <div class="token-stat-value">${formatNumber(input || 0)}</div>
+          <div class="token-stat-pct">${inputPct}%</div>
+        </div>
+        <div class="token-stat">
+          <div class="token-stat-label">Output Tokens</div>
+          <div class="token-stat-value">${formatNumber(output || 0)}</div>
+          <div class="token-stat-pct">${outputPct}%</div>
+        </div>
+        <div class="token-stat token-stat-total">
+          <div class="token-stat-label">Total</div>
+          <div class="token-stat-value">${formatNumber(total)}</div>
+        </div>
+      </div>
+    `;
   }
 
   function renderKeyInfo(info) {
@@ -463,5 +496,11 @@
     if (secs < 3600) return (secs / 60) + "min";
     if (secs < 86400) return (secs / 3600) + "h";
     return (secs / 86400) + "d";
+  }
+
+  function formatNumber(n) {
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + "M";
+    if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
+    return String(n);
   }
 })();

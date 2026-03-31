@@ -108,6 +108,9 @@ pub async fn get_key_info(
 
     match row {
         Some((key_name, key_alias, spend, expires, blocked, rpm_limit, tpm_limit, max_budget, budget_duration, metadata, created_at)) => {
+            // Query token usage from LiteLLM_SpendLogs (may not exist in all deployments).
+            let (input_tokens, output_tokens) = query_token_usage(db_pool, key_hash).await;
+
             Json(json!({
                 "key_name": key_name,
                 "key_alias": key_alias,
@@ -121,8 +124,39 @@ pub async fn get_key_info(
                 "metadata": metadata,
                 "created_at": created_at.map(|d| d.to_string()),
                 "token_prefix": format!("{}...", &key_hash[..8.min(key_hash.len())]),
+                "total_input_tokens": input_tokens,
+                "total_output_tokens": output_tokens,
             }))
         }
         None => Json(json!({"error": "Key not found"})),
+    }
+}
+
+/// Query aggregated token usage from litellm's SpendLogs table.
+/// Returns (input, output) token counts. Returns (None, None) if the table
+/// doesn't exist or the query fails.
+async fn query_token_usage(
+    pool: &sqlx::PgPool,
+    key_hash: &str,
+) -> (Option<i64>, Option<i64>) {
+    // SUM always produces a row; COALESCE handles the no-matches case.
+    // ::BIGINT ensures sqlx can decode into i64 regardless of source column type.
+    let row: Option<(i64, i64)> = sqlx::query_as(
+        r#"SELECT COALESCE(SUM(prompt_tokens), 0)::BIGINT,
+                  COALESCE(SUM(completion_tokens), 0)::BIGINT
+           FROM "LiteLLM_SpendLogs" WHERE api_key = $1"#,
+    )
+    .bind(key_hash)
+    .fetch_one(pool)
+    .await
+    .ok();
+
+    match row {
+        Some((input, output)) => {
+            // If both are 0 the table exists but has no data for this key.
+            // Still return the values so the frontend can show "0".
+            (Some(input), Some(output))
+        }
+        None => (None, None),
     }
 }

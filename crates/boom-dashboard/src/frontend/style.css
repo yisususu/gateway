@@ -201,6 +201,19 @@ tr:hover td { background: var(--surface2); }
 .badge-blocked { background: var(--danger-bg); color: var(--danger); }
 .badge-plan { background: var(--primary-bg); color: var(--primary); }
 
+/* ── Token stats ──────────────────────────────────────── */
+.token-stats { display: flex; gap: 16px; }
+.token-stat {
+  flex: 1; text-align: center; padding: 16px 10px;
+  background: var(--surface2); border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+.token-stat-label { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+.token-stat-value { font-size: 22px; font-weight: 700; color: var(--text); }
+.token-stat-pct { font-size: 11px; color: var(--text3); margin-top: 4px; }
+.token-stat-total { background: var(--primary-bg); border-color: transparent; }
+.token-stat-total .token-stat-value { color: var(--primary); }
+
 /* ── Responsive ───────────────────────────────────────── */
 @media (max-width: 768px) {
   .sidebar { width: 56px; }
