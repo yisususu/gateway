@@ -618,6 +618,7 @@
   function hideModal() {
     document.getElementById("modal-overlay").classList.add("hidden");
   }
+  window.hideModal = hideModal;
 
   document.getElementById("modal-overlay").addEventListener("click", (e) => {
     if (e.target === e.currentTarget) hideModal();
