@@ -778,8 +778,8 @@ struct DeploymentRow {
     max_tokens: Option<i32>,
     enabled: Option<bool>,
     source: Option<String>,
-    created_at: Option<chrono::NaiveDateTime>,
-    updated_at: Option<chrono::NaiveDateTime>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub async fn list_models(
@@ -1069,7 +1069,7 @@ pub async fn list_aliases(
         target_model: String,
         hidden: Option<bool>,
         source: Option<String>,
-        updated_at: Option<chrono::NaiveDateTime>,
+        updated_at: Option<chrono::DateTime<chrono::Utc>>,
     }
 
     let rows: Vec<AliasRow> = match sqlx::query_as(
@@ -1242,7 +1242,7 @@ pub async fn get_config(
     struct ConfigRow {
         key: String,
         value: serde_json::Value,
-        updated_at: Option<chrono::NaiveDateTime>,
+        updated_at: Option<chrono::DateTime<chrono::Utc>>,
     }
 
     let rows: Vec<ConfigRow> = match sqlx::query_as(
