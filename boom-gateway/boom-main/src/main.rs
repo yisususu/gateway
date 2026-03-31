@@ -42,11 +42,14 @@ async fn main() -> anyhow::Result<()> {
     // Build state (connects DB, initializes providers).
     let state = AppState::from_config(config, args.config.clone()).await?;
 
+    // Shutdown broadcast channel: send once to cancel all background tasks.
+    let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+
     // Spawn SIGHUP reload listener.
-    spawn_sighup_listener(state.clone());
+    spawn_sighup_listener(state.clone(), shutdown_tx.subscribe());
 
     // Spawn background sync task (persist rate limit state + cleanup memory).
-    spawn_sync_task(state.clone());
+    spawn_sync_task(state.clone(), shutdown_tx.subscribe());
 
     // Build router.
     let app = build_router(state);
@@ -59,6 +62,13 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+
+    // Signal all background tasks to stop.
+    tracing::info!("Shutting down background tasks...");
+    let _ = shutdown_tx.send(());
+
+    // Give tasks a moment to finish, then exit.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     tracing::info!("BooMGateway shutdown complete");
     Ok(())
@@ -120,7 +130,7 @@ fn build_router(state: AppState) -> Router {
 }
 
 /// Listen for SIGHUP and trigger hot-reload.
-fn spawn_sighup_listener(state: AppState) {
+fn spawn_sighup_listener(state: AppState, mut shutdown: tokio::sync::broadcast::Receiver<()>) {
     #[cfg(unix)]
     {
         tokio::spawn(async move {
@@ -135,11 +145,18 @@ fn spawn_sighup_listener(state: AppState) {
             };
 
             loop {
-                stream.recv().await;
-                tracing::info!("Received SIGHUP — triggering hot-reload...");
-                match state.reload().await {
-                    Ok(summary) => tracing::info!("SIGHUP reload: {}", summary),
-                    Err(e) => tracing::error!("SIGHUP reload failed: {}", e),
+                tokio::select! {
+                    _ = stream.recv() => {
+                        tracing::info!("Received SIGHUP — triggering hot-reload...");
+                        match state.reload().await {
+                            Ok(summary) => tracing::info!("SIGHUP reload: {}", summary),
+                            Err(e) => tracing::error!("SIGHUP reload failed: {}", e),
+                        }
+                    }
+                    _ = shutdown.recv() => {
+                        tracing::debug!("SIGHUP listener shutting down");
+                        return;
+                    }
                 }
             }
         });
@@ -150,11 +167,12 @@ fn spawn_sighup_listener(state: AppState) {
     {
         tracing::info!("SIGHUP not supported on this platform — use POST /admin/config/reload");
         let _ = state; // suppress unused warning
+        let _ = shutdown;
     }
 }
 
 /// Background task: every 10 minutes, snapshot in-memory state to DB and cleanup.
-fn spawn_sync_task(state: AppState) {
+fn spawn_sync_task(state: AppState, mut shutdown: tokio::sync::broadcast::Receiver<()>) {
     let db_pool = state.db_pool.clone();
     let limiter = state.limiter.clone();
     let plan_store = state.plan_store.clone();
@@ -166,10 +184,23 @@ fn spawn_sync_task(state: AppState) {
         };
 
         // Initial delay to let startup traffic settle.
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
+            _ = shutdown.recv() => {
+                tracing::debug!("Sync task shutting down during initial delay");
+                return;
+            }
+        }
 
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+            // Wait for next sync cycle or shutdown signal.
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(600)) => {}
+                _ = shutdown.recv() => {
+                    tracing::debug!("Sync task shutting down");
+                    return;
+                }
+            }
 
             // 1. Snapshot rate limit counters → upsert into DB.
             let entries = limiter.snapshot();
