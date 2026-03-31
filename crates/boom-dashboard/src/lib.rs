@@ -19,6 +19,8 @@ pub fn build_router<S: Clone + Send + Sync + 'static>(state: DashboardState) -> 
     let state_arc = Arc::new(state);
 
     Router::new()
+        // Root redirect → /dashboard
+        .route("/", get(handlers_static::redirect_root))
         // Static files (SPA).
         // Note: use "/dashboard" (no trailing slash) so both /dashboard and /dashboard/ work.
         .route("/dashboard", get(handlers_static::index))
