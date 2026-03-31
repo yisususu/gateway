@@ -5,7 +5,6 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use serde::Serialize;
 use std::sync::Arc;
-use std::time::Instant;
 
 /// Read-only snapshot of a single window counter.
 #[derive(Debug, Clone, Serialize)]
@@ -24,16 +23,27 @@ pub struct WindowUsage {
 /// Supports:
 /// - RPM (requests per minute) — standard per-minute sliding window.
 /// - Custom time windows — e.g. 100 requests per 5 hours (18000 seconds).
+///
+/// All timestamps are Unix epoch seconds for persistence compatibility.
 pub struct SlidingWindowLimiter {
-    /// Window counters: key → (count, window_start_instant).
+    /// Window counters: cache_key → WindowCounter.
     windows: Arc<DashMap<String, WindowCounter>>,
 }
 
 #[derive(Debug, Clone)]
 struct WindowCounter {
     count: u64,
-    window_start: Instant,
+    /// Unix epoch seconds when this window started.
+    window_start: u64,
     window_secs: u64,
+}
+
+/// Return current Unix epoch seconds.
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time went backwards")
+        .as_secs()
 }
 
 impl SlidingWindowLimiter {
@@ -55,11 +65,11 @@ impl SlidingWindowLimiter {
         limit: u64,
         window_secs: u64,
     ) -> (bool, u64, u64, chrono::DateTime<chrono::Utc>) {
-        let now = Instant::now();
+        let now = now_epoch_secs();
 
         let allowed = match self.windows.get(cache_key) {
             Some(counter) => {
-                let elapsed = now.duration_since(counter.window_start).as_secs();
+                let elapsed = now.saturating_sub(counter.window_start);
                 if elapsed >= counter.window_secs {
                     // Window expired — reset.
                     true
@@ -77,18 +87,18 @@ impl SlidingWindowLimiter {
                 .windows
                 .entry(cache_key.to_string())
                 .and_modify(|c| {
-                    let elapsed = Instant::now().duration_since(c.window_start).as_secs();
+                    let elapsed = now_epoch_secs().saturating_sub(c.window_start);
                     if elapsed >= c.window_secs {
                         // Reset window.
                         c.count = 1;
-                        c.window_start = Instant::now();
+                        c.window_start = now_epoch_secs();
                     } else {
                         c.count += 1;
                     }
                 })
                 .or_insert(WindowCounter {
                     count: 1,
-                    window_start: Instant::now(),
+                    window_start: now,
                     window_secs,
                 });
             counter.count
@@ -102,8 +112,8 @@ impl SlidingWindowLimiter {
         // Calculate reset time.
         let reset_at = match self.windows.get(cache_key) {
             Some(counter) => {
-                let elapsed = Instant::now().duration_since(counter.window_start);
-                let remaining = counter.window_secs.saturating_sub(elapsed.as_secs());
+                let elapsed = now.saturating_sub(counter.window_start);
+                let remaining = counter.window_secs.saturating_sub(elapsed);
                 chrono::Utc::now() + chrono::Duration::seconds(remaining as i64)
             }
             None => chrono::Utc::now() + chrono::Duration::seconds(window_secs as i64),
@@ -116,9 +126,9 @@ impl SlidingWindowLimiter {
 
     /// Read the current counter for a specific cache key.
     pub fn get_usage(&self, cache_key: &str) -> Option<WindowUsage> {
-        let now = Instant::now();
+        let now = now_epoch_secs();
         self.windows.get(cache_key).map(|counter| {
-            let elapsed = now.duration_since(counter.window_start).as_secs();
+            let elapsed = now.saturating_sub(counter.window_start);
             WindowUsage {
                 cache_key: cache_key.to_string(),
                 count: counter.count,
@@ -130,12 +140,12 @@ impl SlidingWindowLimiter {
 
     /// Read all window counters for a given key_hash.
     pub fn get_usage_for_key(&self, key_hash: &str) -> Vec<WindowUsage> {
-        let now = Instant::now();
+        let now = now_epoch_secs();
         self.windows
             .iter()
             .filter(|entry| entry.key().starts_with(&format!("{}:", key_hash)))
             .map(|entry| {
-                let elapsed = now.duration_since(entry.value().window_start).as_secs();
+                let elapsed = now.saturating_sub(entry.value().window_start);
                 WindowUsage {
                     cache_key: entry.key().clone(),
                     count: entry.value().count,
@@ -144,6 +154,57 @@ impl SlidingWindowLimiter {
                 }
             })
             .collect()
+    }
+
+    // ── Persistence methods ─────────────────────────────────
+
+    /// Snapshot all non-expired entries for DB persistence.
+    /// Returns Vec<(cache_key, count, window_start, window_secs)>.
+    pub fn snapshot(&self) -> Vec<(String, u64, u64, u64)> {
+        let now = now_epoch_secs();
+        self.windows
+            .iter()
+            .filter(|entry| {
+                let elapsed = now.saturating_sub(entry.value().window_start);
+                elapsed < entry.value().window_secs
+            })
+            .map(|entry| {
+                (
+                    entry.key().clone(),
+                    entry.value().count,
+                    entry.value().window_start,
+                    entry.value().window_secs,
+                )
+            })
+            .collect()
+    }
+
+    /// Restore a counter entry from DB into memory.
+    /// Called at startup to recover state after restart.
+    pub fn restore_counter(&self, cache_key: String, count: u64, window_start: u64, window_secs: u64) {
+        let now = now_epoch_secs();
+        // Only restore if the window hasn't expired yet.
+        if now.saturating_sub(window_start) < window_secs {
+            self.windows.insert(
+                cache_key,
+                WindowCounter {
+                    count,
+                    window_start,
+                    window_secs,
+                },
+            );
+        }
+    }
+
+    /// Remove all expired entries from memory. Returns the count of removed entries.
+    pub fn cleanup_expired(&self) -> usize {
+        let now = now_epoch_secs();
+        let before = self.windows.len();
+        self.windows.retain(|_, counter| {
+            let elapsed = now.saturating_sub(counter.window_start);
+            elapsed < counter.window_secs
+        });
+        before - self.windows.len()
     }
 }
 
@@ -164,13 +225,13 @@ impl RateLimiter for SlidingWindowLimiter {
         // 1. Check RPM (per-minute) if configured.
         if let Some(rpm) = rpm_limit {
             let rpm_key = Self::cache_key(key, 60);
-            let (allowed, count, limit, reset_at) = self.check_window(&rpm_key, rpm, 60);
+            let (allowed, _count, limit, reset_at) = self.check_window(&rpm_key, rpm, 60);
 
             if !allowed {
                 let elapsed = self
                     .windows
                     .get(&rpm_key)
-                    .map(|c| Instant::now().duration_since(c.window_start).as_secs())
+                    .map(|c| now_epoch_secs().saturating_sub(c.window_start))
                     .unwrap_or(0);
                 let retry_after = 60u64.saturating_sub(elapsed);
 
@@ -187,13 +248,13 @@ impl RateLimiter for SlidingWindowLimiter {
         // 2. Check custom time windows.
         for &(limit, window_secs) in window_limits {
             let win_key = Self::cache_key(key, window_secs);
-            let (allowed, count, _, reset_at) = self.check_window(&win_key, limit, window_secs);
+            let (allowed, _count, _, reset_at) = self.check_window(&win_key, limit, window_secs);
 
             if !allowed {
                 let elapsed = self
                     .windows
                     .get(&win_key)
-                    .map(|c| Instant::now().duration_since(c.window_start).as_secs())
+                    .map(|c| now_epoch_secs().saturating_sub(c.window_start))
                     .unwrap_or(0);
                 let retry_after = window_secs.saturating_sub(elapsed);
 
@@ -280,5 +341,57 @@ mod tests {
             .await
             .unwrap();
         assert!(!decision.allowed);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_and_restore() {
+        let limiter = SlidingWindowLimiter::new();
+        let key = RateLimitKey {
+            key_hash: "snap_key".to_string(),
+            model: "gpt-4".to_string(),
+        };
+
+        // Record some requests.
+        limiter.check_and_record(&key, Some(10), &[]).await.unwrap();
+        limiter.check_and_record(&key, Some(10), &[]).await.unwrap();
+
+        let snap = limiter.snapshot();
+        assert!(!snap.is_empty());
+
+        // Create new limiter and restore.
+        let limiter2 = SlidingWindowLimiter::new();
+        for (ck, count, ws, wsecs) in &snap {
+            limiter2.restore_counter(ck.clone(), *count, *ws, *wsecs);
+        }
+
+        // Next request should see count=3 (restored 2 + 1 new).
+        let usage = limiter2.get_usage_for_key("snap_key");
+        assert!(!usage.is_empty());
+        assert_eq!(usage[0].count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_expired() {
+        let limiter = SlidingWindowLimiter::new();
+
+        // Manually insert an already-expired counter.
+        limiter.windows.insert(
+            "expired_key:gpt-4:60".to_string(),
+            WindowCounter {
+                count: 5,
+                window_start: now_epoch_secs() - 120, // 2 minutes ago
+                window_secs: 60,
+            },
+        );
+
+        // Insert a valid counter.
+        let key = RateLimitKey {
+            key_hash: "valid_key".to_string(),
+            model: "gpt-4".to_string(),
+        };
+        limiter.check_and_record(&key, Some(10), &[]).await.unwrap();
+
+        let removed = limiter.cleanup_expired();
+        assert_eq!(removed, 1);
     }
 }

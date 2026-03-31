@@ -2,6 +2,7 @@ pub mod auth;
 pub mod handlers_admin;
 pub mod handlers_static;
 pub mod handlers_user;
+pub mod migrations;
 pub mod state;
 
 use axum::routing::{delete, get, post, put};
@@ -51,6 +52,10 @@ pub fn build_router<S: Clone + Send + Sync + 'static>(state: DashboardState) -> 
         .route(
             "/dashboard/api/admin/keys",
             get(handlers_admin::list_keys).post(handlers_admin::create_key),
+        )
+        .route(
+            "/dashboard/api/admin/keys/batch",
+            post(handlers_admin::batch_create_keys),
         )
         .route(
             "/dashboard/api/admin/keys/{token_hash}",

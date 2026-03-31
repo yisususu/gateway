@@ -188,6 +188,7 @@ pub async fn list_keys(
 #[derive(Debug, Deserialize)]
 pub struct CreateKeyRequest {
     pub key_name: Option<String>,
+    pub key_alias: Option<String>,
     pub user_id: Option<String>,
     pub team_id: Option<String>,
     pub models: Option<Vec<String>>,
@@ -220,6 +221,25 @@ pub async fn create_key(
     let raw_key = format!("sk-{}", hex::encode(Uuid::new_v4().as_bytes()));
     let token_hash = hash_token(&raw_key);
 
+    // 1b. Check key_alias dedup (if provided).
+    if let Some(ref alias) = req.key_alias {
+        let exists: bool = sqlx::query_scalar(
+            r#"SELECT EXISTS(SELECT 1 FROM "LiteLLM_VerificationToken" WHERE key_alias = $1)"#,
+        )
+        .bind(alias)
+        .fetch_one(db_pool)
+        .await
+        .unwrap_or(false);
+
+        if exists {
+            return (
+                axum::http::StatusCode::CONFLICT,
+                format!("key_alias '{}' already exists", alias),
+            )
+                .into_response();
+        }
+    }
+
     // 2. Parse optional expires.
     let expires: Option<NaiveDateTime> = req
         .expires
@@ -233,13 +253,14 @@ pub async fn create_key(
     // 3. INSERT into DB.
     let result = sqlx::query(
         r#"INSERT INTO "LiteLLM_VerificationToken"
-           (token, key_name, user_id, team_id, models, spend, blocked,
+           (token, key_name, key_alias, user_id, team_id, models, spend, blocked,
             rpm_limit, tpm_limit, max_budget, budget_duration, expires,
             metadata, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, 0.0, false, $6, $7, $8, $9, $10, $11, NOW(), NOW())"#,
+           VALUES ($1, $2, $3, $4, $5, $6, 0.0, false, $7, $8, $9, $10, $11, $12, NOW(), NOW())"#,
     )
     .bind(&token_hash)
     .bind(&req.key_name)
+    .bind(&req.key_alias)
     .bind(&req.user_id)
     .bind(&req.team_id)
     .bind(&models_json)
@@ -475,7 +496,25 @@ pub async fn assign_key(
     Json(req): Json<AssignRequest>,
 ) -> Response {
     match state.plan_store.assign_key(&req.key_hash, &req.plan_name) {
-        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Ok(()) => {
+            // Persist assignment to DB.
+            if let Some(ref pool) = state.db_pool {
+                if let Err(e) = sqlx::query(
+                    r#"INSERT INTO boom_key_plan_assignment (key_hash, plan_name, assigned_at)
+                       VALUES ($1, $2, NOW())
+                       ON CONFLICT (key_hash) DO UPDATE
+                       SET plan_name = EXCLUDED.plan_name"#,
+                )
+                .bind(&req.key_hash)
+                .bind(&req.plan_name)
+                .execute(pool)
+                .await
+                {
+                    tracing::error!("Failed to persist assignment to DB: {}", e);
+                }
+            }
+            Json(json!({"ok": true})).into_response()
+        }
         Err(e) => (axum::http::StatusCode::BAD_REQUEST, e).into_response(),
     }
 }
@@ -486,6 +525,22 @@ pub async fn unassign_key(
     Path(key_hash): Path<String>,
 ) -> Json<Value> {
     let removed = state.plan_store.unassign_key(&key_hash);
+
+    // Remove from DB.
+    if removed {
+        if let Some(ref pool) = state.db_pool {
+            if let Err(e) = sqlx::query(
+                r#"DELETE FROM boom_key_plan_assignment WHERE key_hash = $1"#,
+            )
+            .bind(&key_hash)
+            .execute(pool)
+            .await
+            {
+                tracing::error!("Failed to delete assignment from DB: {}", e);
+            }
+        }
+    }
+
     Json(json!({"ok": removed}))
 }
 
@@ -519,4 +574,114 @@ pub async fn get_key_usage(
         "concurrency": concurrency,
         "windows": windows,
     }))
+}
+
+// ═══════════════════════════════════════════════════════════
+// Batch key creation
+// ═══════════════════════════════════════════════════════════
+
+pub async fn batch_create_keys(
+    _session: AdminSession,
+    Extension(state): Extension<std::sync::Arc<DashboardState>>,
+    Json(reqs): Json<Vec<CreateKeyRequest>>,
+) -> Response {
+    let db_pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Database not available",
+            )
+                .into_response();
+        }
+    };
+
+    let mut created = Vec::new();
+    let mut skipped = Vec::new();
+
+    for req in reqs {
+        // Dedup check on key_alias.
+        if let Some(ref alias) = req.key_alias {
+            let exists: bool = sqlx::query_scalar(
+                r#"SELECT EXISTS(SELECT 1 FROM "LiteLLM_VerificationToken" WHERE key_alias = $1)"#,
+            )
+            .bind(alias)
+            .fetch_one(db_pool)
+            .await
+            .unwrap_or(false);
+
+            if exists {
+                skipped.push(json!({
+                    "key_alias": alias,
+                    "reason": "duplicate",
+                }));
+                continue;
+            }
+        }
+
+        let raw_key = format!("sk-{}", hex::encode(Uuid::new_v4().as_bytes()));
+        let token_hash = hash_token(&raw_key);
+
+        let expires: Option<NaiveDateTime> = req
+            .expires
+            .as_deref()
+            .and_then(|s| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok());
+
+        let models_json = req
+            .models
+            .map(|m| serde_json::to_value(m).unwrap_or(json!([])));
+
+        let result = sqlx::query(
+            r#"INSERT INTO "LiteLLM_VerificationToken"
+               (token, key_name, key_alias, user_id, team_id, models, spend, blocked,
+                rpm_limit, tpm_limit, max_budget, budget_duration, expires,
+                metadata, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, 0.0, false, $7, $8, $9, $10, $11, $12, NOW(), NOW())"#,
+        )
+        .bind(&token_hash)
+        .bind(&req.key_name)
+        .bind(&req.key_alias)
+        .bind(&req.user_id)
+        .bind(&req.team_id)
+        .bind(&models_json)
+        .bind(req.rpm_limit)
+        .bind(req.tpm_limit)
+        .bind(req.max_budget)
+        .bind(&req.budget_duration)
+        .bind(expires)
+        .bind(&req.metadata)
+        .execute(db_pool)
+        .await;
+
+        match result {
+            Ok(_) => {
+                // Optionally assign to plan.
+                if let Some(ref plan_name) = req.plan_name {
+                    if let Err(e) = state.plan_store.assign_key(&token_hash, plan_name) {
+                        tracing::warn!("Batch: key created but plan assignment failed: {}", e);
+                    }
+                }
+                created.push(json!({
+                    "key": raw_key,
+                    "token_hash": token_hash,
+                    "key_alias": req.key_alias,
+                }));
+            }
+            Err(e) => {
+                tracing::error!("Dashboard batch_create_keys insert failed: {}", e);
+                skipped.push(json!({
+                    "key_alias": req.key_alias,
+                    "reason": format!("db_error: {}", e),
+                }));
+            }
+        }
+    }
+
+    Json(json!({
+        "created": created,
+        "skipped": skipped,
+        "created_count": created.len(),
+        "skipped_count": skipped.len(),
+    }))
+    .into_response()
 }

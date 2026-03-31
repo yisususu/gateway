@@ -110,6 +110,11 @@ impl AppState {
         // 4. Load plans from config into plan store.
         load_plans_from_config(&plan_store, &inner.config);
 
+        // 5. Run migrations and restore persisted state from DB.
+        if let Some(ref pool) = db_pool {
+            restore_from_db(pool, &plan_store, &limiter).await;
+        }
+
         Ok(Self {
             config_path,
             inner: Arc::new(ArcSwap::from_pointee(inner)),
@@ -387,6 +392,64 @@ fn load_plans_from_config(plan_store: &Arc<PlanStore>, config: &Config) {
         None => {
             plan_store.set_default_plan(None);
             tracing::warn!("没有默认套餐配置，所有用户将无套餐限制。");
+        }
+    }
+}
+
+/// Run migrations and restore persisted rate-limit state & assignments from DB.
+async fn restore_from_db(
+    pool: &PgPool,
+    plan_store: &Arc<PlanStore>,
+    limiter: &Arc<SlidingWindowLimiter>,
+) {
+    // 1. Run migrations (CREATE TABLE IF NOT EXISTS).
+    if let Err(e) = boom_dashboard::migrations::run_migrations(pool).await {
+        tracing::error!("Failed to run migrations: {}", e);
+        return;
+    }
+
+    // 2. Restore key→plan assignments.
+    match sqlx::query_as::<_, (String, String)>(
+        r#"SELECT key_hash, plan_name FROM boom_key_plan_assignment"#,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => {
+            let count = rows.len();
+            for (key_hash, plan_name) in rows {
+                plan_store.restore_assignment(&key_hash, &plan_name);
+            }
+            tracing::info!("Restored {} key→plan assignment(s) from DB", count);
+        }
+        Err(e) => {
+            tracing::error!("Failed to restore assignments: {}", e);
+        }
+    }
+
+    // 3. Restore rate limit counters (non-expired only).
+    match sqlx::query_as::<_, (String, i64, i64, i64)>(
+        r#"SELECT cache_key, count, window_start, window_secs
+           FROM boom_rate_limit_state
+           WHERE window_start + window_secs > EXTRACT(EPOCH FROM NOW())::BIGINT"#,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => {
+            let count = rows.len();
+            for (cache_key, count, window_start, window_secs) in rows {
+                limiter.restore_counter(
+                    cache_key,
+                    count as u64,
+                    window_start as u64,
+                    window_secs as u64,
+                );
+            }
+            tracing::info!("Restored {} rate limit counter(s) from DB", count);
+        }
+        Err(e) => {
+            tracing::error!("Failed to restore rate limit state: {}", e);
         }
     }
 }

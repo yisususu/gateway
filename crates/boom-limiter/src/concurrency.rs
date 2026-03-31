@@ -204,6 +204,39 @@ impl PlanStore {
             .map(|c| c.value().load(Ordering::Relaxed))
             .unwrap_or(0)
     }
+
+    // ── Persistence helpers ───────────────────────────────────
+
+    /// Snapshot all key→plan assignments for DB persistence.
+    pub fn snapshot_assignments(&self) -> Vec<(String, String)> {
+        self.key_assignments
+            .iter()
+            .map(|r| (r.key().clone(), r.value().clone()))
+            .collect()
+    }
+
+    /// Restore a single key→plan assignment from DB into memory.
+    /// Called at startup. Does NOT validate plan existence (plan may be loaded later).
+    pub fn restore_assignment(&self, key_hash: &str, plan_name: &str) {
+        self.key_assignments
+            .insert(key_hash.to_string(), plan_name.to_string());
+    }
+
+    /// Remove an assignment from memory only (DB deletion handled separately).
+    /// Returns true if the assignment existed.
+    pub fn remove_assignment_persisted(&self, key_hash: &str) -> bool {
+        self.key_assignments.remove(key_hash).is_some()
+    }
+
+    /// Remove concurrency entries with count==0 to free memory.
+    /// Returns the count of removed entries.
+    pub fn cleanup_concurrency(&self) -> usize {
+        let before = self.concurrency_counters.len();
+        self.concurrency_counters.retain(|_, counter| {
+            counter.load(Ordering::Relaxed) > 0
+        });
+        before - self.concurrency_counters.len()
+    }
 }
 
 impl Default for PlanStore {

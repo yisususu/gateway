@@ -45,6 +45,9 @@ async fn main() -> anyhow::Result<()> {
     // Spawn SIGHUP reload listener.
     spawn_sighup_listener(state.clone());
 
+    // Spawn background sync task (persist rate limit state + cleanup memory).
+    spawn_sync_task(state.clone());
+
     // Build router.
     let app = build_router(state);
 
@@ -146,6 +149,85 @@ fn spawn_sighup_listener(state: AppState) {
         tracing::info!("SIGHUP not supported on this platform — use POST /admin/config/reload");
         let _ = state; // suppress unused warning
     }
+}
+
+/// Background task: every 10 minutes, snapshot in-memory state to DB and cleanup.
+fn spawn_sync_task(state: AppState) {
+    let db_pool = state.db_pool.clone();
+    let limiter = state.limiter.clone();
+    let plan_store = state.plan_store.clone();
+
+    tokio::spawn(async move {
+        let pool = match db_pool {
+            Some(p) => p,
+            None => return, // No DB — nothing to persist.
+        };
+
+        // Initial delay to let startup traffic settle.
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+
+            // 1. Snapshot rate limit counters → upsert into DB.
+            let entries = limiter.snapshot();
+            if !entries.is_empty() {
+                for (cache_key, count, window_start, window_secs) in &entries {
+                    if let Err(e) = sqlx::query(
+                        r#"INSERT INTO boom_rate_limit_state (cache_key, count, window_start, window_secs, updated_at)
+                           VALUES ($1, $2, $3, $4, NOW())
+                           ON CONFLICT (cache_key) DO UPDATE
+                           SET count = EXCLUDED.count,
+                               window_start = EXCLUDED.window_start,
+                               window_secs = EXCLUDED.window_secs,
+                               updated_at = NOW()"#,
+                    )
+                    .bind(cache_key)
+                    .bind(*count as i64)
+                    .bind(*window_start as i64)
+                    .bind(*window_secs as i64)
+                    .execute(&pool)
+                    .await
+                    {
+                        tracing::error!("Failed to upsert rate limit state: {}", e);
+                    }
+                }
+                tracing::debug!("Synced {} rate limit counter(s) to DB", entries.len());
+            }
+
+            // 2. Snapshot assignments → upsert into DB.
+            let assignments = plan_store.snapshot_assignments();
+            if !assignments.is_empty() {
+                for (key_hash, plan_name) in &assignments {
+                    if let Err(e) = sqlx::query(
+                        r#"INSERT INTO boom_key_plan_assignment (key_hash, plan_name, assigned_at)
+                           VALUES ($1, $2, NOW())
+                           ON CONFLICT (key_hash) DO UPDATE
+                           SET plan_name = EXCLUDED.plan_name"#,
+                    )
+                    .bind(key_hash)
+                    .bind(plan_name)
+                    .execute(&pool)
+                    .await
+                    {
+                        tracing::error!("Failed to upsert assignment: {}", e);
+                    }
+                }
+            }
+
+            // 3. Cleanup stale in-memory entries.
+            let expired = limiter.cleanup_expired();
+            let concurrency_freed = plan_store.cleanup_concurrency();
+            if expired > 0 || concurrency_freed > 0 {
+                tracing::info!(
+                    "Cleanup: removed {} expired window(s), {} idle concurrency counter(s)",
+                    expired,
+                    concurrency_freed
+                );
+            }
+        }
+    });
+    tracing::info!("Background sync task spawned (every 10 min)");
 }
 
 fn init_tracing() {
