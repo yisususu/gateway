@@ -6,6 +6,8 @@ edition.workspace = true
 [dependencies]
 boom-core = { path = "../boom-core" }
 boom-limiter = { path = "../boom-limiter" }
+boom-config = { path = "../boom-config" }
+boom-provider = { path = "../boom-provider" }
 axum = { workspace = true }
 sqlx = { workspace = true }
 serde = { workspace = true }

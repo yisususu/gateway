@@ -109,7 +109,7 @@
 
   // ── Routing (admin) ───────────────────────────────────
   function onRoute() {
-    const hash = location.hash || "#/admin/plans";
+    const hash = location.hash || "#/admin/models";
     document.querySelectorAll("#page-admin .nav-link").forEach((a) => {
       a.classList.toggle("active", a.getAttribute("href") === hash);
     });
@@ -117,16 +117,22 @@
       s.classList.toggle("active", s.id === sectionFromHash(hash));
     });
     const section = sectionFromHash(hash);
-    if (section === "admin-plans") loadPlans();
+    if (section === "admin-models") loadModels();
+    else if (section === "admin-aliases") loadAliases();
+    else if (section === "admin-plans") loadPlans();
     else if (section === "admin-keys") loadKeys();
     else if (section === "admin-assignments") loadAssignments();
+    else if (section === "admin-config") loadConfig();
   }
 
   function sectionFromHash(hash) {
+    if (hash.includes("/admin/models")) return "admin-models";
+    if (hash.includes("/admin/aliases")) return "admin-aliases";
     if (hash.includes("/admin/plans")) return "admin-plans";
     if (hash.includes("/admin/keys")) return "admin-keys";
     if (hash.includes("/admin/assignments")) return "admin-assignments";
-    return "admin-plans";
+    if (hash.includes("/admin/config")) return "admin-config";
+    return "admin-models";
   }
 
   // ── User Dashboard ────────────────────────────────────
@@ -365,11 +371,243 @@
     loadAssignments();
   };
 
+  // ── Admin: Models ─────────────────────────────────────
+  async function loadModels() {
+    try {
+      const data = await api("/admin/models");
+      renderModelsTable(data.models || []);
+    } catch (err) {
+      const wrap = document.getElementById("models-table-wrap");
+      if (wrap) wrap.innerHTML = `<p class="error-msg">Failed to load models: ${esc(err.message)}</p>`;
+    }
+  }
+
+  function renderModelsTable(models) {
+    const wrap = document.getElementById("models-table-wrap");
+    if (models.length === 0) { wrap.innerHTML = "<p>No model deployments.</p>"; return; }
+    wrap.innerHTML = `<table>
+      <tr><th>Model Name</th><th>LiteLLM Model</th><th>Base URL</th><th>RPM</th><th>Timeout</th><th>Enabled</th><th>Source</th><th>Actions</th></tr>
+      ${models.map((m) => `<tr>
+        <td><strong>${esc(m.model_name)}</strong></td>
+        <td class="mono">${esc(m.litellm_model)}</td>
+        <td class="mono">${esc(m.api_base || "-")}</td>
+        <td>${m.rpm || "-"}</td>
+        <td>${m.timeout}s</td>
+        <td>${m.enabled ? '<span class="badge badge-active">Yes</span>' : '<span class="badge badge-blocked">No</span>'}</td>
+        <td><span class="badge badge-plan">${esc(m.source || "-")}</span></td>
+        <td>
+          <button class="btn-small" onclick="window._editModel('${m.id}')">Edit</button>
+          <button class="btn-danger" onclick="window._deleteModel('${m.id}','${esc(m.model_name)}')">Delete</button>
+        </td>
+      </tr>`).join("")}
+    </table>`;
+  }
+
+  function showNewModelModal(prefill) {
+    const p = prefill || {};
+    showModal(`
+      <h3>${p.id ? "Edit" : "Create"} Model Deployment</h3>
+      <div class="form-group"><label>Model Name *</label><input id="m-model-name" value="${esc(p.model_name || "")}" required></div>
+      <div class="form-group"><label>LiteLLM Model *</label><input id="m-litellm-model" value="${esc(p.litellm_model || "")}" required></div>
+      <div class="form-group"><label>API Key</label><input id="m-model-key" type="password" placeholder="sk-... or os.environ/VAR"></div>
+      <div class="form-group"><label>API Key is env reference</label><select id="m-model-key-env"><option value="false">No</option><option value="true">Yes</option></select></div>
+      <div class="form-group"><label>API Base URL</label><input id="m-model-base" value="${esc(p.api_base || "")}" placeholder="https://api.openai.com/v1"></div>
+      <div class="form-group"><label>API Version (Azure)</label><input id="m-model-version" value="${esc(p.api_version || "")}"></div>
+      <div class="form-group"><label>RPM Limit</label><input id="m-model-rpm" type="number" value="${p.rpm || ""}"></div>
+      <div class="form-group"><label>Timeout (seconds)</label><input id="m-model-timeout" type="number" value="${p.timeout || 120}"></div>
+      <div class="form-group"><label>Temperature</label><input id="m-model-temp" type="number" step="0.1" value="${p.temperature || ""}"></div>
+      <div class="form-group"><label>Max Tokens</label><input id="m-model-maxtok" type="number" value="${p.max_tokens || ""}"></div>
+      <div class="form-group"><label>Enabled</label><select id="m-model-enabled"><option value="true" ${p.enabled !== false ? "selected" : ""}>Yes</option><option value="false" ${p.enabled === false ? "selected" : ""}>No</option></select></div>
+      <div class="modal-actions">
+        <button class="btn-secondary" onclick="hideModal()" style="width:auto">Cancel</button>
+        <button class="btn-primary" id="m-model-submit">${p.id ? "Update" : "Create"}</button>
+      </div>
+    `);
+    document.getElementById("m-model-submit").addEventListener("click", async () => {
+      try {
+        const body = {
+          model_name: document.getElementById("m-model-name").value,
+          litellm_model: document.getElementById("m-litellm-model").value,
+          api_key: document.getElementById("m-model-key").value || null,
+          api_key_env: document.getElementById("m-model-key-env").value === "true",
+          api_base: document.getElementById("m-model-base").value || null,
+          api_version: document.getElementById("m-model-version").value || null,
+          rpm: document.getElementById("m-model-rpm").value ? Number(document.getElementById("m-model-rpm").value) : null,
+          timeout: Number(document.getElementById("m-model-timeout").value) || 120,
+          temperature: document.getElementById("m-model-temp").value ? Number(document.getElementById("m-model-temp").value) : null,
+          max_tokens: document.getElementById("m-model-maxtok").value ? Number(document.getElementById("m-model-maxtok").value) : null,
+          enabled: document.getElementById("m-model-enabled").value === "true",
+          headers: {},
+        };
+        const url = p.id ? `/admin/models/${p.id}` : "/admin/models";
+        const method = p.id ? "PUT" : "POST";
+        await api(url, { method, body: JSON.stringify(body) });
+        hideModal();
+        loadModels();
+      } catch (err) { alert("Error: " + err.message); }
+    });
+  }
+
+  window._editModel = async (id) => {
+    try {
+      const data = await api("/admin/models");
+      const m = (data.models || []).find((x) => x.id === id);
+      if (!m) return;
+      showNewModelModal(m);
+    } catch (err) { alert("Error: " + err.message); }
+  };
+
+  window._deleteModel = async (id, name) => {
+    if (!confirm(`Delete model deployment "${name}"?`)) return;
+    await api(`/admin/models/${encodeURIComponent(id)}`, { method: "DELETE" });
+    loadModels();
+  };
+
+  // ── Admin: Aliases ────────────────────────────────────
+  async function loadAliases() {
+    try {
+      const data = await api("/admin/aliases");
+      renderAliasesTable(data.aliases || []);
+    } catch (err) {
+      const wrap = document.getElementById("aliases-table-wrap");
+      if (wrap) wrap.innerHTML = `<p class="error-msg">Failed to load aliases: ${esc(err.message)}</p>`;
+    }
+  }
+
+  function renderAliasesTable(aliases) {
+    const wrap = document.getElementById("aliases-table-wrap");
+    if (aliases.length === 0) { wrap.innerHTML = "<p>No aliases defined.</p>"; return; }
+    wrap.innerHTML = `<table>
+      <tr><th>Alias</th><th>Target Model</th><th>Hidden</th><th>Source</th><th>Actions</th></tr>
+      ${aliases.map((a) => `<tr>
+        <td><strong>${esc(a.alias_name)}</strong></td>
+        <td class="mono">${esc(a.target_model)}</td>
+        <td>${a.hidden ? "Yes" : "No"}</td>
+        <td><span class="badge badge-plan">${esc(a.source || "-")}</span></td>
+        <td>
+          <button class="btn-small" onclick="window._editAlias('${esc(a.alias_name)}')">Edit</button>
+          <button class="btn-danger" onclick="window._deleteAlias('${esc(a.alias_name)}')">Delete</button>
+        </td>
+      </tr>`).join("")}
+    </table>`;
+  }
+
+  function showNewAliasModal(prefill) {
+    const p = prefill || {};
+    showModal(`
+      <h3>${p.alias_name ? "Edit" : "Create"} Alias</h3>
+      <div class="form-group"><label>Alias Name *</label><input id="m-alias-name" value="${esc(p.alias_name || "")}" ${p.alias_name ? "readonly" : ""}></div>
+      <div class="form-group"><label>Target Model *</label><input id="m-alias-target" value="${esc(p.target_model || "")}" required></div>
+      <div class="form-group"><label>Hidden</label><select id="m-alias-hidden"><option value="false" ${!p.hidden ? "selected" : ""}>No</option><option value="true" ${p.hidden ? "selected" : ""}>Yes</option></select></div>
+      <div class="modal-actions">
+        <button class="btn-secondary" onclick="hideModal()" style="width:auto">Cancel</button>
+        <button class="btn-primary" id="m-alias-submit">${p.alias_name ? "Update" : "Create"}</button>
+      </div>
+    `);
+    document.getElementById("m-alias-submit").addEventListener("click", async () => {
+      try {
+        const body = {
+          alias_name: document.getElementById("m-alias-name").value,
+          target_model: document.getElementById("m-alias-target").value,
+          hidden: document.getElementById("m-alias-hidden").value === "true",
+        };
+        const url = p.alias_name ? `/admin/aliases/${encodeURIComponent(p.alias_name)}` : "/admin/aliases";
+        const method = p.alias_name ? "PUT" : "POST";
+        await api(url, { method, body: JSON.stringify(body) });
+        hideModal();
+        loadAliases();
+      } catch (err) { alert("Error: " + err.message); }
+    });
+  }
+
+  window._editAlias = async (name) => {
+    try {
+      const data = await api("/admin/aliases");
+      const a = (data.aliases || []).find((x) => x.alias_name === name);
+      if (!a) return;
+      showNewAliasModal(a);
+    } catch (err) { alert("Error: " + err.message); }
+  };
+
+  window._deleteAlias = async (name) => {
+    if (!confirm(`Delete alias "${name}"?`)) return;
+    await api(`/admin/aliases/${encodeURIComponent(name)}`, { method: "DELETE" });
+    loadAliases();
+  };
+
+  // ── Admin: Config ─────────────────────────────────────
+  async function loadConfig() {
+    try {
+      const data = await api("/admin/config");
+      renderConfigTable(data.config || {});
+    } catch (err) {
+      const wrap = document.getElementById("config-table-wrap");
+      if (wrap) wrap.innerHTML = `<p class="error-msg">Failed to load config: ${esc(err.message)}</p>`;
+    }
+  }
+
+  function renderConfigTable(config) {
+    const wrap = document.getElementById("config-table-wrap");
+    const keys = Object.keys(config);
+    if (keys.length === 0) { wrap.innerHTML = "<p>No configuration entries.</p>"; return; }
+    wrap.innerHTML = `<table>
+      <tr><th>Key</th><th>Value</th><th>Actions</th></tr>
+      ${keys.map((k) => `<tr>
+        <td><strong>${esc(k)}</strong></td>
+        <td class="mono" style="max-width:400px;word-break:break-all;white-space:pre-wrap">${esc(JSON.stringify(config[k], null, 2))}</td>
+        <td><button class="btn-small" onclick="window._editConfig('${esc(k)}')">Edit</button></td>
+      </tr>`).join("")}
+    </table>`;
+  }
+
+  function showNewConfigModal(prefill) {
+    const p = prefill || {};
+    showModal(`
+      <h3>${p.key ? "Edit" : "Set"} Configuration</h3>
+      <div class="form-group"><label>Key *</label><input id="m-config-key" value="${esc(p.key || "")}" ${p.key ? "readonly" : ""}></div>
+      <div class="form-group"><label>Value (JSON) *</label><textarea id="m-config-value" rows="6">${esc(p.value ? JSON.stringify(p.value, null, 2) : "")}</textarea></div>
+      <div class="modal-actions">
+        <button class="btn-secondary" onclick="hideModal()" style="width:auto">Cancel</button>
+        <button class="btn-primary" id="m-config-submit">Save</button>
+      </div>
+    `);
+    document.getElementById("m-config-submit").addEventListener("click", async () => {
+      try {
+        const value = JSON.parse(document.getElementById("m-config-value").value);
+        await api("/admin/config", {
+          method: "PATCH",
+          body: JSON.stringify({
+            key: document.getElementById("m-config-key").value,
+            value: value,
+          }),
+        });
+        hideModal();
+        loadConfig();
+      } catch (err) { alert("Error: " + err.message); }
+    });
+  }
+
+  window._editConfig = async (key) => {
+    try {
+      const data = await api("/admin/config");
+      const config = data.config || {};
+      if (config[key] !== undefined) {
+        showNewConfigModal({ key, value: config[key] });
+      }
+    } catch (err) { alert("Error: " + err.message); }
+  };
+
   // ── Admin: Modals ─────────────────────────────────────
   function setupAdminButtons() {
     document.getElementById("btn-new-plan").addEventListener("click", showNewPlanModal);
     document.getElementById("btn-new-key").addEventListener("click", showNewKeyModal);
     document.getElementById("btn-new-assignment").addEventListener("click", showNewAssignmentModal);
+    const btnModel = document.getElementById("btn-new-model");
+    if (btnModel) btnModel.addEventListener("click", showNewModelModal);
+    const btnAlias = document.getElementById("btn-new-alias");
+    if (btnAlias) btnAlias.addEventListener("click", showNewAliasModal);
+    const btnConfig = document.getElementById("btn-new-config");
+    if (btnConfig) btnConfig.addEventListener("click", showNewConfigModal);
   }
 
   function showModal(html) {

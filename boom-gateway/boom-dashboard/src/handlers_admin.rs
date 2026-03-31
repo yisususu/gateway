@@ -5,7 +5,7 @@ use axum::Json;
 use chrono::NaiveDateTime;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sqlx::FromRow;
+use sqlx::{FromRow, Row};
 use uuid::Uuid;
 
 use crate::auth::{hash_token, AdminSession};
@@ -46,8 +46,52 @@ pub async fn upsert_plan(
         concurrency_limit: req.concurrency_limit,
         rpm_limit: req.rpm_limit,
         window_limits: req.window_limits,
-        schedule: req.schedule,
+        schedule: req.schedule.clone(),
     };
+
+    // Persist to DB.
+    if let Some(ref pool) = state.db_pool {
+        let window_limits_json =
+            serde_json::to_value(&plan.window_limits).unwrap_or(json!([]));
+        let schedule_json = serde_json::to_value(
+            plan.schedule
+                .iter()
+                .map(|s| {
+                    json!({
+                        "hours": s.hours,
+                        "concurrency_limit": s.concurrency_limit,
+                        "rpm_limit": s.rpm_limit,
+                        "window_limits": s.window_limits,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or(json!([]));
+
+        if let Err(e) = sqlx::query(
+            r#"INSERT INTO boom_rate_limit_plan
+               (name, concurrency_limit, rpm_limit, window_limits, schedule, is_default, source)
+               VALUES ($1, $2, $3, $4, $5, false, 'db')
+               ON CONFLICT (name) DO UPDATE
+               SET concurrency_limit = EXCLUDED.concurrency_limit,
+                   rpm_limit = EXCLUDED.rpm_limit,
+                   window_limits = EXCLUDED.window_limits,
+                   schedule = EXCLUDED.schedule,
+                   source = 'db',
+                   updated_at = NOW()"#,
+        )
+        .bind(&req.name)
+        .bind(req.concurrency_limit.map(|v| v as i32))
+        .bind(req.rpm_limit.map(|v| v as i64))
+        .bind(&window_limits_json)
+        .bind(&schedule_json)
+        .execute(pool)
+        .await
+        {
+            tracing::error!("Failed to persist plan to DB: {}", e);
+        }
+    }
+
     state.plan_store.upsert_plan(plan);
     Json(json!({"ok": true, "plan_name": req.name}))
 }
@@ -58,6 +102,22 @@ pub async fn delete_plan(
     Path(name): Path<String>,
 ) -> Json<Value> {
     let deleted = state.plan_store.delete_plan(&name);
+
+    // Delete from DB.
+    if deleted {
+        if let Some(ref pool) = state.db_pool {
+            if let Err(e) = sqlx::query(
+                r#"DELETE FROM boom_rate_limit_plan WHERE name = $1"#,
+            )
+            .bind(&name)
+            .execute(pool)
+            .await
+            {
+                tracing::error!("Failed to delete plan from DB: {}", e);
+            }
+        }
+    }
+
     Json(json!({"ok": deleted, "plan_name": name}))
 }
 
@@ -684,4 +744,683 @@ pub async fn batch_create_keys(
         "skipped_count": skipped.len(),
     }))
     .into_response()
+}
+
+// ═══════════════════════════════════════════════════════════
+// Model deployment management (DB + memory)
+// ═══════════════════════════════════════════════════════════
+
+#[derive(Debug, Deserialize)]
+pub struct CreateDeploymentRequest {
+    pub model_name: String,
+    pub litellm_model: String,
+    pub api_key: Option<String>,
+    pub api_key_env: Option<bool>,
+    pub api_base: Option<String>,
+    pub api_version: Option<String>,
+    pub aws_region_name: Option<String>,
+    pub aws_access_key_id: Option<String>,
+    pub aws_secret_access_key: Option<String>,
+    pub rpm: Option<i64>,
+    pub tpm: Option<i64>,
+    #[serde(default = "default_timeout")]
+    pub timeout: i64,
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+    pub temperature: Option<f64>,
+    pub max_tokens: Option<i32>,
+    #[serde(default = "default_true_val")]
+    pub enabled: bool,
+}
+
+fn default_timeout() -> i64 {
+    120
+}
+fn default_true_val() -> bool {
+    true
+}
+
+/// Row from boom_model_deployment (for list queries).
+#[derive(Debug, FromRow)]
+#[allow(dead_code)]
+struct DeploymentRow {
+    id: Uuid,
+    model_name: String,
+    litellm_model: String,
+    api_key: Option<String>,
+    api_key_env: Option<bool>,
+    api_base: Option<String>,
+    api_version: Option<String>,
+    aws_region_name: Option<String>,
+    aws_access_key_id: Option<String>,
+    aws_secret_access_key: Option<String>,
+    rpm: Option<i64>,
+    tpm: Option<i64>,
+    timeout: i64,
+    headers: serde_json::Value,
+    temperature: Option<f64>,
+    max_tokens: Option<i32>,
+    enabled: Option<bool>,
+    source: Option<String>,
+    created_at: Option<chrono::NaiveDateTime>,
+    updated_at: Option<chrono::NaiveDateTime>,
+}
+
+pub async fn list_models(
+    _session: AdminSession,
+    Extension(state): Extension<std::sync::Arc<DashboardState>>,
+) -> Response {
+    let db_pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Database not available",
+            )
+                .into_response();
+        }
+    };
+
+    let rows: Vec<DeploymentRow> = match sqlx::query_as(
+        r#"SELECT id, model_name, litellm_model, api_key, api_key_env, api_base, api_version,
+                  aws_region_name, aws_access_key_id, aws_secret_access_key,
+                  rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source,
+                  created_at, updated_at
+           FROM boom_model_deployment
+           ORDER BY model_name, created_at"#,
+    )
+    .fetch_all(db_pool)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Dashboard list_models query failed: {}", e);
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("DB error: {}", e),
+            )
+                .into_response();
+        }
+    };
+
+    let models: Vec<Value> = rows
+        .into_iter()
+        .map(|r| {
+            json!({
+                "id": r.id,
+                "model_name": r.model_name,
+                "litellm_model": r.litellm_model,
+                "api_key_env": r.api_key_env.unwrap_or(false),
+                "api_base": r.api_base,
+                "api_version": r.api_version,
+                "aws_region_name": r.aws_region_name,
+                "rpm": r.rpm,
+                "tpm": r.tpm,
+                "timeout": r.timeout,
+                "temperature": r.temperature,
+                "max_tokens": r.max_tokens,
+                "enabled": r.enabled.unwrap_or(true),
+                "source": r.source,
+                "created_at": r.created_at.map(|d| d.to_string()),
+                "updated_at": r.updated_at.map(|d| d.to_string()),
+            })
+        })
+        .collect();
+
+    Json(json!({"models": models})).into_response()
+}
+
+pub async fn create_model(
+    _session: AdminSession,
+    Extension(state): Extension<std::sync::Arc<DashboardState>>,
+    Json(req): Json<CreateDeploymentRequest>,
+) -> Response {
+    let db_pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Database not available",
+            )
+                .into_response();
+        }
+    };
+
+    let headers_json = serde_json::to_value(&req.headers).unwrap_or(json!({}));
+
+    // Insert into DB.
+    let result = sqlx::query(
+        r#"INSERT INTO boom_model_deployment
+           (model_name, litellm_model, api_key, api_key_env, api_base, api_version,
+            aws_region_name, aws_access_key_id, aws_secret_access_key,
+            rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'db')
+           RETURNING id"#,
+    )
+    .bind(&req.model_name)
+    .bind(&req.litellm_model)
+    .bind(&req.api_key)
+    .bind(req.api_key_env.unwrap_or(false))
+    .bind(&req.api_base)
+    .bind(&req.api_version)
+    .bind(&req.aws_region_name)
+    .bind(&req.aws_access_key_id)
+    .bind(&req.aws_secret_access_key)
+    .bind(req.rpm)
+    .bind(req.tpm)
+    .bind(req.timeout)
+    .bind(&headers_json)
+    .bind(req.temperature)
+    .bind(req.max_tokens)
+    .bind(req.enabled)
+    .fetch_one(db_pool)
+    .await;
+
+    let id: Uuid = match result {
+        Ok(row) => row.get("id"),
+        Err(e) => {
+            tracing::error!("Dashboard create_model insert failed: {}", e);
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to create model: {}", e),
+            )
+                .into_response();
+        }
+    };
+
+    // Build provider and add to memory (if enabled).
+    if req.enabled {
+        if let Some(provider) = build_provider_from_request(&req) {
+            state.deployment_store.add_deployment(&req.model_name, provider);
+            tracing::info!(model = %req.model_name, "Model deployment created and loaded");
+        }
+    }
+
+    Json(json!({"ok": true, "id": id, "model_name": req.model_name})).into_response()
+}
+
+pub async fn update_model(
+    _session: AdminSession,
+    Extension(state): Extension<std::sync::Arc<DashboardState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<CreateDeploymentRequest>,
+) -> Response {
+    let db_pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Database not available",
+            )
+                .into_response();
+        }
+    };
+
+    let headers_json = serde_json::to_value(&req.headers).unwrap_or(json!({}));
+
+    let result = sqlx::query(
+        r#"UPDATE boom_model_deployment
+           SET model_name = $2, litellm_model = $3, api_key = $4, api_key_env = $5,
+               api_base = $6, api_version = $7, aws_region_name = $8,
+               aws_access_key_id = $9, aws_secret_access_key = $10,
+               rpm = $11, tpm = $12, timeout = $13, headers = $14,
+               temperature = $15, max_tokens = $16, enabled = $17, updated_at = NOW()
+           WHERE id = $1"#,
+    )
+    .bind(id)
+    .bind(&req.model_name)
+    .bind(&req.litellm_model)
+    .bind(&req.api_key)
+    .bind(req.api_key_env.unwrap_or(false))
+    .bind(&req.api_base)
+    .bind(&req.api_version)
+    .bind(&req.aws_region_name)
+    .bind(&req.aws_access_key_id)
+    .bind(&req.aws_secret_access_key)
+    .bind(req.rpm)
+    .bind(req.tpm)
+    .bind(req.timeout)
+    .bind(&headers_json)
+    .bind(req.temperature)
+    .bind(req.max_tokens)
+    .bind(req.enabled)
+    .execute(db_pool)
+    .await;
+
+    match result {
+        Ok(r) if r.rows_affected() > 0 => {
+            // Rebuild provider for this model.
+            // For simplicity, reload all deployments for this model_name from DB.
+            // A more targeted approach would track which deployment changed.
+            if req.enabled {
+                if let Some(provider) = build_provider_from_request(&req) {
+                    state.deployment_store.add_deployment(&req.model_name, provider);
+                }
+            }
+            Json(json!({"ok": true})).into_response()
+        }
+        Ok(_) => (
+            axum::http::StatusCode::NOT_FOUND,
+            "Model deployment not found",
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("Dashboard update_model failed: {}", e);
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("DB error: {}", e),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn delete_model(
+    _session: AdminSession,
+    Extension(state): Extension<std::sync::Arc<DashboardState>>,
+    Path(id): Path<Uuid>,
+) -> Response {
+    let db_pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Database not available",
+            )
+                .into_response();
+        }
+    };
+
+    // Get model_name before deleting (to potentially clean up deployment store).
+    let model_name: Option<String> = sqlx::query_scalar(
+        r#"SELECT model_name FROM boom_model_deployment WHERE id = $1"#,
+    )
+    .bind(id)
+    .fetch_optional(db_pool)
+    .await
+    .ok()
+    .flatten();
+
+    let result = sqlx::query(
+        r#"DELETE FROM boom_model_deployment WHERE id = $1"#,
+    )
+    .bind(id)
+    .execute(db_pool)
+    .await;
+
+    match result {
+        Ok(r) if r.rows_affected() > 0 => {
+            // Note: we don't remove from deployment_store here because
+            // there may be other deployments for the same model_name.
+            // A full rebuild would be needed for accurate cleanup.
+            let name = model_name.unwrap_or_default();
+            tracing::info!(model = %name, "Model deployment deleted");
+            Json(json!({"ok": true, "model_name": name})).into_response()
+        }
+        Ok(_) => (
+            axum::http::StatusCode::NOT_FOUND,
+            "Model deployment not found",
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("Dashboard delete_model failed: {}", e);
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("DB error: {}", e),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Build a Provider from a CreateDeploymentRequest.
+fn build_provider_from_request(req: &CreateDeploymentRequest) -> Option<std::sync::Arc<dyn boom_core::provider::Provider>> {
+    let mut extra = req.headers.clone();
+    if let Some(ref v) = req.api_version {
+        extra.insert("api_version".to_string(), v.clone());
+    }
+    if let Some(ref r) = req.aws_region_name {
+        extra.insert("aws_region_name".to_string(), r.clone());
+    }
+
+    // Resolve api_key (may be env reference).
+    let api_key = req.api_key.as_ref().map(|k| {
+        if req.api_key_env.unwrap_or(false) {
+            boom_config::resolve_env_value(k)
+        } else {
+            k.clone()
+        }
+    });
+
+    match boom_provider::create_provider(
+        &req.litellm_model,
+        api_key,
+        req.api_base.clone(),
+        req.timeout as u64,
+        &extra,
+    ) {
+        Ok(provider) => Some(provider),
+        Err(e) => {
+            tracing::error!("Failed to build provider for '{}': {}", req.model_name, e);
+            None
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
+// Model alias management (DB + memory)
+// ═══════════════════════════════════════════════════════════
+
+#[derive(Debug, Deserialize)]
+pub struct CreateAliasRequest {
+    pub alias_name: String,
+    pub target_model: String,
+    #[serde(default)]
+    pub hidden: bool,
+}
+
+pub async fn list_aliases(
+    _session: AdminSession,
+    Extension(state): Extension<std::sync::Arc<DashboardState>>,
+) -> Response {
+    let db_pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Database not available",
+            )
+                .into_response();
+        }
+    };
+
+    #[derive(Debug, FromRow)]
+    struct AliasRow {
+        alias_name: String,
+        target_model: String,
+        hidden: Option<bool>,
+        source: Option<String>,
+        updated_at: Option<chrono::NaiveDateTime>,
+    }
+
+    let rows: Vec<AliasRow> = match sqlx::query_as(
+        r#"SELECT alias_name, target_model, hidden, source, updated_at
+           FROM boom_model_alias
+           ORDER BY alias_name"#,
+    )
+    .fetch_all(db_pool)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Dashboard list_aliases query failed: {}", e);
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("DB error: {}", e),
+            )
+                .into_response();
+        }
+    };
+
+    let aliases: Vec<Value> = rows
+        .into_iter()
+        .map(|r| {
+            json!({
+                "alias_name": r.alias_name,
+                "target_model": r.target_model,
+                "hidden": r.hidden.unwrap_or(false),
+                "source": r.source,
+                "updated_at": r.updated_at.map(|d| d.to_string()),
+            })
+        })
+        .collect();
+
+    Json(json!({"aliases": aliases})).into_response()
+}
+
+pub async fn create_alias(
+    _session: AdminSession,
+    Extension(state): Extension<std::sync::Arc<DashboardState>>,
+    Json(req): Json<CreateAliasRequest>,
+) -> Response {
+    let db_pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Database not available",
+            )
+                .into_response();
+        }
+    };
+
+    let result = sqlx::query(
+        r#"INSERT INTO boom_model_alias (alias_name, target_model, hidden, source)
+           VALUES ($1, $2, $3, 'db')
+           ON CONFLICT (alias_name) DO UPDATE
+           SET target_model = EXCLUDED.target_model,
+               hidden = EXCLUDED.hidden,
+               source = 'db',
+               updated_at = NOW()"#,
+    )
+    .bind(&req.alias_name)
+    .bind(&req.target_model)
+    .bind(req.hidden)
+    .execute(db_pool)
+    .await;
+
+    if let Err(e) = result {
+        tracing::error!("Dashboard create_alias failed: {}", e);
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("DB error: {}", e),
+        )
+            .into_response();
+    }
+
+    // Update in-memory alias store.
+    state.alias_store.set_alias(
+        req.alias_name.clone(),
+        req.target_model.clone(),
+        req.hidden,
+    );
+
+    tracing::info!(alias = %req.alias_name, target = %req.target_model, "Alias created");
+    Json(json!({"ok": true, "alias_name": req.alias_name})).into_response()
+}
+
+pub async fn update_alias(
+    _session: AdminSession,
+    Extension(state): Extension<std::sync::Arc<DashboardState>>,
+    Path(alias_name): Path<String>,
+    Json(req): Json<CreateAliasRequest>,
+) -> Response {
+    let db_pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Database not available",
+            )
+                .into_response();
+        }
+    };
+
+    let result = sqlx::query(
+        r#"UPDATE boom_model_alias
+           SET target_model = $2, hidden = $3, updated_at = NOW()
+           WHERE alias_name = $1"#,
+    )
+    .bind(&alias_name)
+    .bind(&req.target_model)
+    .bind(req.hidden)
+    .execute(db_pool)
+    .await;
+
+    match result {
+        Ok(r) if r.rows_affected() > 0 => {
+            // Remove old alias and set new one.
+            state.alias_store.remove_alias(&alias_name);
+            state.alias_store.set_alias(
+                alias_name.clone(),
+                req.target_model.clone(),
+                req.hidden,
+            );
+            Json(json!({"ok": true})).into_response()
+        }
+        Ok(_) => (
+            axum::http::StatusCode::NOT_FOUND,
+            "Alias not found",
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("Dashboard update_alias failed: {}", e);
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("DB error: {}", e),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn delete_alias(
+    _session: AdminSession,
+    Extension(state): Extension<std::sync::Arc<DashboardState>>,
+    Path(alias_name): Path<String>,
+) -> Response {
+    let db_pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Database not available",
+            )
+                .into_response();
+        }
+    };
+
+    let result = sqlx::query(
+        r#"DELETE FROM boom_model_alias WHERE alias_name = $1"#,
+    )
+    .bind(&alias_name)
+    .execute(db_pool)
+    .await;
+
+    match result {
+        Ok(r) if r.rows_affected() > 0 => {
+            state.alias_store.remove_alias(&alias_name);
+            tracing::info!(alias = %alias_name, "Alias deleted");
+            Json(json!({"ok": true, "alias_name": alias_name})).into_response()
+        }
+        Ok(_) => (
+            axum::http::StatusCode::NOT_FOUND,
+            "Alias not found",
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("Dashboard delete_alias failed: {}", e);
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("DB error: {}", e),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
+// Config management (boom_config KV store)
+// ═══════════════════════════════════════════════════════════
+
+pub async fn get_config(
+    _session: AdminSession,
+    Extension(state): Extension<std::sync::Arc<DashboardState>>,
+) -> Response {
+    let db_pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Database not available",
+            )
+                .into_response();
+        }
+    };
+
+    #[derive(Debug, FromRow)]
+    #[allow(dead_code)]
+    struct ConfigRow {
+        key: String,
+        value: serde_json::Value,
+        updated_at: Option<chrono::NaiveDateTime>,
+    }
+
+    let rows: Vec<ConfigRow> = match sqlx::query_as(
+        r#"SELECT key, value, updated_at FROM boom_config ORDER BY key"#,
+    )
+    .fetch_all(db_pool)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Dashboard get_config query failed: {}", e);
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("DB error: {}", e),
+            )
+                .into_response();
+        }
+    };
+
+    let config: std::collections::HashMap<String, Value> = rows
+        .into_iter()
+        .map(|r| (r.key, r.value))
+        .collect();
+
+    Json(json!({"config": config})).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PatchConfigRequest {
+    pub key: String,
+    pub value: serde_json::Value,
+}
+
+pub async fn patch_config(
+    _session: AdminSession,
+    Extension(state): Extension<std::sync::Arc<DashboardState>>,
+    Json(req): Json<PatchConfigRequest>,
+) -> Response {
+    let db_pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Database not available",
+            )
+                .into_response();
+        }
+    };
+
+    let result = sqlx::query(
+        r#"INSERT INTO boom_config (key, value) VALUES ($1, $2)
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()"#,
+    )
+    .bind(&req.key)
+    .bind(&req.value)
+    .execute(db_pool)
+    .await;
+
+    if let Err(e) = result {
+        tracing::error!("Dashboard patch_config failed: {}", e);
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("DB error: {}", e),
+        )
+            .into_response();
+    }
+
+    tracing::info!(key = %req.key, "Config updated");
+    Json(json!({"ok": true, "key": req.key})).into_response()
 }

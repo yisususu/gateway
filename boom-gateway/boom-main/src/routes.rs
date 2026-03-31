@@ -10,9 +10,8 @@ use boom_core::anthropic::{
 use boom_core::provider::RateLimiter;
 use boom_core::types::*;
 use boom_core::GatewayError;
-use boom_limiter::{ConcurrencyGuard, GuardedStream, PlanStore, RateLimitPlan};
+use boom_limiter::{AliasStore, ConcurrencyGuard, DeploymentStore, GuardedStream, PlanStore, RateLimitPlan};
 use futures::StreamExt;
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -29,7 +28,7 @@ pub async fn chat_completions(
     let inner = state.inner.load();
 
     // 1. Model access check (deployment-aware, alias-aware).
-    check_model_access(identity, &req.model, &inner.deployments, &inner.model_aliases)
+    check_model_access(identity, &req.model, &state.deployment_store, &state.alias_store)
         .map_err(GatewayErrorReply)?;
 
     // 2. Plan-based or default rate limiting.
@@ -88,10 +87,14 @@ pub async fn list_models(
     auth: RequiredAuth,
 ) -> Result<Json<serde_json::Value>, GatewayErrorReply> {
     let identity = auth.identity();
-    let inner = state.inner.load();
+    let _inner = state.inner.load();
 
     // Collect all visible model names (deployments + non-hidden aliases, excluding "*").
-    let all_names: Vec<String> = inner.visible_model_names();
+    let all_names: Vec<String> = state.deployment_store.model_names()
+        .into_iter()
+        .filter(|k| k != "*")
+        .chain(state.alias_store.visible_names())
+        .collect();
 
     let visible: Vec<ModelInfo> = if identity.models.is_empty() {
         // Unrestricted key — show all visible models.
@@ -106,7 +109,6 @@ pub async fn list_models(
             .collect()
     } else {
         // Restricted key — only show models the key has access to.
-        // Check both direct match and alias match (alias <-> target).
         all_names
             .iter()
             .filter(|name| {
@@ -115,8 +117,8 @@ pub async fn list_models(
                     return true;
                 }
                 // If name is an alias, check if key has access to target model.
-                if let Some(target) = inner.model_aliases.get(*name) {
-                    if identity.models.iter().any(|m| m == target && m != "*") {
+                if let Some(target) = state.alias_store.resolve(name) {
+                    if identity.models.iter().any(|m| m == &target && m != "*") {
                         return true;
                     }
                 }
@@ -125,8 +127,8 @@ pub async fn list_models(
                     if allowed == "*" {
                         continue;
                     }
-                    if let Some(target) = inner.model_aliases.get(allowed) {
-                        if target == *name {
+                    if let Some(target) = state.alias_store.resolve(allowed) {
+                        if target == **name {
                             return true;
                         }
                     }
@@ -174,7 +176,7 @@ pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse>
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_secs: uptime as u64,
         db_connected: inner.health.db_connected,
-        models_count: inner.deployments.len(),
+        models_count: state.deployment_store.len(),
         reload_count: inner.health.reload_count,
         last_reload_at: Some(inner.health.last_reload_at.to_rfc3339()),
     })
@@ -397,31 +399,20 @@ impl From<GatewayError> for GatewayErrorReply {
 }
 
 // ============================================================
-// Model Access Check (deployment-aware)
+// Model Access Check (deployment-aware, uses stores)
 // ============================================================
 
 /// Check if an identity can access the given model, considering the gateway's
 /// configured deployments and model aliases.
-///
-/// Logic:
-/// 1. Unrestricted key (models empty after resolution) -> allow
-/// 2. Model in key_models -> allow (direct match)
-/// 3. Alias match: if model is an alias, check if target is in key_models
-/// 4. Reverse alias: if key_models contains an alias that targets this model -> allow
-/// 5. Model NOT in key_models but IS configured in gateway -> REJECT
-///    (model exists, user has no access)
-/// 6. Model NOT in key_models and NOT in gateway, but key has "*" -> allow
-///    (best-effort: route through catch-all deployment)
-/// 7. Otherwise -> REJECT
-fn check_model_access<V>(
+fn check_model_access(
     identity: &AuthIdentity,
     model: &str,
-    deployments: &HashMap<String, V>,
-    model_aliases: &HashMap<String, String>,
+    deployment_store: &Arc<DeploymentStore>,
+    alias_store: &Arc<AliasStore>,
 ) -> Result<(), GatewayError> {
     // Unrestricted key
     if identity.models.is_empty() {
-        tracing::info!(
+        tracing::debug!(
             "check_model_access: key={:?}, model={}, result=allow (unrestricted)",
             identity.key_name, model
         );
@@ -430,7 +421,7 @@ fn check_model_access<V>(
 
     // Direct match
     if identity.models.iter().any(|m| m == model) {
-        tracing::info!(
+        tracing::debug!(
             "check_model_access: key={:?}, model={}, result=allow (direct match)",
             identity.key_name, model
         );
@@ -438,9 +429,9 @@ fn check_model_access<V>(
     }
 
     // Alias match: requested model is an alias -> check if target is in key_models
-    if let Some(target) = model_aliases.get(model) {
-        if identity.models.iter().any(|m| m == target) {
-            tracing::info!(
+    if let Some(target) = alias_store.resolve(model) {
+        if identity.models.iter().any(|m| m == &target) {
+            tracing::debug!(
                 "check_model_access: key={:?}, model={}, result=allow (alias -> target={})",
                 identity.key_name, model, target
             );
@@ -450,9 +441,9 @@ fn check_model_access<V>(
 
     // Reverse alias: key_models has an alias that targets the requested model
     for allowed in &identity.models {
-        if let Some(target) = model_aliases.get(allowed) {
+        if let Some(target) = alias_store.resolve(allowed) {
             if target == model {
-                tracing::info!(
+                tracing::debug!(
                     "check_model_access: key={:?}, model={}, result=allow (key has alias '{}' -> this model)",
                     identity.key_name, model, allowed
                 );
@@ -463,10 +454,9 @@ fn check_model_access<V>(
 
     // Not in key_models — check if it's a configured model or a wildcard case
     let has_wildcard = identity.models.iter().any(|m| m == "*");
-    let model_configured = deployments.contains_key(model);
+    let model_configured = deployment_store.contains(model);
 
     if model_configured {
-        // Model exists in config but user doesn't have access -> REJECT
         tracing::warn!(
             "check_model_access: key={:?}, model={}, result=deny (configured model, not in key_models={:?})",
             identity.key_name, model, identity.models
@@ -475,8 +465,7 @@ fn check_model_access<V>(
     }
 
     if has_wildcard {
-        // Model not in config, user has "*" -> allow (route through catch-all)
-        tracing::info!(
+        tracing::debug!(
             "check_model_access: key={:?}, model={}, result=allow (wildcard fallback)",
             identity.key_name, model
         );
@@ -496,9 +485,6 @@ fn check_model_access<V>(
 
 /// Check plan-based limits if a plan is assigned, otherwise fall back to
 /// default per-model rate limits.
-///
-/// Returns `Some(ConcurrencyGuard)` when a plan with concurrency_limit is
-/// assigned (guard must live until the request completes / stream ends).
 async fn check_plan_or_default_limits(
     plan_store: &Arc<PlanStore>,
     limiter: &Arc<boom_limiter::SlidingWindowLimiter>,
@@ -507,7 +493,6 @@ async fn check_plan_or_default_limits(
     rpm_limit: Option<u64>,
     window_limits: &[(u64, u64)],
 ) -> Result<Option<ConcurrencyGuard>, GatewayError> {
-    // Three-level fallback: explicit assignment → default plan → config-level limits.
     let plan = plan_store
         .resolve_plan(key_hash)
         .or_else(|| plan_store.get_default_plan());
@@ -521,7 +506,6 @@ async fn check_plan_or_default_limits(
                 "Using plan-based rate limits"
             );
 
-            // 1. Concurrency check.
             let guard = if let Some(limit) = concurrency_limit {
                 Some(plan_store.try_acquire(key_hash, limit).ok_or_else(|| {
                     GatewayError::ConcurrencyExceeded {
@@ -536,7 +520,6 @@ async fn check_plan_or_default_limits(
                 None
             };
 
-            // 2. Plan rate limits (per key, model set to __plan__ to isolate from per-model counters).
             let rl_key = RateLimitKey {
                 key_hash: key_hash.to_string(),
                 model: "__plan__".to_string(),
@@ -547,7 +530,6 @@ async fn check_plan_or_default_limits(
                 .await?;
 
             if !decision.allowed {
-                // Window exceeded — release concurrency slot.
                 drop(guard);
                 return Err(GatewayError::RateLimitExceeded {
                     retry_after_secs: decision.retry_after_secs,
@@ -561,7 +543,6 @@ async fn check_plan_or_default_limits(
             Ok(guard)
         }
         None => {
-            // No plan assigned — use default per-model rate limits.
             let rl_key = RateLimitKey {
                 key_hash: key_hash.to_string(),
                 model: model.to_string(),
@@ -621,7 +602,7 @@ pub async fn messages(
     let inner = state.inner.load();
 
     // 1. Model access check (deployment-aware, alias-aware).
-    check_model_access(identity, &openai_req.model, &inner.deployments, &inner.model_aliases)
+    check_model_access(identity, &openai_req.model, &state.deployment_store, &state.alias_store)
         .map_err(AnthropicErrorReply)?;
 
     // 2. Plan-based or default rate limiting.

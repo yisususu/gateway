@@ -103,6 +103,8 @@ fn build_router(state: AppState) -> Router {
         state.db_pool.clone(),
         state.plan_store.clone(),
         state.limiter.clone(),
+        state.deployment_store.clone(),
+        state.alias_store.clone(),
         master_key,
     );
     let dashboard_router = boom_dashboard::build_router(dashboard_state);

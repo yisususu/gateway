@@ -23,7 +23,6 @@ pub fn build_router<S: Clone + Send + Sync + 'static>(state: DashboardState) -> 
         // Root redirect → /dashboard
         .route("/", get(handlers_static::redirect_root))
         // Static files (SPA).
-        // Note: use "/dashboard" (no trailing slash) so both /dashboard and /dashboard/ work.
         .route("/dashboard", get(handlers_static::index))
         .route("/dashboard/", get(handlers_static::index))
         .route("/dashboard/style.css", get(handlers_static::style_css))
@@ -82,6 +81,29 @@ pub fn build_router<S: Clone + Send + Sync + 'static>(state: DashboardState) -> 
         .route(
             "/dashboard/api/admin/usage/{key_hash}",
             get(handlers_admin::get_key_usage),
+        )
+        // Admin — Model deployment CRUD (new).
+        .route(
+            "/dashboard/api/admin/models",
+            get(handlers_admin::list_models).post(handlers_admin::create_model),
+        )
+        .route(
+            "/dashboard/api/admin/models/{id}",
+            put(handlers_admin::update_model).delete(handlers_admin::delete_model),
+        )
+        // Admin — Model alias CRUD (new).
+        .route(
+            "/dashboard/api/admin/aliases",
+            get(handlers_admin::list_aliases).post(handlers_admin::create_alias),
+        )
+        .route(
+            "/dashboard/api/admin/aliases/{alias_name}",
+            put(handlers_admin::update_alias).delete(handlers_admin::delete_alias),
+        )
+        // Admin — Config KV store (new).
+        .route(
+            "/dashboard/api/admin/config",
+            get(handlers_admin::get_config).patch(handlers_admin::patch_config),
         )
         // SPA fallback — must be last.
         .route("/dashboard/{*path}", get(handlers_static::spa_fallback))

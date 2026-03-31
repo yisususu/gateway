@@ -277,8 +277,10 @@ name = "boom-dashboard"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "boom-config",
  "boom-core",
  "boom-limiter",
+ "boom-provider",
  "chrono",
  "hex",
  "jsonwebtoken",

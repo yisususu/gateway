@@ -1,5 +1,5 @@
 use boom_core::GatewayError;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 
@@ -200,6 +200,11 @@ pub struct GeneralSettings {
     pub master_key: Option<String>,
     /// PostgreSQL database URL (compatible with litellm schema).
     pub database_url: Option<String>,
+    /// When true, DB is the authority for model deployments, aliases, and plans.
+    /// YAML is only used to seed on first run. When false (default), YAML is
+    /// the authority and DB only persists rate-limit state / key assignments.
+    #[serde(default)]
+    pub store_model_in_db: bool,
 }
 
 impl Default for GeneralSettings {
@@ -207,6 +212,7 @@ impl Default for GeneralSettings {
         Self {
             master_key: None,
             database_url: None,
+            store_model_in_db: false,
         }
     }
 }
@@ -287,7 +293,7 @@ fn default_workers() -> usize {
     4
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RateLimitSettings {
     #[serde(default = "default_true")]
     pub enabled: bool,
