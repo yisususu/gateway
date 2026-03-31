@@ -52,6 +52,8 @@
       document.getElementById("page-admin").classList.add("active");
       onRoute();
     } else {
+      const titleEl = document.getElementById("user-sidebar-title");
+      if (titleEl && currentUser) titleEl.textContent = currentUser.user_id || "Dashboard";
       document.getElementById("page-dashboard").classList.add("active");
       loadUserData();
       startUsageRefresh();
@@ -68,11 +70,12 @@
       btn.disabled = true;
       btn.textContent = "Logging in...";
       try {
+        const userId = document.getElementById("user_id").value.trim();
         const res = await fetch(API + "/auth/login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            user_id: document.getElementById("user_id").value.trim(),
+            user_id: userId || "",
             api_key: document.getElementById("api_key").value,
           }),
         });
@@ -188,6 +191,7 @@
     const el = document.getElementById("key-info");
     if (info.error) { el.innerHTML = `<p>${esc(info.error)}</p>`; return; }
     const rows = [
+      ["Key Alias", info.key_alias || "-"],
       ["Token", info.token_prefix],
       ["Key Name", info.key_name || "-"],
       ["Spend", "$" + (info.spend || 0).toFixed(4)],
@@ -263,9 +267,10 @@
     const wrap = document.getElementById("keys-table-wrap");
     if (keys.length === 0) { wrap.innerHTML = "<p>No keys found.</p>"; return; }
     wrap.innerHTML = `<table>
-      <tr><th>Token</th><th>Name</th><th>User</th><th>Spend</th><th>Budget</th><th>Status</th><th>Actions</th></tr>
+      <tr><th>Token</th><th>Alias</th><th>Name</th><th>User</th><th>Spend</th><th>Budget</th><th>Status</th><th>Actions</th></tr>
       ${keys.map((k) => `<tr>
         <td class="mono">${esc(k.token_prefix)}</td>
+        <td>${esc(k.key_alias || "-")}</td>
         <td>${esc(k.key_name || "-")}</td>
         <td>${esc(k.user_id || "-")}</td>
         <td>$${(k.spend || 0).toFixed(4)}</td>

@@ -169,6 +169,7 @@ pub async fn login(
     }
 
     // User login: SHA-256(api_key) → lookup in DB.
+    // user_id field is ignored for non-admin login (can be "user", empty, or anything).
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
@@ -179,27 +180,18 @@ pub async fn login(
 
     let token_hash = hash_token(&req.api_key);
 
-    let row: Option<(Option<String>, Option<bool>)> = sqlx::query_as(
-        r#"SELECT user_id, blocked FROM "LiteLLM_VerificationToken" WHERE token = $1"#,
+    let row: Option<(Option<String>, Option<String>, Option<bool>)> = sqlx::query_as(
+        r#"SELECT user_id, key_alias, blocked FROM "LiteLLM_VerificationToken" WHERE token = $1"#,
     )
     .bind(&token_hash)
     .fetch_optional(db_pool)
     .await
     .unwrap_or(None);
 
-    let (user_id, blocked) = match row {
-        Some((uid, blk)) => (uid, blk),
+    let (user_id, key_alias, blocked) = match row {
+        Some((uid, alias, blk)) => (uid, alias, blk),
         None => {
             return (axum::http::StatusCode::UNAUTHORIZED, "Invalid API key")
-                .into_response();
-        }
-    };
-
-    // Check user_id matches.
-    let uid = match user_id {
-        Some(ref uid) if uid == &req.user_id => uid.clone(),
-        _ => {
-            return (axum::http::StatusCode::UNAUTHORIZED, "User ID mismatch")
                 .into_response();
         }
     };
@@ -209,7 +201,12 @@ pub async fn login(
         return (axum::http::StatusCode::FORBIDDEN, "Key is blocked").into_response();
     }
 
-    sign_and_respond(&state, uid, "user".to_string(), token_hash)
+    // Use key_alias as display name, fallback to user_id or "user".
+    let display_name = key_alias
+        .or(user_id)
+        .unwrap_or_else(|| "user".to_string());
+
+    sign_and_respond(&state, display_name, "user".to_string(), token_hash)
 }
 
 fn sign_and_respond(

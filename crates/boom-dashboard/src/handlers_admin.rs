@@ -66,7 +66,7 @@ pub async fn delete_plan(
 // ═══════════════════════════════════════════════════════════
 
 /// Row mapper for the keys list query.
-/// Uses FromRow to handle PostgreSQL type coercion correctly.
+/// Types must match boom-auth's VerificationToken to avoid runtime decode errors.
 #[derive(Debug, FromRow)]
 struct KeyRow {
     token: String,
@@ -74,8 +74,10 @@ struct KeyRow {
     key_alias: Option<String>,
     user_id: Option<String>,
     team_id: Option<String>,
-    models: Option<serde_json::Value>,
-    spend: Option<f64>,
+    /// litellm stores models as text[] in PostgreSQL.
+    models: Vec<String>,
+    /// spend has a NOT NULL DEFAULT 0.0 constraint.
+    spend: f64,
     blocked: Option<bool>,
     rpm_limit: Option<i64>,
     tpm_limit: Option<i64>,
@@ -155,7 +157,7 @@ pub async fn list_keys(
                 "user_id": r.user_id,
                 "team_id": r.team_id,
                 "models": r.models,
-                "spend": r.spend.unwrap_or(0.0),
+                "spend": r.spend,
                 "blocked": r.blocked.unwrap_or(false),
                 "rpm_limit": r.rpm_limit,
                 "tpm_limit": r.tpm_limit,
