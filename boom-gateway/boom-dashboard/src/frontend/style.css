@@ -61,16 +61,36 @@ input, select, textarea { font-family: var(--font); font-size: 15px; }
   box-shadow: var(--shadow-lg);
 }
 .login-brand {
-  text-align: center; margin-bottom: 32px;
+  text-align: center; margin-bottom: 32px; position: relative;
+}
+.login-brand::before {
+  content: "";
+  display: block; width: 8px; height: 8px; margin: 0 auto 14px;
+  background: var(--primary);
+  transform: rotate(45deg);
+  box-shadow:
+    -10px 0 0 0 rgba(232,133,61,.3),
+    10px 0 0 0 rgba(232,133,61,.3),
+    0 -10px 0 0 rgba(232,133,61,.3),
+    0 10px 0 0 rgba(232,133,61,.3);
 }
 .login-brand .brand-name {
-  font-size: 32px; font-weight: 700; letter-spacing: 4px;
-  color: var(--primary);
-  text-shadow: 0 0 40px rgba(232,133,61,.15);
+  font-size: 36px; font-weight: 700; letter-spacing: 5px;
+  background: linear-gradient(135deg, #e8853d, #f0a855, #e8853d);
+  background-size: 200% 200%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  filter: drop-shadow(0 0 24px rgba(232,133,61,.2));
+  animation: brand-shimmer 4s ease-in-out infinite;
+}
+@keyframes brand-shimmer {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
 }
 .login-brand .brand-tagline {
   color: var(--text3); font-size: 11px; letter-spacing: 3px;
-  text-transform: uppercase; margin-top: 6px;
+  text-transform: uppercase; margin-top: 8px;
 }
 .form-group { margin-bottom: 18px; }
 .form-group label {
