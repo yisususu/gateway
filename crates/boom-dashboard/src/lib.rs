@@ -20,6 +20,8 @@ pub fn build_router<S: Clone + Send + Sync + 'static>(state: DashboardState) -> 
 
     Router::new()
         // Static files (SPA).
+        // Note: use "/dashboard" (no trailing slash) so both /dashboard and /dashboard/ work.
+        .route("/dashboard", get(handlers_static::index))
         .route("/dashboard/", get(handlers_static::index))
         .route("/dashboard/style.css", get(handlers_static::style_css))
         .route("/dashboard/app.js", get(handlers_static::app_js))
