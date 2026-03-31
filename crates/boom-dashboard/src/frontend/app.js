@@ -252,7 +252,11 @@
       const data = await api(`/admin/keys?page=${keysPage}&per_page=50`);
       renderKeysTable(data.keys || []);
       renderKeysPagination(data);
-    } catch {}
+    } catch (err) {
+      const wrap = document.getElementById("keys-table-wrap");
+      if (wrap) wrap.innerHTML = `<p class="error-msg">Failed to load keys: ${esc(err.message)}</p>`;
+      console.error("loadKeys error:", err);
+    }
   }
 
   function renderKeysTable(keys) {

@@ -2,8 +2,10 @@ use axum::extract::{Path, Query};
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use axum::Json;
+use chrono::NaiveDateTime;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sqlx::FromRow;
 use uuid::Uuid;
 
 use crate::auth::{hash_token, AdminSession};
@@ -63,6 +65,27 @@ pub async fn delete_plan(
 // Key management (DB operations)
 // ═══════════════════════════════════════════════════════════
 
+/// Row mapper for the keys list query.
+/// Uses FromRow to handle PostgreSQL type coercion correctly.
+#[derive(Debug, FromRow)]
+struct KeyRow {
+    token: String,
+    key_name: Option<String>,
+    key_alias: Option<String>,
+    user_id: Option<String>,
+    team_id: Option<String>,
+    models: Option<serde_json::Value>,
+    spend: Option<f64>,
+    blocked: Option<bool>,
+    rpm_limit: Option<i64>,
+    tpm_limit: Option<i64>,
+    max_budget: Option<f64>,
+    budget_duration: Option<String>,
+    expires: Option<NaiveDateTime>,
+    metadata: Option<serde_json::Value>,
+    created_at: Option<NaiveDateTime>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ListKeysQuery {
     #[serde(default = "default_page")]
@@ -96,23 +119,7 @@ pub async fn list_keys(
 
     let offset = (query.page - 1).max(0) * query.per_page;
 
-    let rows: Vec<(
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<serde_json::Value>,
-        f64,
-        Option<bool>,
-        Option<i64>,
-        Option<i64>,
-        Option<f64>,
-        Option<String>,
-        Option<chrono::NaiveDateTime>,
-        Option<serde_json::Value>,
-        Option<chrono::NaiveDateTime>,
-    )> = match sqlx::query_as(
+    let rows: Vec<KeyRow> = match sqlx::query_as(
         r#"SELECT token, key_name, key_alias, user_id, team_id, models,
                   spend, blocked, rpm_limit, tpm_limit, max_budget,
                   budget_duration, expires, metadata, created_at
@@ -127,6 +134,7 @@ pub async fn list_keys(
     {
         Ok(r) => r,
         Err(e) => {
+            tracing::error!("Dashboard list_keys query failed: {}", e);
             return (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("DB error: {}", e),
@@ -137,29 +145,27 @@ pub async fn list_keys(
 
     let keys: Vec<Value> = rows
         .into_iter()
-        .map(
-            |(token, key_name, key_alias, user_id, team_id, models, spend, blocked, rpm_limit, tpm_limit, max_budget, budget_duration, expires, metadata, created_at)| {
-                let token_prefix = format!("{}...", &token[..8.min(token.len())]);
-                json!({
-                    "token_prefix": token_prefix,
-                    "token_hash": token,
-                    "key_name": key_name,
-                    "key_alias": key_alias,
-                    "user_id": user_id,
-                    "team_id": team_id,
-                    "models": models,
-                    "spend": spend,
-                    "blocked": blocked.unwrap_or(false),
-                    "rpm_limit": rpm_limit,
-                    "tpm_limit": tpm_limit,
-                    "max_budget": max_budget,
-                    "budget_duration": budget_duration,
-                    "expires": expires.map(|d| d.to_string()),
-                    "metadata": metadata,
-                    "created_at": created_at.map(|d| d.to_string()),
-                })
-            },
-        )
+        .map(|r| {
+            let token_prefix = format!("{}...", &r.token[..8.min(r.token.len())]);
+            json!({
+                "token_prefix": token_prefix,
+                "token_hash": r.token,
+                "key_name": r.key_name,
+                "key_alias": r.key_alias,
+                "user_id": r.user_id,
+                "team_id": r.team_id,
+                "models": r.models,
+                "spend": r.spend.unwrap_or(0.0),
+                "blocked": r.blocked.unwrap_or(false),
+                "rpm_limit": r.rpm_limit,
+                "tpm_limit": r.tpm_limit,
+                "max_budget": r.max_budget,
+                "budget_duration": r.budget_duration,
+                "expires": r.expires.map(|d| d.to_string()),
+                "metadata": r.metadata,
+                "created_at": r.created_at.map(|d| d.to_string()),
+            })
+        })
         .collect();
 
     // Get total count.
@@ -213,10 +219,10 @@ pub async fn create_key(
     let token_hash = hash_token(&raw_key);
 
     // 2. Parse optional expires.
-    let expires: Option<chrono::NaiveDateTime> = req
+    let expires: Option<NaiveDateTime> = req
         .expires
         .as_deref()
-        .and_then(|s| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok());
+        .and_then(|s| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok());
 
     let models_json = req
         .models
@@ -245,6 +251,7 @@ pub async fn create_key(
     .await;
 
     if let Err(e) = result {
+        tracing::error!("Dashboard create_key insert failed: {}", e);
         return (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to create key: {}", e),
@@ -301,10 +308,10 @@ pub async fn update_key(
         .models
         .map(|m| serde_json::to_value(m).unwrap_or(json!([])));
 
-    let expires: Option<chrono::NaiveDateTime> = req
+    let expires: Option<NaiveDateTime> = req
         .expires
         .as_deref()
-        .and_then(|s| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok());
+        .and_then(|s| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok());
 
     let result = sqlx::query(
         r#"UPDATE "LiteLLM_VerificationToken"
@@ -338,11 +345,14 @@ pub async fn update_key(
             "Key not found",
         )
             .into_response(),
-        Err(e) => (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("DB error: {}", e),
-        )
-            .into_response(),
+        Err(e) => {
+            tracing::error!("Dashboard update_key failed: {}", e);
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("DB error: {}", e),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -376,11 +386,14 @@ pub async fn block_key(
             "Key not found",
         )
             .into_response(),
-        Err(e) => (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("DB error: {}", e),
-        )
-            .into_response(),
+        Err(e) => {
+            tracing::error!("Dashboard block_key failed: {}", e);
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("DB error: {}", e),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -414,11 +427,14 @@ pub async fn unblock_key(
             "Key not found",
         )
             .into_response(),
-        Err(e) => (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("DB error: {}", e),
-        )
-            .into_response(),
+        Err(e) => {
+            tracing::error!("Dashboard unblock_key failed: {}", e);
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("DB error: {}", e),
+            )
+                .into_response()
+        }
     }
 }
 

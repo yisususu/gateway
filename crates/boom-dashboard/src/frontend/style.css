@@ -2,16 +2,16 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 :root {
   --font: "Monaco", "Menlo", "Consolas", "Courier New", monospace;
-  --bg: #0f1117; --surface: #1a1d27; --surface2: #222532;
-  --border: #2d3148; --border-light: #3a3f5c;
-  --text: #e1e4ed; --text2: #8b90a5; --text3: #5c6178;
-  --primary: #6c72cb; --primary-hover: #7c83e0; --primary-bg: rgba(108,114,203,.12);
-  --danger: #ef5350; --danger-bg: rgba(239,83,80,.12);
-  --success: #66bb6a; --success-bg: rgba(102,187,106,.12);
-  --warn: #ffa726;
+  --bg: #faf8f4; --surface: #ffffff; --surface2: #f5f2ec;
+  --border: #e6e0d4; --border-light: #d8d0c2;
+  --text: #2c2a25; --text2: #7a7568; --text3: #a09a8e;
+  --primary: #6b67e0; --primary-hover: #5a56c8; --primary-bg: rgba(107,103,224,.08);
+  --danger: #d94f4f; --danger-bg: rgba(217,79,79,.08);
+  --success: #4a9e5c; --success-bg: rgba(74,158,92,.08);
+  --warn: #d48a1c;
   --radius: 10px; --radius-sm: 6px;
-  --shadow: 0 2px 8px rgba(0,0,0,.25);
-  --shadow-lg: 0 8px 32px rgba(0,0,0,.4);
+  --shadow: 0 1px 4px rgba(60,50,30,.06);
+  --shadow-lg: 0 6px 24px rgba(60,50,30,.1);
   --transition: .2s ease;
 }
 html, body { height: 100%; }
@@ -41,8 +41,8 @@ input, select, textarea { font-family: var(--font); font-size: 13px; }
   align-items: center; justify-content: center;
   background: var(--bg);
   background-image:
-    radial-gradient(ellipse at 20% 50%, rgba(108,114,203,.15) 0%, transparent 60%),
-    radial-gradient(ellipse at 80% 50%, rgba(108,80,200,.1) 0%, transparent 60%);
+    radial-gradient(ellipse at 30% 40%, rgba(107,103,224,.06) 0%, transparent 60%),
+    radial-gradient(ellipse at 70% 60%, rgba(200,180,140,.08) 0%, transparent 60%);
 }
 .login-card {
   background: var(--surface); border: 1px solid var(--border);
@@ -51,7 +51,7 @@ input, select, textarea { font-family: var(--font); font-size: 13px; }
 }
 .login-card h1 {
   font-size: 20px; margin-bottom: 2px; text-align: center;
-  letter-spacing: 1px; color: var(--primary);
+  letter-spacing: 1px; color: var(--text);
 }
 .login-card .subtitle {
   color: var(--text3); text-align: center; margin-bottom: 28px;
@@ -63,7 +63,7 @@ input, select, textarea { font-family: var(--font); font-size: 13px; }
   font-size: 11px; color: var(--text3); letter-spacing: .5px; text-transform: uppercase;
 }
 .form-group input {
-  width: 100%; padding: 10px 14px; background: var(--bg);
+  width: 100%; padding: 10px 14px; background: var(--surface2);
   border: 1px solid var(--border); border-radius: var(--radius-sm);
   color: var(--text); outline: none; transition: border var(--transition), box-shadow var(--transition);
 }
@@ -71,6 +71,7 @@ input, select, textarea { font-family: var(--font); font-size: 13px; }
 .form-group input:focus {
   border-color: var(--primary);
   box-shadow: 0 0 0 3px var(--primary-bg);
+  background: var(--surface);
 }
 #login-btn {
   width: 100%; padding: 11px; background: var(--primary); color: #fff;
@@ -79,11 +80,7 @@ input, select, textarea { font-family: var(--font); font-size: 13px; }
 }
 #login-btn:hover { background: var(--primary-hover); }
 #login-btn:disabled { opacity: .5; cursor: not-allowed; }
-.error-msg {
-  color: var(--danger); font-size: 12px; margin-top: 10px;
-  text-align: center; padding: 8px; background: var(--danger-bg);
-  border-radius: var(--radius-sm);
-}
+.error-msg { color: var(--danger); font-size: 12px; margin-top: 10px; text-align: center; padding: 8px; background: var(--danger-bg); border-radius: var(--radius-sm); }
 .loading { color: var(--text3); font-style: italic; }
 
 /* ── Layout ───────────────────────────────────────────── */
@@ -94,7 +91,7 @@ input, select, textarea { font-family: var(--font); font-size: 13px; }
 }
 .sidebar h2 {
   padding: 20px 20px 16px; font-size: 14px; letter-spacing: 1px;
-  color: var(--primary); border-bottom: 1px solid var(--border);
+  color: var(--text); border-bottom: 1px solid var(--border);
 }
 .sidebar nav { flex: 1; padding: 8px 0; }
 .nav-link {
@@ -102,20 +99,14 @@ input, select, textarea { font-family: var(--font); font-size: 13px; }
   font-size: 13px; transition: all var(--transition); border-left: 3px solid transparent;
 }
 .nav-link:hover { color: var(--text); background: var(--surface2); }
-.nav-link.active {
-  color: var(--primary); background: var(--primary-bg);
-  border-left-color: var(--primary);
-}
+.nav-link.active { color: var(--primary); background: var(--primary-bg); border-left-color: var(--primary); }
 .sidebar-footer { padding: 12px 16px; border-top: 1px solid var(--border); }
 .main-content { flex: 1; padding: 28px; overflow-y: auto; background: var(--bg); }
 
 /* ── Sections ─────────────────────────────────────────── */
 .section { display: none; }
 .section.active { display: block; }
-.section-header {
-  display: flex; justify-content: space-between; align-items: center;
-  margin-bottom: 20px;
-}
+.section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
 .section-header h2 { font-size: 18px; color: var(--text); letter-spacing: .5px; }
 
 /* ── Cards ────────────────────────────────────────────── */
@@ -125,10 +116,7 @@ input, select, textarea { font-family: var(--font); font-size: 13px; }
   box-shadow: var(--shadow); transition: border-color var(--transition);
 }
 .card:hover { border-color: var(--border-light); }
-.card h3 {
-  font-size: 11px; color: var(--text3); margin-bottom: 14px;
-  text-transform: uppercase; letter-spacing: 1.5px;
-}
+.card h3 { font-size: 11px; color: var(--text3); margin-bottom: 14px; text-transform: uppercase; letter-spacing: 1.5px; }
 
 /* ── Buttons ──────────────────────────────────────────── */
 .btn-primary {
@@ -159,41 +147,26 @@ input, select, textarea { font-family: var(--font); font-size: 13px; }
 /* ── Tables ───────────────────────────────────────────── */
 table { width: 100%; border-collapse: collapse; font-size: 12px; }
 th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); }
-th {
-  font-weight: 600; color: var(--text3); font-size: 10px;
-  text-transform: uppercase; letter-spacing: 1px; background: var(--surface2);
-}
+th { font-weight: 600; color: var(--text3); font-size: 10px; text-transform: uppercase; letter-spacing: 1px; background: var(--surface2); }
 tr:hover td { background: var(--surface2); }
 .mono { font-family: var(--font); font-size: 12px; }
 
 /* ── Progress Bar ─────────────────────────────────────── */
-.progress-bar {
-  width: 100%; height: 6px; background: var(--surface2);
-  border-radius: 3px; overflow: hidden;
-}
-.progress-fill {
-  height: 100%; background: var(--primary); border-radius: 3px;
-  transition: width .4s ease;
-}
+.progress-bar { width: 100%; height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--primary); border-radius: 3px; transition: width .4s ease; }
 .progress-fill.warn { background: var(--warn); }
 .progress-fill.danger { background: var(--danger); }
 
 /* ── Pagination ───────────────────────────────────────── */
-.pagination {
-  display: flex; gap: 10px; justify-content: center;
-  margin-top: 16px; align-items: center;
-}
-.pagination button {
-  padding: 6px 14px; background: var(--surface); border: 1px solid var(--border);
-  color: var(--text2); border-radius: var(--radius-sm); transition: all var(--transition);
-}
+.pagination { display: flex; gap: 10px; justify-content: center; margin-top: 16px; align-items: center; }
+.pagination button { padding: 6px 14px; background: var(--surface); border: 1px solid var(--border); color: var(--text2); border-radius: var(--radius-sm); transition: all var(--transition); }
 .pagination button:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
 .pagination button:disabled { opacity: .3; cursor: not-allowed; }
 .pagination span { font-size: 12px; color: var(--text3); }
 
 /* ── Modal ────────────────────────────────────────────── */
 .modal-overlay {
-  position: fixed; inset: 0; background: rgba(0,0,0,.6);
+  position: fixed; inset: 0; background: rgba(60,50,30,.25);
   display: flex; align-items: center; justify-content: center; z-index: 100;
   backdrop-filter: blur(4px);
 }
@@ -206,33 +179,24 @@ tr:hover td { background: var(--surface2); }
 .modal h3 { margin-bottom: 20px; font-size: 16px; color: var(--text); }
 .modal .form-group { margin-bottom: 14px; }
 .modal .form-group input, .modal .form-group select, .modal .form-group textarea {
-  width: 100%; padding: 9px 12px; background: var(--bg);
+  width: 100%; padding: 9px 12px; background: var(--surface2);
   border: 1px solid var(--border); border-radius: var(--radius-sm);
-  color: var(--text); outline: none;
-  transition: border var(--transition), box-shadow var(--transition);
+  color: var(--text); outline: none; transition: border var(--transition), box-shadow var(--transition);
 }
 .modal .form-group textarea { resize: vertical; min-height: 48px; }
-.modal .form-group input:focus, .modal .form-group textarea:focus {
-  border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-bg);
-}
-.modal-actions {
-  display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px;
-}
+.modal .form-group input:focus, .modal .form-group textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-bg); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 
 /* ── Key display ──────────────────────────────────────── */
 .key-display {
-  background: var(--bg); color: var(--success); padding: 14px;
+  background: var(--surface2); color: var(--success); padding: 14px;
   border-radius: var(--radius-sm); border: 1px solid var(--border);
-  font-size: 13px; word-break: break-all; margin: 10px 0;
-  line-height: 1.8;
+  font-size: 13px; word-break: break-all; margin: 10px 0; line-height: 1.8;
 }
 .key-warning { color: var(--danger); font-size: 12px; font-weight: 600; margin-bottom: 8px; }
 
 /* ── Status badges ────────────────────────────────────── */
-.badge {
-  display: inline-block; padding: 2px 8px; border-radius: 10px;
-  font-size: 11px; font-weight: 600; letter-spacing: .3px;
-}
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; letter-spacing: .3px; }
 .badge-active { background: var(--success-bg); color: var(--success); }
 .badge-blocked { background: var(--danger-bg); color: var(--danger); }
 .badge-plan { background: var(--primary-bg); color: var(--primary); }
