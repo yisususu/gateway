@@ -2,17 +2,28 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 :root {
   --font: "Monaco", "Menlo", "Consolas", "Courier New", monospace;
-  --bg: #faf8f4; --surface: #ffffff; --surface2: #f5f2ec;
-  --border: #e6e0d4; --border-light: #d8d0c2;
-  --text: #2c2a25; --text2: #7a7568; --text3: #a09a8e;
-  --primary: #6b67e0; --primary-hover: #5a56c8; --primary-bg: rgba(107,103,224,.08);
-  --danger: #d94f4f; --danger-bg: rgba(217,79,79,.08);
-  --success: #4a9e5c; --success-bg: rgba(74,158,92,.08);
-  --warn: #d48a1c;
-  --radius: 10px; --radius-sm: 6px;
-  --shadow: 0 1px 4px rgba(60,50,30,.06);
-  --shadow-lg: 0 6px 24px rgba(60,50,30,.1);
-  --transition: .2s ease;
+  --bg: #0d0d0f;
+  --surface: #1a1a1e;
+  --surface2: #222226;
+  --surface3: #2a2a2e;
+  --border: #333338;
+  --border-light: #44444a;
+  --text: #e4e4e7;
+  --text2: #a1a1aa;
+  --text3: #71717a;
+  --primary: #e8853d;
+  --primary-hover: #f09a55;
+  --primary-bg: rgba(232,133,61,.1);
+  --danger: #ef4444;
+  --danger-bg: rgba(239,68,68,.1);
+  --success: #22c55e;
+  --success-bg: rgba(34,197,94,.1);
+  --warn: #eab308;
+  --radius: 8px;
+  --radius-sm: 5px;
+  --shadow: 0 1px 3px rgba(0,0,0,.3);
+  --shadow-lg: 0 8px 32px rgba(0,0,0,.5);
+  --transition: .15s ease;
 }
 html, body { height: 100%; }
 body {
@@ -41,21 +52,25 @@ input, select, textarea { font-family: var(--font); font-size: 13px; }
   align-items: center; justify-content: center;
   background: var(--bg);
   background-image:
-    radial-gradient(ellipse at 30% 40%, rgba(107,103,224,.06) 0%, transparent 60%),
-    radial-gradient(ellipse at 70% 60%, rgba(200,180,140,.08) 0%, transparent 60%);
+    radial-gradient(ellipse at 30% 40%, rgba(232,133,61,.04) 0%, transparent 60%),
+    radial-gradient(ellipse at 70% 60%, rgba(232,133,61,.03) 0%, transparent 60%);
 }
 .login-card {
   background: var(--surface); border: 1px solid var(--border);
-  border-radius: 14px; padding: 40px; width: 400px;
+  border-radius: 14px; padding: 44px 40px; width: 400px;
   box-shadow: var(--shadow-lg);
 }
-.login-card h1 {
-  font-size: 20px; margin-bottom: 2px; text-align: center;
-  letter-spacing: 1px; color: var(--text);
+.login-brand {
+  text-align: center; margin-bottom: 32px;
 }
-.login-card .subtitle {
-  color: var(--text3); text-align: center; margin-bottom: 28px;
-  font-size: 11px; letter-spacing: 2px; text-transform: uppercase;
+.login-brand .brand-name {
+  font-size: 32px; font-weight: 700; letter-spacing: 4px;
+  color: var(--primary);
+  text-shadow: 0 0 40px rgba(232,133,61,.15);
+}
+.login-brand .brand-tagline {
+  color: var(--text3); font-size: 11px; letter-spacing: 3px;
+  text-transform: uppercase; margin-top: 6px;
 }
 .form-group { margin-bottom: 18px; }
 .form-group label {
@@ -71,7 +86,7 @@ input, select, textarea { font-family: var(--font); font-size: 13px; }
 .form-group input:focus {
   border-color: var(--primary);
   box-shadow: 0 0 0 3px var(--primary-bg);
-  background: var(--surface);
+  background: var(--surface3);
 }
 #login-btn {
   width: 100%; padding: 11px; background: var(--primary); color: #fff;
@@ -90,8 +105,8 @@ input, select, textarea { font-family: var(--font); font-size: 13px; }
   display: flex; flex-direction: column;
 }
 .sidebar h2 {
-  padding: 20px 20px 16px; font-size: 14px; letter-spacing: 1px;
-  color: var(--text); border-bottom: 1px solid var(--border);
+  padding: 20px 20px 16px; font-size: 13px; letter-spacing: 1px;
+  color: var(--text2); border-bottom: 1px solid var(--border);
 }
 .sidebar nav { flex: 1; padding: 8px 0; }
 .nav-link {
@@ -152,7 +167,7 @@ tr:hover td { background: var(--surface2); }
 .mono { font-family: var(--font); font-size: 12px; }
 
 /* ── Progress Bar ─────────────────────────────────────── */
-.progress-bar { width: 100%; height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
+.progress-bar { width: 100%; height: 6px; background: var(--surface3); border-radius: 3px; overflow: hidden; }
 .progress-fill { height: 100%; background: var(--primary); border-radius: 3px; transition: width .4s ease; }
 .progress-fill.warn { background: var(--warn); }
 .progress-fill.danger { background: var(--danger); }
@@ -166,7 +181,7 @@ tr:hover td { background: var(--surface2); }
 
 /* ── Modal ────────────────────────────────────────────── */
 .modal-overlay {
-  position: fixed; inset: 0; background: rgba(60,50,30,.25);
+  position: fixed; inset: 0; background: rgba(0,0,0,.6);
   display: flex; align-items: center; justify-content: center; z-index: 100;
   backdrop-filter: blur(4px);
 }
@@ -183,8 +198,9 @@ tr:hover td { background: var(--surface2); }
   border: 1px solid var(--border); border-radius: var(--radius-sm);
   color: var(--text); outline: none; transition: border var(--transition), box-shadow var(--transition);
 }
+.modal .form-group select option { background: var(--surface2); color: var(--text); }
 .modal .form-group textarea { resize: vertical; min-height: 48px; }
-.modal .form-group input:focus, .modal .form-group textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-bg); }
+.modal .form-group input:focus, .modal .form-group textarea:focus, .modal .form-group select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-bg); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 
 /* ── Key display ──────────────────────────────────────── */
