@@ -104,7 +104,6 @@ impl Provider for OpenAIProvider {
 
         // Parse SSE byte stream into ChatStreamChunk items.
         let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let model = self.model.clone();
 
         tokio::spawn(async move {
             let mut stream = resp.bytes_stream();

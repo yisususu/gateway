@@ -1,5 +1,5 @@
 use crate::types::{
-    AuthIdentity, ChatCompletionRequest, ChatCompletionResponse, ChatStream, ModelInfo, RateLimitKey,
+    AuthIdentity, ChatCompletionRequest, ChatCompletionResponse, ChatStream, RateLimitKey,
     RateLimitDecision,
 };
 use crate::GatewayError;

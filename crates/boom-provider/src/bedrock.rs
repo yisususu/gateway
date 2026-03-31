@@ -8,6 +8,7 @@ use reqwest::Client;
 ///
 /// Bedrock requires AWS Signature V4 for authentication.
 /// This skeleton provides the structure; AWS signing will be added in a follow-up.
+#[allow(dead_code)]
 pub struct BedrockProvider {
     client: Client,
     model: String,
@@ -23,6 +24,7 @@ impl BedrockProvider {
         }
     }
 
+    #[allow(dead_code)]
     fn invoke_url(&self) -> String {
         format!(
             "https://bedrock-runtime.{}.amazonaws.com/model/{}/invoke",
