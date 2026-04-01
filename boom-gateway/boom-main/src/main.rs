@@ -1,3 +1,4 @@
+mod admin_command;
 mod extractor;
 mod request_log;
 mod routes;
@@ -132,12 +133,18 @@ fn build_router(state: AppState) -> Router {
     // Dashboard router (Web UI + dashboard API).
     // Returns Router<()> — state injected via Extension<Arc<DashboardState>>.
     let master_key = state.inner.load().config.general_settings.master_key.clone();
+
+    // Admin command channel: dashboard sends write ops, boom-main handles them.
+    let (admin_tx, admin_rx) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(admin_command::admin_command_handler(admin_rx, state.clone()));
+
     let dashboard_state = boom_dashboard::DashboardState::new(
         state.db_pool.clone(),
         state.plan_store.clone(),
         state.limiter.clone(),
         state.deployment_store.clone(),
         state.alias_store.clone(),
+        admin_tx,
         master_key,
     );
     let dashboard_router = boom_dashboard::build_router(dashboard_state);

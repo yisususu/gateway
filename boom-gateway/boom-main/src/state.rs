@@ -2,9 +2,8 @@ use arc_swap::ArcSwap;
 use boom_auth::DbAuthenticator;
 use boom_config::Config;
 use boom_core::provider::{Authenticator, Provider};
-use boom_limiter::{
-    AliasStore, DeploymentStore, PlanStore, RateLimitPlan, ScheduleSlot, SlidingWindowLimiter,
-};
+use boom_limiter::{PlanStore, RateLimitPlan, ScheduleSlot, SlidingWindowLimiter};
+use boom_routing::{AliasStore, DeploymentStore};
 use boom_provider;
 use sqlx::PgPool;
 use std::sync::Arc;

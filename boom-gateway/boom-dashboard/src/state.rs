@@ -1,8 +1,14 @@
-use boom_limiter::{AliasStore, DeploymentStore, PlanStore, SlidingWindowLimiter};
+use boom_limiter::{PlanStore, SlidingWindowLimiter};
+use boom_routing::{AliasStore, DeploymentStore};
 use dashmap::DashMap;
+use serde_json::Value;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::{mpsc, oneshot};
+use uuid::Uuid;
+
+use crate::handlers_admin::CreateDeploymentRequest;
 
 /// Tracks login failure state per IP for brute-force protection.
 #[derive(Debug)]
@@ -11,6 +17,34 @@ pub struct LoginAttempt {
     pub locked_until: Option<Instant>,
 }
 
+// ═══════════════════════════════════════════════════════════
+// Admin Command channel (write operations → boom-main)
+// ═══════════════════════════════════════════════════════════
+
+/// Commands sent from dashboard to boom-main for state-mutating operations.
+/// Model CRUD requires boom-provider + boom-config, which dashboard must not depend on.
+pub enum AdminCommand {
+    CreateModel {
+        req: CreateDeploymentRequest,
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
+    UpdateModel {
+        id: Uuid,
+        req: CreateDeploymentRequest,
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
+    DeleteModel {
+        id: Uuid,
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
+}
+
+pub type AdminTx = mpsc::Sender<AdminCommand>;
+
+// ═══════════════════════════════════════════════════════════
+// Dashboard state
+// ═══════════════════════════════════════════════════════════
+
 /// Dashboard-specific state, injected via Extension layer.
 /// Independent from boom-gateway's AppState to avoid type coupling.
 #[derive(Clone)]
@@ -18,10 +52,12 @@ pub struct DashboardState {
     pub db_pool: Option<PgPool>,
     pub plan_store: Arc<PlanStore>,
     pub limiter: Arc<SlidingWindowLimiter>,
-    /// Deployment store for model CRUD.
+    /// Deployment store for model reads.
     pub deployment_store: Arc<DeploymentStore>,
-    /// Alias store for alias CRUD.
+    /// Alias store for alias reads.
     pub alias_store: Arc<AliasStore>,
+    /// Channel for model write operations (handled by boom-main).
+    pub admin_tx: AdminTx,
     /// JWT signing key (derived from master_key at startup).
     pub jwt_secret: String,
     /// Master key for admin login (constant-time comparison).
@@ -37,6 +73,7 @@ impl DashboardState {
         limiter: Arc<SlidingWindowLimiter>,
         deployment_store: Arc<DeploymentStore>,
         alias_store: Arc<AliasStore>,
+        admin_tx: AdminTx,
         master_key: Option<String>,
     ) -> Self {
         // Derive JWT secret from master_key, or use a random fallback.
@@ -50,6 +87,7 @@ impl DashboardState {
             limiter,
             deployment_store,
             alias_store,
+            admin_tx,
             jwt_secret,
             master_key,
             login_attempts: Arc::new(DashMap::new()),

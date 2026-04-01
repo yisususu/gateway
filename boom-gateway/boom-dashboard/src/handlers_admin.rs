@@ -5,7 +5,7 @@ use axum::Json;
 use chrono::NaiveDateTime;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sqlx::{FromRow, Row};
+use sqlx::FromRow;
 use uuid::Uuid;
 
 use crate::auth::{hash_token, AdminSession};
@@ -837,60 +837,25 @@ pub async fn create_model(
     Extension(state): Extension<std::sync::Arc<DashboardState>>,
     Json(req): Json<CreateDeploymentRequest>,
 ) -> Response {
-    let db_pool = match &state.db_pool {
-        Some(pool) => pool,
-        None => {
-            return Json(json!({"error": "Database not available"})).into_response();
-        }
-    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
 
-    let headers_json = serde_json::to_value(&req.headers).unwrap_or(json!({}));
-
-    // Insert into DB.
-    let result = sqlx::query(
-        r#"INSERT INTO boom_model_deployment
-           (model_name, litellm_model, api_key, api_key_env, api_base, api_version,
-            aws_region_name, aws_access_key_id, aws_secret_access_key,
-            rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'db')
-           RETURNING id"#,
-    )
-    .bind(&req.model_name)
-    .bind(&req.litellm_model)
-    .bind(&req.api_key)
-    .bind(req.api_key_env.unwrap_or(false))
-    .bind(&req.api_base)
-    .bind(&req.api_version)
-    .bind(&req.aws_region_name)
-    .bind(&req.aws_access_key_id)
-    .bind(&req.aws_secret_access_key)
-    .bind(req.rpm)
-    .bind(req.tpm)
-    .bind(req.timeout)
-    .bind(&headers_json)
-    .bind(req.temperature)
-    .bind(req.max_tokens)
-    .bind(req.enabled)
-    .fetch_one(db_pool)
-    .await;
-
-    let id: Uuid = match result {
-        Ok(row) => row.get("id"),
-        Err(e) => {
-            tracing::error!("Dashboard create_model insert failed: {}", e);
-            return Json(json!({"error": "Internal error"})).into_response();
-        }
-    };
-
-    // Build provider and add to memory (if enabled).
-    if req.enabled {
-        if let Some(provider) = build_provider_from_request(&req) {
-            state.deployment_store.add_deployment(&req.model_name, provider);
-            tracing::info!(model = %req.model_name, "Model deployment created and loaded");
-        }
+    if state.admin_tx.send(crate::state::AdminCommand::CreateModel { req, reply: reply_tx }).await.is_err() {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "Admin command handler unavailable",
+        )
+            .into_response();
     }
 
-    Json(json!({"ok": true, "id": id, "model_name": req.model_name})).into_response()
+    match reply_rx.await {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(msg)) => Json(json!({"error": msg})).into_response(),
+        Err(_) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "Admin command handler dropped reply",
+        )
+            .into_response(),
+    }
 }
 
 pub async fn update_model(
@@ -899,61 +864,24 @@ pub async fn update_model(
     Path(id): Path<Uuid>,
     Json(req): Json<CreateDeploymentRequest>,
 ) -> Response {
-    let db_pool = match &state.db_pool {
-        Some(pool) => pool,
-        None => {
-            return Json(json!({"error": "Database not available"})).into_response();
-        }
-    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
 
-    let headers_json = serde_json::to_value(&req.headers).unwrap_or(json!({}));
+    if state.admin_tx.send(crate::state::AdminCommand::UpdateModel { id, req, reply: reply_tx }).await.is_err() {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "Admin command handler unavailable",
+        )
+            .into_response();
+    }
 
-    let result = sqlx::query(
-        r#"UPDATE boom_model_deployment
-           SET model_name = $2, litellm_model = $3, api_key = $4, api_key_env = $5,
-               api_base = $6, api_version = $7, aws_region_name = $8,
-               aws_access_key_id = $9, aws_secret_access_key = $10,
-               rpm = $11, tpm = $12, timeout = $13, headers = $14,
-               temperature = $15, max_tokens = $16, enabled = $17, updated_at = NOW()
-           WHERE id = $1"#,
-    )
-    .bind(id)
-    .bind(&req.model_name)
-    .bind(&req.litellm_model)
-    .bind(&req.api_key)
-    .bind(req.api_key_env.unwrap_or(false))
-    .bind(&req.api_base)
-    .bind(&req.api_version)
-    .bind(&req.aws_region_name)
-    .bind(&req.aws_access_key_id)
-    .bind(&req.aws_secret_access_key)
-    .bind(req.rpm)
-    .bind(req.tpm)
-    .bind(req.timeout)
-    .bind(&headers_json)
-    .bind(req.temperature)
-    .bind(req.max_tokens)
-    .bind(req.enabled)
-    .execute(db_pool)
-    .await;
-
-    match result {
-        Ok(r) if r.rows_affected() > 0 => {
-            // Rebuild provider for this model.
-            // For simplicity, reload all deployments for this model_name from DB.
-            // A more targeted approach would track which deployment changed.
-            if req.enabled {
-                if let Some(provider) = build_provider_from_request(&req) {
-                    state.deployment_store.add_deployment(&req.model_name, provider);
-                }
-            }
-            Json(json!({"ok": true})).into_response()
-        }
-        Ok(_) => Json(json!({"error": "Model deployment not found"})).into_response(),
-        Err(e) => {
-            tracing::error!("Dashboard update_model failed: {}", e);
-            Json(json!({"error": "Internal error"})).into_response()
-        }
+    match reply_rx.await {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(msg)) => Json(json!({"error": msg})).into_response(),
+        Err(_) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "Admin command handler dropped reply",
+        )
+            .into_response(),
     }
 }
 
@@ -962,75 +890,24 @@ pub async fn delete_model(
     Extension(state): Extension<std::sync::Arc<DashboardState>>,
     Path(id): Path<Uuid>,
 ) -> Response {
-    let db_pool = match &state.db_pool {
-        Some(pool) => pool,
-        None => {
-            return Json(json!({"error": "Database not available"})).into_response();
-        }
-    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
 
-    // Get model_name before deleting (to potentially clean up deployment store).
-    let model_name: Option<String> = sqlx::query_scalar(
-        r#"SELECT model_name FROM boom_model_deployment WHERE id = $1"#,
-    )
-    .bind(id)
-    .fetch_optional(db_pool)
-    .await
-    .ok()
-    .flatten();
-
-    let result = sqlx::query(
-        r#"DELETE FROM boom_model_deployment WHERE id = $1"#,
-    )
-    .bind(id)
-    .execute(db_pool)
-    .await;
-
-    match result {
-        Ok(r) if r.rows_affected() > 0 => {
-            let name = model_name.unwrap_or_default();
-            tracing::info!(model = %name, "Model deployment deleted");
-            Json(json!({"ok": true, "model_name": name})).into_response()
-        }
-        Ok(_) => Json(json!({"error": "Model deployment not found"})).into_response(),
-        Err(e) => {
-            tracing::error!("Dashboard delete_model failed: {}", e);
-            Json(json!({"error": "Internal error"})).into_response()
-        }
-    }
-}
-
-/// Build a Provider from a CreateDeploymentRequest.
-fn build_provider_from_request(req: &CreateDeploymentRequest) -> Option<std::sync::Arc<dyn boom_core::provider::Provider>> {
-    let mut extra = req.headers.clone();
-    if let Some(ref v) = req.api_version {
-        extra.insert("api_version".to_string(), v.clone());
-    }
-    if let Some(ref r) = req.aws_region_name {
-        extra.insert("aws_region_name".to_string(), r.clone());
+    if state.admin_tx.send(crate::state::AdminCommand::DeleteModel { id, reply: reply_tx }).await.is_err() {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "Admin command handler unavailable",
+        )
+            .into_response();
     }
 
-    // Resolve api_key (may be env reference).
-    let api_key = req.api_key.as_ref().map(|k| {
-        if req.api_key_env.unwrap_or(false) {
-            boom_config::resolve_env_value(k)
-        } else {
-            k.clone()
-        }
-    });
-
-    match boom_provider::create_provider(
-        &req.litellm_model,
-        api_key,
-        req.api_base.clone(),
-        req.timeout as u64,
-        &extra,
-    ) {
-        Ok(provider) => Some(provider),
-        Err(e) => {
-            tracing::error!("Failed to build provider for '{}': {}", req.model_name, e);
-            None
-        }
+    match reply_rx.await {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(msg)) => Json(json!({"error": msg})).into_response(),
+        Err(_) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "Admin command handler dropped reply",
+        )
+            .into_response(),
     }
 }
 

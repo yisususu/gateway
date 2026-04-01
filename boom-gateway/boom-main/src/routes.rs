@@ -11,7 +11,8 @@ use boom_core::anthropic::{
 use boom_core::provider::RateLimiter;
 use boom_core::types::*;
 use boom_core::GatewayError;
-use boom_limiter::{AliasStore, ConcurrencyGuard, DeploymentStore, GuardedStream, PlanStore, RateLimitPlan};
+use boom_limiter::{ConcurrencyGuard, GuardedStream, PlanStore, RateLimitPlan};
+use boom_routing::{AliasStore, DeploymentStore};
 use futures::StreamExt;
 use std::convert::Infallible;
 use std::sync::Arc;
