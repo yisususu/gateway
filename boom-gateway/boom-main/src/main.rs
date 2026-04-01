@@ -59,36 +59,21 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("BooMGateway listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+    tracing::info!("BooMGateway listening on {}", addr);
 
-    // Graceful shutdown with a hard deadline:
-    //   1. Ctrl+C triggers graceful shutdown (stop accepting new connections,
-    //      let in-flight requests finish).
-    //   2. Wait at most 3s for in-flight requests to complete.
-    //   3. Force exit — don't get stuck on idle browser keep-alive connections
-    //      kept alive by the dashboard's 5s polling timer.
-    let server = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal());
-
+    let server = axum::serve(listener, app);
     tokio::select! {
         result = server => {
             if let Err(e) = result {
                 tracing::error!("Server error: {}", e);
             }
         }
-        _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {
-            tracing::warn!("Graceful shutdown timed out, forcing exit");
+        _ = shutdown_signal() => {
+            tracing::info!("Shutting down...");
             std::process::exit(0);
         }
     }
 
-    // Signal all background tasks to stop.
-    tracing::info!("Shutting down background tasks...");
-    let _ = shutdown_tx.send(());
-
-    // Give tasks a moment to finish, then exit.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-    tracing::info!("BooMGateway shutdown complete");
     Ok(())
 }
 
