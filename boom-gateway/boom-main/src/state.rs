@@ -8,6 +8,7 @@ use boom_limiter::{
 use boom_provider;
 use sqlx::PgPool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 /// Shared application state.
 ///
@@ -35,6 +36,8 @@ pub struct AppState {
     pub deployment_store: Arc<DeploymentStore>,
     /// Alias store survives reloads (preserves model aliases).
     pub alias_store: Arc<AliasStore>,
+    /// Request counter for periodic summary logging.
+    pub request_count: Arc<AtomicU64>,
 }
 
 /// The state that gets swapped on config reload.
@@ -181,6 +184,7 @@ impl AppState {
             plan_store,
             deployment_store,
             alias_store,
+            request_count: Arc::new(AtomicU64::new(0)),
         })
     }
 

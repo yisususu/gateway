@@ -7,7 +7,6 @@ use axum::Router;
 use clap::Parser;
 use state::AppState;
 use tower_http::cors::CorsLayer;
-use tower_http::trace::TraceLayer;
 
 #[derive(Parser, Debug)]
 #[command(name = "boom-gateway", about = "BooMGateway — High-performance LLM API Gateway")]
@@ -50,6 +49,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn background sync task (persist rate limit state + cleanup memory).
     spawn_sync_task(state.clone(), shutdown_tx.subscribe());
+
+    // Spawn request summary logger (every 60s).
+    spawn_request_summary(state.request_count.clone(), shutdown_tx.subscribe());
 
     // Build router.
     let app = build_router(state);
@@ -139,6 +141,7 @@ fn build_router(state: AppState) -> Router {
     );
     let dashboard_router = boom_dashboard::build_router(dashboard_state);
 
+    let request_count = state.request_count.clone();
     Router::new()
         .merge(api_routes)
         .merge(health_routes)
@@ -146,7 +149,13 @@ fn build_router(state: AppState) -> Router {
         .merge(dashboard_router)
         .with_state(state)
         .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn(move |req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| {
+            let count = request_count.clone();
+            async move {
+                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                next.run(req).await
+            }
+        }))
 }
 
 /// Listen for SIGHUP and trigger hot-reload.
@@ -189,6 +198,32 @@ fn spawn_sighup_listener(state: AppState, mut shutdown: tokio::sync::broadcast::
         let _ = state; // suppress unused warning
         let _ = shutdown;
     }
+}
+
+/// Background task: every 60s, log a summary of requests processed in the last minute.
+fn spawn_request_summary(
+    request_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    mut shutdown: tokio::sync::broadcast::Receiver<()>,
+) {
+    use std::sync::atomic::Ordering;
+
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
+                _ = shutdown.recv() => {
+                    tracing::debug!("Request summary task shutting down");
+                    return;
+                }
+            }
+
+            let count = request_count.swap(0, Ordering::Relaxed);
+            if count > 0 {
+                tracing::info!("Requests in last minute: {}", count);
+            }
+        }
+    });
+    tracing::info!("Request summary logger spawned (every 60s)");
 }
 
 /// Background task: every 10 minutes, snapshot in-memory state to DB and cleanup.

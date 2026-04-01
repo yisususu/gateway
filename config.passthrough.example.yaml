@@ -1,0 +1,50 @@
+# BooMGateway — Pass-Through 透传模式示例配置
+#
+# 场景：新网关串在老网关前面，只负责鉴权 + Plan 限流。
+#       通过检查的请求原样透传给老网关，不路由到任何 provider。
+#
+# 用法：cp config.passthrough.example.yaml config.yaml
+#       修改 pass_through.url 指向你的老网关地址
+
+# ── Pass-Through 配置（核心） ──────────────────────────────
+pass_through:
+  enabled: true
+  url: "http://old-gateway:4000"    # 老网关地址，根据实际部署修改
+
+# ── 通用设置 ────────────────────────────────────────────────
+general_settings:
+  master_key: os.environ/MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+
+server:
+  host: 0.0.0.0
+  port: 4000
+  workers: 4
+
+rate_limit:
+  enabled: true
+  default_rpm: 60
+  window_limits:
+    - [100, 18000]    # 5 小时 100 次
+
+# ── Plan 配置 ───────────────────────────────────────────────
+plan_settings:
+  default_plan: basic
+  plans:
+    basic:
+      concurrency_limit: 4
+      rpm_limit: 60
+      window_limits:
+        - [100, 18000]
+    pro:
+      concurrency_limit: 8
+      rpm_limit: 120
+      window_limits:
+        - [500, 18000]
+      # schedule:
+      #   - hours: "9:00-21:00"
+      #     concurrency_limit: 4
+      #     rpm_limit: 60
+      #   - hours: "21:00-9:00"
+      #     concurrency_limit: 8
+      #     rpm_limit: 120
