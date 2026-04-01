@@ -25,6 +25,86 @@ fn new_request_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// Truncate a string to `max` chars, appending "..." if truncated.
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max.saturating_sub(3)])
+    }
+}
+
+/// Format an OpenAI ChatCompletionRequest for diagnostic logging.
+fn fmt_chat_request(req: &ChatCompletionRequest, request_id: &str, key_name: &Option<String>) -> String {
+    let mut parts = vec![
+        format!("rid={}", &request_id[..8]),
+        format!("key={}", key_name.as_deref().unwrap_or("-")),
+        format!("model={}", req.model),
+        format!("stream={}", req.stream.unwrap_or(false)),
+        format!("msgs={}", req.messages.len()),
+    ];
+    if let Some(mt) = req.max_tokens {
+        parts.push(format!("max_tokens={}", mt));
+    }
+    if let Some(tools) = &req.tools {
+        let names: Vec<&str> = tools.iter().map(|t| t.function.name.as_str()).collect();
+        parts.push(format!("tools=[{}]", names.join(",")));
+    }
+    for (i, msg) in req.messages.iter().enumerate() {
+        let preview = match &msg.content {
+            MessageContent::Text(s) => truncate(s, 120),
+            MessageContent::Parts(ps) => format!("[{} parts]", ps.len()),
+        };
+        parts.push(format!("msg[{}].{:?}={}", i, msg.role, preview));
+    }
+    parts.join(" | ")
+}
+
+/// Format an Anthropic MessagesRequest for diagnostic logging.
+fn fmt_anthropic_request(req: &AnthropicMessagesRequest, request_id: &str, key_name: &Option<String>) -> String {
+    let mut parts = vec![
+        format!("rid={}", &request_id[..8]),
+        format!("key={}", key_name.as_deref().unwrap_or("-")),
+        format!("model={}", req.model),
+        format!("stream={}", req.stream.unwrap_or(false)),
+        format!("msgs={}", req.messages.len()),
+    ];
+    if let Some(mt) = req.max_tokens {
+        parts.push(format!("max_tokens={}", mt));
+    }
+    if let Some(thinking) = &req.thinking {
+        parts.push(format!("thinking={}", truncate(&thinking.to_string(), 60)));
+    }
+    if let Some(tools) = &req.tools {
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        parts.push(format!("tools=[{}]", names.join(",")));
+    }
+    if let Some(sys) = &req.system {
+        let preview = match sys {
+            AnthropicSystemContent::Text(s) => truncate(s, 120),
+            AnthropicSystemContent::Blocks(bs) => format!("[{} system blocks]", bs.len()),
+        };
+        parts.push(format!("system={}", preview));
+    }
+    for (i, msg) in req.messages.iter().enumerate() {
+        let preview = match &msg.content {
+            AnthropicContent::Text(s) => truncate(s, 120),
+            AnthropicContent::Blocks(bs) => {
+                let types: Vec<String> = bs.iter().map(|b| match b {
+                    AnthropicContentBlock::Text { text } => truncate(text, 40),
+                    AnthropicContentBlock::Image { .. } => "image".to_string(),
+                    AnthropicContentBlock::ToolUse { name, .. } => format!("tool_use:{}", name),
+                    AnthropicContentBlock::ToolResult { tool_use_id, .. } => format!("tool_result:{}", tool_use_id),
+                    _ => "?".to_string(),
+                }).collect();
+                format!("[{}]", types.join(","))
+            }
+        };
+        parts.push(format!("msg[{}].{}={}", i, msg.role, preview));
+    }
+    parts.join(" | ")
+}
+
 // ============================================================
 // LoggedStream — delays log write until the stream is fully consumed
 // ============================================================
@@ -84,7 +164,7 @@ pub async fn chat_completions(
     let model = req.model.clone();
     let is_stream = req.stream.unwrap_or(false);
 
-    tracing::info!(request_id = %request_id, model = %model, stream = is_stream, "chat_completions request started");
+    tracing::info!(">>> REQUEST [chat_completions]: {}", fmt_chat_request(&req, &request_id, &identity.key_name));
 
     // 1. Model access check (deployment-aware, alias-aware).
     check_model_access(identity, &req.model, &state.deployment_store, &state.alias_store)
@@ -721,7 +801,7 @@ pub async fn messages(
     let model = openai_req.model.clone();
     let is_stream = openai_req.stream.unwrap_or(false);
 
-    tracing::info!(request_id = %request_id, model = %model, stream = is_stream, "messages request started");
+    tracing::info!(">>> REQUEST [messages]: {}", fmt_anthropic_request(&req, &request_id, &identity.key_name));
 
     // 1. Model access check (deployment-aware, alias-aware).
     check_model_access(identity, &openai_req.model, &state.deployment_store, &state.alias_store)
@@ -1100,7 +1180,7 @@ pub async fn pt_chat_completions(
     let model = chat_req.model.clone();
     let is_stream = chat_req.stream.unwrap_or(false);
 
-    tracing::info!(request_id = %request_id, model = %model, stream = is_stream, "pt_chat_completions request started");
+    tracing::info!(">>> REQUEST [pt_chat_completions]: {}", fmt_chat_request(&chat_req, &request_id, &identity.key_name));
 
     // 1. Model access check.
     check_model_access(
@@ -1227,9 +1307,8 @@ pub async fn pt_messages(
     let model = anthropic_req.model.clone();
     let is_stream = anthropic_req.stream.unwrap_or(false);
 
-    tracing::info!(request_id = %request_id, model = %model, stream = is_stream, "pt_messages request started");
-
     let identity = auth.identity();
+    tracing::info!(">>> REQUEST [pt_messages]: {}", fmt_anthropic_request(&anthropic_req, &request_id, &identity.key_name));
     let inner = state.inner.load();
 
     // 1. Model access check.
