@@ -21,6 +21,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
+fn new_request_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 // ============================================================
 // LoggedStream — delays log write until the stream is fully consumed
 // ============================================================
@@ -74,15 +78,18 @@ pub async fn chat_completions(
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<impl IntoResponse, GatewayErrorReply> {
     let start = Instant::now();
+    let request_id = new_request_id();
     let identity = auth.identity();
     let inner = state.inner.load();
     let model = req.model.clone();
     let is_stream = req.stream.unwrap_or(false);
 
+    tracing::info!(request_id = %request_id, model = %model, stream = is_stream, "chat_completions request started");
+
     // 1. Model access check (deployment-aware, alias-aware).
     check_model_access(identity, &req.model, &state.deployment_store, &state.alias_store)
         .map_err(|e| {
-            log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e);
+            log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e, Some(request_id.clone()));
             GatewayErrorReply(e)
         })?;
 
@@ -111,7 +118,7 @@ pub async fn chat_completions(
     )
     .await
     .map_err(|e| {
-        log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e);
+        log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e, Some(request_id.clone()));
         GatewayErrorReply(e)
     })?;
 
@@ -120,14 +127,14 @@ pub async fn chat_completions(
         .select_deployment(&req.model)
         .ok_or_else(|| {
             let e = GatewayError::ModelNotFound(req.model.clone());
-            log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e);
+            log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e, Some(request_id.clone()));
             GatewayErrorReply(e)
         })?;
 
     // 4. Route to provider (streaming or non-streaming).
     if is_stream {
         let stream = provider.chat_stream(req).await.map_err(|e| {
-            log_error(&state, &identity, &model, "/v1/chat/completions", true, start, &e);
+            log_error(&state, &identity, &model, "/v1/chat/completions", true, start, &e, Some(request_id.clone()));
             GatewayErrorReply(e)
         })?;
         let sse_stream = sse_stream_from_chat_stream(stream);
@@ -135,7 +142,7 @@ pub async fn chat_completions(
 
         // Wrap with LoggedStream — log is written when stream finishes (Drop).
         let logged = LoggedStream::new(guarded, state.db_pool.clone(), RequestLog {
-            request_id: None,
+            request_id: Some(request_id),
             key_hash: identity.key_hash.clone(),
             key_name: identity.key_name.clone(),
             team_id: identity.team_id.clone(),
@@ -154,7 +161,7 @@ pub async fn chat_completions(
         Ok(response.into_response())
     } else {
         let response = provider.chat(req).await.map_err(|e| {
-            log_error(&state, &identity, &model, "/v1/chat/completions", false, start, &e);
+            log_error(&state, &identity, &model, "/v1/chat/completions", false, start, &e, Some(request_id.clone()));
             GatewayErrorReply(e)
         })?;
 
@@ -165,7 +172,7 @@ pub async fn chat_completions(
         log_request(
             state.db_pool.clone(),
             RequestLog {
-                request_id: Some(response.id.clone()),
+                request_id: Some(request_id),
                 key_hash: identity.key_hash.clone(),
                 key_name: identity.key_name.clone(),
                 team_id: identity.team_id.clone(),
@@ -707,16 +714,19 @@ pub async fn messages(
     Json(req): Json<AnthropicMessagesRequest>,
 ) -> Result<impl IntoResponse, AnthropicErrorReply> {
     let start = Instant::now();
+    let request_id = new_request_id();
     let openai_req = anthropic_request_to_openai(&req);
     let identity = auth.identity();
     let inner = state.inner.load();
     let model = openai_req.model.clone();
     let is_stream = openai_req.stream.unwrap_or(false);
 
+    tracing::info!(request_id = %request_id, model = %model, stream = is_stream, "messages request started");
+
     // 1. Model access check (deployment-aware, alias-aware).
     check_model_access(identity, &openai_req.model, &state.deployment_store, &state.alias_store)
         .map_err(|e| {
-            log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e);
+            log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()));
             AnthropicErrorReply(e)
         })?;
 
@@ -745,7 +755,7 @@ pub async fn messages(
     )
     .await
     .map_err(|e| {
-        log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e);
+        log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()));
         AnthropicErrorReply(e)
     })?;
 
@@ -754,14 +764,14 @@ pub async fn messages(
         .select_deployment(&openai_req.model)
         .ok_or_else(|| {
             let e = GatewayError::ModelNotFound(openai_req.model.clone());
-            log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e);
+            log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()));
             AnthropicErrorReply(e)
         })?;
 
     // 4. Route to provider.
     if is_stream {
         let stream = provider.chat_stream(openai_req).await.map_err(|e| {
-            log_error(&state, &identity, &model, "/v1/messages", true, start, &e);
+            log_error(&state, &identity, &model, "/v1/messages", true, start, &e, Some(request_id.clone()));
             AnthropicErrorReply(e)
         })?;
         let sse_stream = sse_stream_from_anthropic_chat_stream(stream, model.clone());
@@ -769,7 +779,7 @@ pub async fn messages(
 
         // Wrap with LoggedStream — log is written when stream finishes (Drop).
         let logged = LoggedStream::new(guarded, state.db_pool.clone(), RequestLog {
-            request_id: None,
+            request_id: Some(request_id),
             key_hash: identity.key_hash.clone(),
             key_name: identity.key_name.clone(),
             team_id: identity.team_id.clone(),
@@ -788,7 +798,7 @@ pub async fn messages(
         Ok(response.into_response())
     } else {
         let response = provider.chat(openai_req).await.map_err(|e| {
-            log_error(&state, &identity, &model, "/v1/messages", false, start, &e);
+            log_error(&state, &identity, &model, "/v1/messages", false, start, &e, Some(request_id.clone()));
             AnthropicErrorReply(e)
         })?;
 
@@ -799,7 +809,7 @@ pub async fn messages(
         log_request(
             state.db_pool.clone(),
             RequestLog {
-                request_id: Some(response.id.clone()),
+                request_id: Some(request_id),
                 key_hash: identity.key_hash.clone(),
                 key_name: identity.key_name.clone(),
                 team_id: identity.team_id.clone(),
@@ -1068,11 +1078,12 @@ pub async fn pt_chat_completions(
     req: axum::http::Request<axum::body::Body>,
 ) -> Result<impl IntoResponse, GatewayErrorReply> {
     let start = Instant::now();
+    let request_id = new_request_id();
     let (parts, body) = req.into_parts();
     let bytes = axum::body::to_bytes(body, 10_485_760).await.map_err(|e| {
         let err = GatewayError::ProviderError(format!("Failed to read request body: {}", e));
         let identity = auth.identity();
-        log_error(&state, &identity, "unknown", "/v1/chat/completions", false, start, &err);
+        log_error(&state, &identity, "unknown", "/v1/chat/completions", false, start, &err, Some(request_id.clone()));
         GatewayErrorReply(err)
     })?;
 
@@ -1080,7 +1091,7 @@ pub async fn pt_chat_completions(
     let chat_req: ChatCompletionRequest = serde_json::from_slice(&bytes).map_err(|e| {
         let err = GatewayError::ProviderError(format!("Invalid request body: {}", e));
         let identity = auth.identity();
-        log_error(&state, &identity, "unknown", "/v1/chat/completions", false, start, &err);
+        log_error(&state, &identity, "unknown", "/v1/chat/completions", false, start, &err, Some(request_id.clone()));
         GatewayErrorReply(err)
     })?;
 
@@ -1088,6 +1099,8 @@ pub async fn pt_chat_completions(
     let inner = state.inner.load();
     let model = chat_req.model.clone();
     let is_stream = chat_req.stream.unwrap_or(false);
+
+    tracing::info!(request_id = %request_id, model = %model, stream = is_stream, "pt_chat_completions request started");
 
     // 1. Model access check.
     check_model_access(
@@ -1097,7 +1110,7 @@ pub async fn pt_chat_completions(
         &state.alias_store,
     )
     .map_err(|e| {
-        log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e);
+        log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e, Some(request_id.clone()));
         GatewayErrorReply(e)
     })?;
 
@@ -1126,7 +1139,7 @@ pub async fn pt_chat_completions(
     )
     .await
     .map_err(|e| {
-        log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e);
+        log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e, Some(request_id.clone()));
         GatewayErrorReply(e)
     })?;
 
@@ -1140,7 +1153,7 @@ pub async fn pt_chat_completions(
         Some(DeferredStreamLog {
             pool: state.db_pool.clone(),
             log: RequestLog {
-                request_id: None,
+                request_id: Some(request_id.clone()),
                 key_hash: identity.key_hash.clone(),
                 key_name: identity.key_name.clone(),
                 team_id: identity.team_id.clone(),
@@ -1167,7 +1180,7 @@ pub async fn pt_chat_completions(
         log_request(
             state.db_pool.clone(),
             RequestLog {
-                request_id: None,
+                request_id: Some(request_id),
                 key_hash: identity.key_hash.clone(),
                 key_name: identity.key_name.clone(),
                 team_id: identity.team_id.clone(),
@@ -1195,11 +1208,12 @@ pub async fn pt_messages(
     req: axum::http::Request<axum::body::Body>,
 ) -> Result<impl IntoResponse, AnthropicErrorReply> {
     let start = Instant::now();
+    let request_id = new_request_id();
     let (parts, body) = req.into_parts();
     let bytes = axum::body::to_bytes(body, 10_485_760).await.map_err(|e| {
         let err = GatewayError::ProviderError(format!("Failed to read request body: {}", e));
         let identity = auth.identity();
-        log_error(&state, &identity, "unknown", "/v1/messages", false, start, &err);
+        log_error(&state, &identity, "unknown", "/v1/messages", false, start, &err, Some(request_id.clone()));
         AnthropicErrorReply(err)
     })?;
 
@@ -1207,11 +1221,13 @@ pub async fn pt_messages(
     let anthropic_req: AnthropicMessagesRequest = serde_json::from_slice(&bytes).map_err(|e| {
         let err = GatewayError::ProviderError(format!("Invalid request body: {}", e));
         let identity = auth.identity();
-        log_error(&state, &identity, "unknown", "/v1/messages", false, start, &err);
+        log_error(&state, &identity, "unknown", "/v1/messages", false, start, &err, Some(request_id.clone()));
         AnthropicErrorReply(err)
     })?;
     let model = anthropic_req.model.clone();
     let is_stream = anthropic_req.stream.unwrap_or(false);
+
+    tracing::info!(request_id = %request_id, model = %model, stream = is_stream, "pt_messages request started");
 
     let identity = auth.identity();
     let inner = state.inner.load();
@@ -1224,7 +1240,7 @@ pub async fn pt_messages(
         &state.alias_store,
     )
     .map_err(|e| {
-        log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e);
+        log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()));
         AnthropicErrorReply(e)
     })?;
 
@@ -1253,7 +1269,7 @@ pub async fn pt_messages(
     )
     .await
     .map_err(|e| {
-        log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e);
+        log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()));
         AnthropicErrorReply(e)
     })?;
 
@@ -1263,7 +1279,7 @@ pub async fn pt_messages(
         Some(DeferredStreamLog {
             pool: state.db_pool.clone(),
             log: RequestLog {
-                request_id: None,
+                request_id: Some(request_id.clone()),
                 key_hash: identity.key_hash.clone(),
                 key_name: identity.key_name.clone(),
                 team_id: identity.team_id.clone(),
@@ -1290,7 +1306,7 @@ pub async fn pt_messages(
         log_request(
             state.db_pool.clone(),
             RequestLog {
-                request_id: None,
+                request_id: Some(request_id),
                 key_hash: identity.key_hash.clone(),
                 key_name: identity.key_name.clone(),
                 team_id: identity.team_id.clone(),

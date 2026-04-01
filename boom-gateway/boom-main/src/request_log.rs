@@ -64,11 +64,12 @@ pub fn log_error(
     is_stream: bool,
     start: Instant,
     error: &GatewayError,
+    request_id: Option<String>,
 ) {
     log_request(
         state.db_pool.clone(),
         RequestLog {
-            request_id: None,
+            request_id,
             key_hash: identity.key_hash.clone(),
             key_name: identity.key_name.clone(),
             team_id: identity.team_id.clone(),
