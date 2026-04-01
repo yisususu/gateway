@@ -362,6 +362,20 @@ pub enum AnthropicContentBlock {
     },
     #[serde(rename = "thinking")]
     Thinking { thinking: String },
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
+    #[serde(rename = "document")]
+    Document {
+        source: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        citations: Option<serde_json::Value>,
+    },
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -402,6 +416,10 @@ pub enum AnthropicResponseContentBlock {
     },
     #[serde(rename = "thinking")]
     Thinking { thinking: String },
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
