@@ -60,19 +60,24 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    // Do NOT use axum's with_graceful_shutdown — it waits for ALL connections
-    // (including idle browser keep-alive) to close, which can hang indefinitely
-    // when the dashboard's 5s polling keeps connections active.
-    // Instead, just abort the server on Ctrl+C via tokio::select!.
-    let server = axum::serve(listener, app);
+    // Graceful shutdown with a hard deadline:
+    //   1. Ctrl+C triggers graceful shutdown (stop accepting new connections,
+    //      let in-flight requests finish).
+    //   2. Wait at most 3s for in-flight requests to complete.
+    //   3. Force exit — don't get stuck on idle browser keep-alive connections
+    //      kept alive by the dashboard's 5s polling timer.
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal());
+
     tokio::select! {
         result = server => {
             if let Err(e) = result {
                 tracing::error!("Server error: {}", e);
             }
         }
-        _ = shutdown_signal() => {
-            tracing::info!("Received shutdown signal, aborting server...");
+        _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {
+            tracing::warn!("Graceful shutdown timed out, forcing exit");
+            std::process::exit(0);
         }
     }
 
