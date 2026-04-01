@@ -1,6 +1,15 @@
 use boom_limiter::{AliasStore, DeploymentStore, PlanStore, SlidingWindowLimiter};
+use dashmap::DashMap;
 use sqlx::PgPool;
 use std::sync::Arc;
+use std::time::Instant;
+
+/// Tracks login failure state per IP for brute-force protection.
+#[derive(Debug)]
+pub struct LoginAttempt {
+    pub fail_count: u32,
+    pub locked_until: Option<Instant>,
+}
 
 /// Dashboard-specific state, injected via Extension layer.
 /// Independent from boom-gateway's AppState to avoid type coupling.
@@ -17,6 +26,8 @@ pub struct DashboardState {
     pub jwt_secret: String,
     /// Master key for admin login (constant-time comparison).
     pub master_key: Option<String>,
+    /// Login rate-limit state per client IP.
+    pub login_attempts: Arc<DashMap<String, LoginAttempt>>,
 }
 
 impl DashboardState {
@@ -41,6 +52,7 @@ impl DashboardState {
             alias_store,
             jwt_secret,
             master_key,
+            login_attempts: Arc::new(DashMap::new()),
         }
     }
 }
