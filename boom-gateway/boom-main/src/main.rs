@@ -160,7 +160,10 @@ fn build_router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(move |req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| {
             let count = request_count.clone();
             async move {
-                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let path = req.uri().path();
+                if path.starts_with("/v1/") || path.starts_with("/admin/") {
+                    count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 next.run(req).await
             }
         }))

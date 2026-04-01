@@ -744,14 +744,15 @@
     const wrap = document.getElementById("logs-table-wrap");
     if (logs.length === 0) { wrap.innerHTML = "<p>No request logs found.</p>"; return; }
     wrap.innerHTML = `<table>
-      <tr><th>Time</th><th>Key</th><th>Model</th><th>Path</th><th>Stream</th><th>Status</th><th>Input</th><th>Output</th><th>Duration</th><th>Error</th></tr>
+      <tr><th>Time</th><th>Key Alias</th><th>Key</th><th>Model</th><th>Path</th><th>Status</th><th>Stream</th><th>Input</th><th>Output</th><th>Duration</th><th>Error</th></tr>
       ${logs.map((l) => `<tr>
-        <td>${formatTimeAgo(l.created_at)}</td>
-        <td class="mono" title="${esc(l.key_hash)}">${esc((l.key_name || l.key_hash || "").substring(0, 12))}</td>
+        <td class="mono">${formatTimestamp(l.created_at)}</td>
+        <td>${esc(l.key_name || "-")}</td>
+        <td class="mono" title="${esc(l.key_hash)}">${esc((l.key_hash || "").substring(0, 12))}</td>
         <td class="mono">${esc(l.model)}</td>
         <td class="mono">${esc(l.api_path)}</td>
-        <td>${l.is_stream ? "Yes" : "No"}</td>
         <td>${l.status_code >= 400 ? '<span style="color:var(--danger)">' + l.status_code + '</span>' : l.status_code}</td>
+        <td>${l.is_stream ? "Yes" : "No"}</td>
         <td>${l.input_tokens != null ? formatNumber(l.input_tokens) : "-"}</td>
         <td>${l.output_tokens != null ? formatNumber(l.output_tokens) : "-"}</td>
         <td>${l.duration_ms != null ? l.duration_ms + "ms" : "-"}</td>
@@ -793,17 +794,11 @@
     return String(n);
   }
 
-  function formatTimeAgo(iso) {
+  function formatTimestamp(iso) {
     if (!iso) return "-";
-    const diff = Date.now() - new Date(iso).getTime();
-    if (diff < 0) return "just now";
-    const secs = Math.floor(diff / 1000);
-    if (secs < 60) return secs + "s ago";
-    const mins = Math.floor(secs / 60);
-    if (mins < 60) return mins + "m ago";
-    const hrs = Math.floor(mins / 60);
-    if (hrs < 24) return hrs + "h ago";
-    const days = Math.floor(hrs / 24);
-    return days + "d ago";
+    const d = new Date(iso);
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+           `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   }
 })();

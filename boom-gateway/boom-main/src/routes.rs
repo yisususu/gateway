@@ -14,9 +14,55 @@ use boom_core::GatewayError;
 use boom_limiter::{ConcurrencyGuard, GuardedStream, PlanStore, RateLimitPlan};
 use boom_routing::{AliasStore, DeploymentStore};
 use futures::StreamExt;
+use sqlx::PgPool;
 use std::convert::Infallible;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Instant;
+
+// ============================================================
+// LoggedStream — delays log write until the stream is fully consumed
+// ============================================================
+
+/// Wrapper stream that writes the request log when dropped (i.e. when the
+/// stream has been fully consumed or the connection is torn down).
+/// This captures the *real* duration for streaming requests instead of
+/// recording the time at which the stream *started*.
+struct LoggedStream<S> {
+    inner: S,
+    pool: Option<PgPool>,
+    log: Option<RequestLog>,
+    start: Instant,
+}
+
+impl<S> LoggedStream<S> {
+    fn new(inner: S, pool: Option<PgPool>, log: RequestLog, start: Instant) -> Self {
+        Self {
+            inner,
+            pool,
+            log: Some(log),
+            start,
+        }
+    }
+}
+
+impl<S> Drop for LoggedStream<S> {
+    fn drop(&mut self) {
+        if let Some(mut log) = self.log.take() {
+            log.duration_ms = Some(self.start.elapsed().as_millis() as i32);
+            log_request(self.pool.clone(), log);
+        }
+    }
+}
+
+impl<S: futures::Stream + Unpin> futures::Stream for LoggedStream<S> {
+    type Item = S::Item;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.poll_next_unpin(cx)
+    }
+}
 
 // ============================================================
 // Chat Completions
@@ -86,28 +132,25 @@ pub async fn chat_completions(
         })?;
         let sse_stream = sse_stream_from_chat_stream(stream);
         let guarded = GuardedStream::new(sse_stream, guard);
-        let response = Sse::new(guarded).keep_alive(KeepAlive::default());
 
-        // Stream: no usage available, just log occurrence + duration.
-        log_request(
-            state.db_pool.clone(),
-            RequestLog {
-                request_id: None,
-                key_hash: identity.key_hash.clone(),
-                key_name: identity.key_name.clone(),
-                team_id: identity.team_id.clone(),
-                model,
-                api_path: "/v1/chat/completions".to_string(),
-                is_stream: true,
-                status_code: 200,
-                error_type: None,
-                error_message: None,
-                input_tokens: None,
-                output_tokens: None,
-                duration_ms: Some(start.elapsed().as_millis() as i32),
-            },
-        );
+        // Wrap with LoggedStream — log is written when stream finishes (Drop).
+        let logged = LoggedStream::new(guarded, state.db_pool.clone(), RequestLog {
+            request_id: None,
+            key_hash: identity.key_hash.clone(),
+            key_name: identity.key_name.clone(),
+            team_id: identity.team_id.clone(),
+            model,
+            api_path: "/v1/chat/completions".to_string(),
+            is_stream: true,
+            status_code: 200,
+            error_type: None,
+            error_message: None,
+            input_tokens: None,
+            output_tokens: None,
+            duration_ms: None, // filled by LoggedStream::drop
+        }, start);
 
+        let response = Sse::new(logged).keep_alive(KeepAlive::default());
         Ok(response.into_response())
     } else {
         let response = provider.chat(req).await.map_err(|e| {
@@ -723,28 +766,25 @@ pub async fn messages(
         })?;
         let sse_stream = sse_stream_from_anthropic_chat_stream(stream, model.clone());
         let guarded = GuardedStream::new(sse_stream, guard);
-        let response = Sse::new(guarded).keep_alive(KeepAlive::default());
 
-        // Stream: no usage available.
-        log_request(
-            state.db_pool.clone(),
-            RequestLog {
-                request_id: None,
-                key_hash: identity.key_hash.clone(),
-                key_name: identity.key_name.clone(),
-                team_id: identity.team_id.clone(),
-                model,
-                api_path: "/v1/messages".to_string(),
-                is_stream: true,
-                status_code: 200,
-                error_type: None,
-                error_message: None,
-                input_tokens: None,
-                output_tokens: None,
-                duration_ms: Some(start.elapsed().as_millis() as i32),
-            },
-        );
+        // Wrap with LoggedStream — log is written when stream finishes (Drop).
+        let logged = LoggedStream::new(guarded, state.db_pool.clone(), RequestLog {
+            request_id: None,
+            key_hash: identity.key_hash.clone(),
+            key_name: identity.key_name.clone(),
+            team_id: identity.team_id.clone(),
+            model,
+            api_path: "/v1/messages".to_string(),
+            is_stream: true,
+            status_code: 200,
+            error_type: None,
+            error_message: None,
+            input_tokens: None,
+            output_tokens: None,
+            duration_ms: None, // filled by LoggedStream::drop
+        }, start);
 
+        let response = Sse::new(logged).keep_alive(KeepAlive::default());
         Ok(response.into_response())
     } else {
         let response = provider.chat(openai_req).await.map_err(|e| {
@@ -894,12 +934,23 @@ const HOP_BY_HOP: &[&str] = &[
     "upgrade",
 ];
 
+/// Deferred log info for SSE responses — written when the stream finishes.
+struct DeferredStreamLog {
+    pool: Option<PgPool>,
+    log: RequestLog,
+    start: Instant,
+}
+
 /// Forward raw bytes to the upstream gateway, preserving headers and streaming support.
+/// When `stream_log` is provided and the upstream response is SSE, the log is deferred
+/// until the stream finishes (via `LoggedStream`). For non-SSE responses the caller
+/// should log immediately.
 async fn forward_pass_through(
     state: &AppState,
     original_headers: &axum::http::HeaderMap,
     body: &[u8],
     path: &str,
+    stream_log: Option<DeferredStreamLog>,
 ) -> Result<axum::response::Response, GatewayErrorReply> {
     let url = state
         .inner
@@ -980,6 +1031,14 @@ async fn forward_pass_through(
                 Ok::<Event, Infallible>(Event::default().data("[DONE]"))
             }
         });
+
+        // Wrap with LoggedStream if deferred log is provided.
+        let sse_stream: Box<dyn futures::Stream<Item = Result<Event, Infallible>> + Send + Unpin> =
+            if let Some(sl) = stream_log {
+                Box::new(LoggedStream::new(sse_stream, sl.pool, sl.log, sl.start))
+            } else {
+                Box::new(sse_stream)
+            };
 
         let mut response = Sse::new(sse_stream)
             .keep_alive(KeepAlive::default())
@@ -1076,27 +1135,54 @@ pub async fn pt_chat_completions(
     // For streaming, the upstream gateway manages its own concurrency.
     drop(guard);
 
-    let result = forward_pass_through(&state, &parts.headers, &bytes, "/v1/chat/completions").await;
+    // Build a deferred log for streaming responses — actual duration recorded on stream end.
+    let stream_log = if is_stream {
+        Some(DeferredStreamLog {
+            pool: state.db_pool.clone(),
+            log: RequestLog {
+                request_id: None,
+                key_hash: identity.key_hash.clone(),
+                key_name: identity.key_name.clone(),
+                team_id: identity.team_id.clone(),
+                model: model.clone(),
+                api_path: "/v1/chat/completions".to_string(),
+                is_stream: true,
+                status_code: 200,
+                error_type: None,
+                error_message: None,
+                input_tokens: None,
+                output_tokens: None,
+                duration_ms: None,
+            },
+            start,
+        })
+    } else {
+        None
+    };
 
-    // Log pass-through request (no token usage — we don't parse the response).
-    log_request(
-        state.db_pool.clone(),
-        RequestLog {
-            request_id: None,
-            key_hash: identity.key_hash.clone(),
-            key_name: identity.key_name.clone(),
-            team_id: identity.team_id.clone(),
-            model,
-            api_path: "/v1/chat/completions".to_string(),
-            is_stream,
-            status_code: if result.is_ok() { 200 } else { 502 },
-            error_type: result.as_ref().err().map(|e| e.0.error_type().to_string()),
-            error_message: result.as_ref().err().map(|e| e.0.to_string()),
-            input_tokens: None,
-            output_tokens: None,
-            duration_ms: Some(start.elapsed().as_millis() as i32),
-        },
-    );
+    let result = forward_pass_through(&state, &parts.headers, &bytes, "/v1/chat/completions", stream_log).await;
+
+    // Non-streaming or error: log immediately with correct duration.
+    if !is_stream {
+        log_request(
+            state.db_pool.clone(),
+            RequestLog {
+                request_id: None,
+                key_hash: identity.key_hash.clone(),
+                key_name: identity.key_name.clone(),
+                team_id: identity.team_id.clone(),
+                model,
+                api_path: "/v1/chat/completions".to_string(),
+                is_stream: false,
+                status_code: if result.is_ok() { 200 } else { 502 },
+                error_type: result.as_ref().err().map(|e| e.0.error_type().to_string()),
+                error_message: result.as_ref().err().map(|e| e.0.to_string()),
+                input_tokens: None,
+                output_tokens: None,
+                duration_ms: Some(start.elapsed().as_millis() as i32),
+            },
+        );
+    }
 
     result
 }
@@ -1172,27 +1258,54 @@ pub async fn pt_messages(
     })?;
 
     // 3. Forward to upstream.
-    let result = forward_pass_through(&state, &parts.headers, &bytes, "/v1/messages").await;
+    // Build a deferred log for streaming responses — actual duration recorded on stream end.
+    let stream_log = if is_stream {
+        Some(DeferredStreamLog {
+            pool: state.db_pool.clone(),
+            log: RequestLog {
+                request_id: None,
+                key_hash: identity.key_hash.clone(),
+                key_name: identity.key_name.clone(),
+                team_id: identity.team_id.clone(),
+                model: model.clone(),
+                api_path: "/v1/messages".to_string(),
+                is_stream: true,
+                status_code: 200,
+                error_type: None,
+                error_message: None,
+                input_tokens: None,
+                output_tokens: None,
+                duration_ms: None,
+            },
+            start,
+        })
+    } else {
+        None
+    };
 
-    // Log pass-through request (no token usage — we don't parse the response).
-    log_request(
-        state.db_pool.clone(),
-        RequestLog {
-            request_id: None,
-            key_hash: identity.key_hash.clone(),
-            key_name: identity.key_name.clone(),
-            team_id: identity.team_id.clone(),
-            model,
-            api_path: "/v1/messages".to_string(),
-            is_stream,
-            status_code: if result.is_ok() { 200 } else { 502 },
-            error_type: result.as_ref().err().map(|e| e.0.error_type().to_string()),
-            error_message: result.as_ref().err().map(|e| e.0.to_string()),
-            input_tokens: None,
-            output_tokens: None,
-            duration_ms: Some(start.elapsed().as_millis() as i32),
-        },
-    );
+    let result = forward_pass_through(&state, &parts.headers, &bytes, "/v1/messages", stream_log).await;
+
+    // Non-streaming or error: log immediately with correct duration.
+    if !is_stream {
+        log_request(
+            state.db_pool.clone(),
+            RequestLog {
+                request_id: None,
+                key_hash: identity.key_hash.clone(),
+                key_name: identity.key_name.clone(),
+                team_id: identity.team_id.clone(),
+                model,
+                api_path: "/v1/messages".to_string(),
+                is_stream: false,
+                status_code: if result.is_ok() { 200 } else { 502 },
+                error_type: result.as_ref().err().map(|e| e.0.error_type().to_string()),
+                error_message: result.as_ref().err().map(|e| e.0.to_string()),
+                input_tokens: None,
+                output_tokens: None,
+                duration_ms: Some(start.elapsed().as_millis() as i32),
+            },
+        );
+    }
 
     match result {
         Ok(response) => Ok(response),
