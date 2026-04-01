@@ -75,11 +75,28 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn build_router(state: AppState) -> Router {
-    // Public OpenAI-compatible API routes.
-    let api_routes = Router::new()
-        .route("/v1/chat/completions", post(routes::chat_completions))
-        .route("/v1/messages", post(routes::messages))
-        .route("/v1/models", get(routes::list_models));
+    // Choose API routes based on pass-through mode.
+    let pass_through_enabled = state
+        .inner
+        .load()
+        .config
+        .pass_through
+        .as_ref()
+        .map(|pt| pt.enabled)
+        .unwrap_or(false);
+
+    let api_routes = if pass_through_enabled {
+        tracing::info!("Pass-through mode enabled — forwarding to upstream gateway");
+        Router::new()
+            .route("/v1/chat/completions", post(routes::pt_chat_completions))
+            .route("/v1/messages", post(routes::pt_messages))
+            .route("/v1/models", get(routes::list_models))
+    } else {
+        Router::new()
+            .route("/v1/chat/completions", post(routes::chat_completions))
+            .route("/v1/messages", post(routes::messages))
+            .route("/v1/models", get(routes::list_models))
+    };
 
     // Health check routes (no auth required).
     let health_routes = Router::new()

@@ -14,7 +14,7 @@ use tracing;
 /// 1. Extract raw API key from request
 /// 2. SHA-256 hash it (for sk- prefixed keys)
 /// 3. Check in-memory cache first (moka)
-/// 4. Fall back to PostgreSQL query on `LiteLLM_VerificationToken`
+/// 4. Fall back to PostgreSQL query on `boom_verification_token`
 /// 5. Validate: not blocked, not expired, budget OK
 pub struct DbAuthenticator {
     db: Option<PgPool>,
@@ -85,7 +85,7 @@ impl DbAuthenticator {
                       budget_reset_at, allowed_cache_controls, allowed_routes,
                       model_spend, model_max_budget, budget_id, organization_id,
                       created_at, created_by, updated_at
-               FROM "LiteLLM_VerificationToken"
+               FROM "boom_verification_token"
                WHERE token = $1"#,
         )
         .bind(hashed)
@@ -123,7 +123,7 @@ impl DbAuthenticator {
         }
     }
 
-    /// Query team's allowed models from LiteLLM_TeamTable.
+    /// Query team's allowed models from boom_team_table.
     async fn lookup_team_models(&self, team_id: &str) -> Result<Vec<String>, GatewayError> {
         let db = match &self.db {
             Some(pool) => pool,
@@ -131,7 +131,7 @@ impl DbAuthenticator {
         };
 
         let result = sqlx::query_as::<_, TeamRow>(
-            r#"SELECT models FROM "LiteLLM_TeamTable" WHERE team_id = $1"#,
+            r#"SELECT models FROM "boom_team_table" WHERE team_id = $1"#,
         )
         .bind(team_id)
         .fetch_optional(db)

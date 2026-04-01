@@ -1,3 +1,4 @@
+use crate::state::DashboardState;
 use axum::extract::FromRequestParts;
 use axum::http::header::{COOKIE, SET_COOKIE};
 use axum::http::request::Parts;
@@ -7,8 +8,12 @@ use chrono::Utc;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::time::{Duration, Instant};
 
-use crate::state::DashboardState;
+// ── Login rate-limit constants ─────────────────────────────
+
+const MAX_LOGIN_FAILURES: u32 = 5;
+const LOCKOUT_DURATION: Duration = Duration::from_secs(15 * 60); // 15 minutes
 
 // ── JWT Claims ──────────────────────────────────────────────
 
@@ -143,33 +148,148 @@ pub struct MeResponse {
     pub role: String,
 }
 
+// ── IP Extraction ─────────────────────────────────────────
+
+/// Extract client IP from request headers (reverse-proxy aware).
+fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
+    // Try X-Real-IP first (set by nginx etc.)
+    if let Some(val) = headers.get("X-Real-IP").and_then(|v| v.to_str().ok()) {
+        let ip = val.trim();
+        if !ip.is_empty() {
+            return ip.to_string();
+        }
+    }
+    // Try X-Forwarded-For (first IP in the list).
+    if let Some(val) = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok()) {
+        if let Some(ip) = val.split(',').next() {
+            let ip = ip.trim();
+            if !ip.is_empty() {
+                return ip.to_string();
+            }
+        }
+    }
+    "unknown".to_string()
+}
+
+// ── Login Rate Limiting ───────────────────────────────────
+
+/// Check if an IP is currently locked out. Returns remaining lockout time if locked.
+/// If the lockout has expired, resets the counter so the IP gets a fresh start.
+fn check_login_lockout(state: &DashboardState, client_ip: &str) -> Option<Duration> {
+    let map = &state.login_attempts;
+    if let Some(entry) = map.get(client_ip) {
+        if let Some(locked_until) = entry.locked_until {
+            let now = Instant::now();
+            if now < locked_until {
+                return Some(locked_until - now);
+            }
+            // Lockout expired — remove entry to reset fail_count.
+            drop(entry);
+            map.remove(client_ip);
+        }
+    }
+    None
+}
+
+/// Record a failed login attempt. Returns true if this triggers a lockout.
+fn record_login_failure(state: &DashboardState, client_ip: &str) -> bool {
+    let map = &state.login_attempts;
+    let now = Instant::now();
+
+    map.entry(client_ip.to_string())
+        .and_modify(|attempt| {
+            // If past the failure window, reset counter.
+            attempt.fail_count += 1;
+            if attempt.fail_count >= MAX_LOGIN_FAILURES {
+                attempt.locked_until = Some(now + LOCKOUT_DURATION);
+            }
+        })
+        .or_insert(crate::state::LoginAttempt {
+            fail_count: 1,
+            locked_until: None,
+        });
+
+    // Check if locked.
+    map.get(client_ip)
+        .map(|e| e.locked_until.is_some())
+        .unwrap_or(false)
+}
+
+/// Clear login failure state on successful login.
+fn clear_login_failures(state: &DashboardState, client_ip: &str) {
+    state.login_attempts.remove(client_ip);
+}
+
 // ── Login Handler ──────────────────────────────────────────
 
 pub async fn login(
     Extension(state): Extension<std::sync::Arc<DashboardState>>,
-    Json(req): Json<LoginRequest>,
+    req: axum::http::Request<axum::body::Body>,
 ) -> Response {
-    // Admin login: user_id == "admin" + constant-time comparison with master_key.
-    if req.user_id == "admin" {
+    let client_ip = extract_client_ip(req.headers());
+
+    // 1. Rate-limit check.
+    if let Some(remaining) = check_login_lockout(&state, &client_ip) {
+        tracing::warn!(
+            ip = %client_ip,
+            remaining_secs = remaining.as_secs(),
+            "Login blocked: too many attempts"
+        );
+        return (
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "Too many login attempts. Try again in {} seconds.",
+                remaining.as_secs()
+            ),
+        )
+            .into_response();
+    }
+
+    // 2. Deserialize body.
+    let LoginRequest { user_id, api_key } = match axum::body::to_bytes(req.into_body(), 4096).await
+    {
+        Ok(bytes) => match serde_json::from_slice::<LoginRequest>(&bytes) {
+            Ok(req) => req,
+            Err(_) => {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "Invalid request body",
+                )
+                    .into_response();
+            }
+        },
+        Err(_) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                "Failed to read request body",
+            )
+                .into_response();
+        }
+    };
+
+    // 3. Admin login: user_id == "admin" + constant-time comparison with master_key.
+    if user_id == "admin" {
         let master_key = match &state.master_key {
             Some(k) => k,
             None => {
-                return (axum::http::StatusCode::FORBIDDEN, "Admin login disabled").into_response();
+                return (axum::http::StatusCode::FORBIDDEN, "Admin login disabled")
+                    .into_response();
             }
         };
 
         // Constant-time comparison.
-        let equal = constant_time_eq(req.api_key.as_bytes(), master_key.as_bytes());
+        let equal = constant_time_eq(api_key.as_bytes(), master_key.as_bytes());
         if !equal {
+            let _locked = record_login_failure(&state, &client_ip);
             return (axum::http::StatusCode::UNAUTHORIZED, "Invalid credentials")
                 .into_response();
         }
 
+        clear_login_failures(&state, &client_ip);
         return sign_and_respond(&state, "admin".to_string(), "admin".to_string(), String::new());
     }
 
-    // User login: SHA-256(api_key) → lookup in DB.
-    // user_id field is ignored for non-admin login (can be "user", empty, or anything).
+    // 4. User login: SHA-256(api_key) → lookup in DB.
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
@@ -178,19 +298,20 @@ pub async fn login(
         }
     };
 
-    let token_hash = hash_token(&req.api_key);
+    let token_hash = hash_token(&api_key);
 
     let row: Option<(Option<String>, Option<String>, Option<bool>)> = sqlx::query_as(
-        r#"SELECT user_id, key_alias, blocked FROM "LiteLLM_VerificationToken" WHERE token = $1"#,
+        r#"SELECT user_id, key_alias, blocked FROM "boom_verification_token" WHERE token = $1"#,
     )
     .bind(&token_hash)
     .fetch_optional(db_pool)
     .await
     .unwrap_or(None);
 
-    let (user_id, key_alias, blocked) = match row {
+    let (uid, key_alias, blocked) = match row {
         Some((uid, alias, blk)) => (uid, alias, blk),
         None => {
+            let _locked = record_login_failure(&state, &client_ip);
             return (axum::http::StatusCode::UNAUTHORIZED, "Invalid API key")
                 .into_response();
         }
@@ -201,9 +322,11 @@ pub async fn login(
         return (axum::http::StatusCode::FORBIDDEN, "Key is blocked").into_response();
     }
 
+    clear_login_failures(&state, &client_ip);
+
     // Use key_alias as display name, fallback to user_id or "user".
     let display_name = key_alias
-        .or(user_id)
+        .or(uid)
         .unwrap_or_else(|| "user".to_string());
 
     sign_and_respond(&state, display_name, "user".to_string(), token_hash)

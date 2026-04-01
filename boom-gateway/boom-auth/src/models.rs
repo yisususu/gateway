@@ -2,7 +2,7 @@ use chrono::NaiveDateTime;
 use serde::Deserialize;
 use sqlx::FromRow;
 
-/// Maps to litellm's `LiteLLM_VerificationToken` table.
+/// Maps to `boom_verification_token` table (formerly litellm's `LiteLLM_VerificationToken`).
 /// Only includes fields needed for key authentication.
 #[derive(Debug, Clone, FromRow, Deserialize)]
 pub struct VerificationToken {
@@ -42,7 +42,7 @@ pub struct VerificationToken {
     pub updated_at: Option<NaiveDateTime>,
 }
 
-/// Maps to litellm's `LiteLLM_TeamTable` — only the fields we need.
+/// Maps to `boom_team_table` (formerly litellm's `LiteLLM_TeamTable`) — only the fields we need.
 #[derive(Debug, Clone, FromRow)]
 pub struct TeamRow {
     pub models: Vec<String>,

@@ -181,7 +181,7 @@ pub async fn list_keys(
         r#"SELECT token, key_name, key_alias, user_id, team_id, models,
                   spend, blocked, rpm_limit, tpm_limit, max_budget,
                   budget_duration, expires, metadata, created_at
-           FROM "LiteLLM_VerificationToken"
+           FROM "boom_verification_token"
            ORDER BY created_at DESC NULLS LAST
            LIMIT $1 OFFSET $2"#,
     )
@@ -195,7 +195,7 @@ pub async fn list_keys(
             tracing::error!("Dashboard list_keys query failed: {}", e);
             return (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("DB error: {}", e),
+                "Internal error",
             )
                 .into_response();
         }
@@ -227,7 +227,7 @@ pub async fn list_keys(
         .collect();
 
     // Get total count.
-    let total: (i64,) = sqlx::query_as(r#"SELECT COUNT(*) FROM "LiteLLM_VerificationToken""#)
+    let total: (i64,) = sqlx::query_as(r#"SELECT COUNT(*) FROM "boom_verification_token""#)
         .fetch_one(db_pool)
         .await
         .unwrap_or((0,));
@@ -276,7 +276,7 @@ pub async fn create_key(
     // 1b. Check key_alias dedup (if provided).
     if let Some(ref alias) = req.key_alias {
         let exists: bool = sqlx::query_scalar(
-            r#"SELECT EXISTS(SELECT 1 FROM "LiteLLM_VerificationToken" WHERE key_alias = $1)"#,
+            r#"SELECT EXISTS(SELECT 1 FROM "boom_verification_token" WHERE key_alias = $1)"#,
         )
         .bind(alias)
         .fetch_one(db_pool)
@@ -304,7 +304,7 @@ pub async fn create_key(
 
     // 3. INSERT into DB.
     let result = sqlx::query(
-        r#"INSERT INTO "LiteLLM_VerificationToken"
+        r#"INSERT INTO "boom_verification_token"
            (token, key_name, key_alias, user_id, team_id, models, spend, blocked,
             rpm_limit, tpm_limit, max_budget, budget_duration, expires,
             metadata, created_at, updated_at)
@@ -329,7 +329,7 @@ pub async fn create_key(
         tracing::error!("Dashboard create_key insert failed: {}", e);
         return (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to create key: {}", e),
+            "Internal error",
         )
             .into_response();
     }
@@ -385,7 +385,7 @@ pub async fn update_key(
         .and_then(|s| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok());
 
     let result = sqlx::query(
-        r#"UPDATE "LiteLLM_VerificationToken"
+        r#"UPDATE "boom_verification_token"
            SET key_name = COALESCE($2, key_name),
                models = COALESCE($3, models),
                max_budget = COALESCE($4, max_budget),
@@ -420,7 +420,7 @@ pub async fn update_key(
             tracing::error!("Dashboard update_key failed: {}", e);
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("DB error: {}", e),
+                "Internal error",
             )
                 .into_response()
         }
@@ -440,7 +440,7 @@ pub async fn block_key(
     };
 
     let result = sqlx::query(
-        r#"UPDATE "LiteLLM_VerificationToken" SET blocked = true, updated_at = NOW() WHERE token = $1"#,
+        r#"UPDATE "boom_verification_token" SET blocked = true, updated_at = NOW() WHERE token = $1"#,
     )
     .bind(&token_hash)
     .execute(db_pool)
@@ -457,7 +457,7 @@ pub async fn block_key(
             tracing::error!("Dashboard block_key failed: {}", e);
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("DB error: {}", e),
+                "Internal error",
             )
                 .into_response()
         }
@@ -477,7 +477,7 @@ pub async fn unblock_key(
     };
 
     let result = sqlx::query(
-        r#"UPDATE "LiteLLM_VerificationToken" SET blocked = false, updated_at = NOW() WHERE token = $1"#,
+        r#"UPDATE "boom_verification_token" SET blocked = false, updated_at = NOW() WHERE token = $1"#,
     )
     .bind(&token_hash)
     .execute(db_pool)
@@ -494,7 +494,7 @@ pub async fn unblock_key(
             tracing::error!("Dashboard unblock_key failed: {}", e);
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("DB error: {}", e),
+                "Internal error",
             )
                 .into_response()
         }
@@ -639,7 +639,7 @@ pub async fn batch_create_keys(
         // Dedup check on key_alias.
         if let Some(ref alias) = req.key_alias {
             let exists: bool = sqlx::query_scalar(
-                r#"SELECT EXISTS(SELECT 1 FROM "LiteLLM_VerificationToken" WHERE key_alias = $1)"#,
+                r#"SELECT EXISTS(SELECT 1 FROM "boom_verification_token" WHERE key_alias = $1)"#,
             )
             .bind(alias)
             .fetch_one(db_pool)
@@ -668,7 +668,7 @@ pub async fn batch_create_keys(
             .map(|m| serde_json::to_value(m).unwrap_or(json!([])));
 
         let result = sqlx::query(
-            r#"INSERT INTO "LiteLLM_VerificationToken"
+            r#"INSERT INTO "boom_verification_token"
                (token, key_name, key_alias, user_id, team_id, models, spend, blocked,
                 rpm_limit, tpm_limit, max_budget, budget_duration, expires,
                 metadata, created_at, updated_at)
@@ -707,7 +707,7 @@ pub async fn batch_create_keys(
                 tracing::error!("Dashboard batch_create_keys insert failed: {}", e);
                 skipped.push(json!({
                     "key_alias": req.key_alias,
-                    "reason": format!("db_error: {}", e),
+                    "reason": "db_error",
                 }));
             }
         }
@@ -807,7 +807,7 @@ pub async fn list_models(
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Dashboard list_models query failed: {}", e);
-            return Json(json!({"error": format!("DB error: {}", e)})).into_response();
+            return Json(json!({"error": "Internal error"})).into_response();
         }
     };
 
@@ -884,7 +884,7 @@ pub async fn create_model(
         Ok(row) => row.get("id"),
         Err(e) => {
             tracing::error!("Dashboard create_model insert failed: {}", e);
-            return Json(json!({"error": format!("Failed to create model: {}", e)})).into_response();
+            return Json(json!({"error": "Internal error"})).into_response();
         }
     };
 
@@ -958,7 +958,7 @@ pub async fn update_model(
         Ok(_) => Json(json!({"error": "Model deployment not found"})).into_response(),
         Err(e) => {
             tracing::error!("Dashboard update_model failed: {}", e);
-            Json(json!({"error": format!("DB error: {}", e)})).into_response()
+            Json(json!({"error": "Internal error"})).into_response()
         }
     }
 }
@@ -1001,7 +1001,7 @@ pub async fn delete_model(
         Ok(_) => Json(json!({"error": "Model deployment not found"})).into_response(),
         Err(e) => {
             tracing::error!("Dashboard delete_model failed: {}", e);
-            Json(json!({"error": format!("DB error: {}", e)})).into_response()
+            Json(json!({"error": "Internal error"})).into_response()
         }
     }
 }
@@ -1083,7 +1083,7 @@ pub async fn list_aliases(
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Dashboard list_aliases query failed: {}", e);
-            return Json(json!({"error": format!("DB error: {}", e)})).into_response();
+            return Json(json!({"error": "Internal error"})).into_response();
         }
     };
 
@@ -1132,7 +1132,7 @@ pub async fn create_alias(
 
     if let Err(e) = result {
         tracing::error!("Dashboard create_alias failed: {}", e);
-        return Json(json!({"error": format!("DB error: {}", e)})).into_response();
+        return Json(json!({"error": "Internal error"})).into_response();
     }
 
     // Update in-memory alias store.
@@ -1184,7 +1184,7 @@ pub async fn update_alias(
         Ok(_) => Json(json!({"error": "Alias not found"})).into_response(),
         Err(e) => {
             tracing::error!("Dashboard update_alias failed: {}", e);
-            Json(json!({"error": format!("DB error: {}", e)})).into_response()
+            Json(json!({"error": "Internal error"})).into_response()
         }
     }
 }
@@ -1217,7 +1217,7 @@ pub async fn delete_alias(
         Ok(_) => Json(json!({"error": "Alias not found"})).into_response(),
         Err(e) => {
             tracing::error!("Dashboard delete_alias failed: {}", e);
-            Json(json!({"error": format!("DB error: {}", e)})).into_response()
+            Json(json!({"error": "Internal error"})).into_response()
         }
     }
 }
@@ -1254,7 +1254,7 @@ pub async fn get_config(
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Dashboard get_config query failed: {}", e);
-            return Json(json!({"error": format!("DB error: {}", e)})).into_response();
+            return Json(json!({"error": "Internal error"})).into_response();
         }
     };
 
@@ -1295,7 +1295,7 @@ pub async fn patch_config(
 
     if let Err(e) = result {
         tracing::error!("Dashboard patch_config failed: {}", e);
-        return Json(json!({"error": format!("DB error: {}", e)})).into_response();
+        return Json(json!({"error": "Internal error"})).into_response();
     }
 
     tracing::info!(key = %req.key, "Config updated");

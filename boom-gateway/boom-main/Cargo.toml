@@ -31,3 +31,4 @@ tokio-stream = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 arc-swap = { workspace = true }
+reqwest = { workspace = true }

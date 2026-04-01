@@ -580,8 +580,9 @@ fn sse_stream_from_chat_stream(
             Ok(Event::default().data(data))
         }
         Err(e) => {
+            tracing::error!("SSE stream error (OpenAI): {}", e);
             let error_data =
-                serde_json::to_string(&serde_json::json!({"error": e.to_string()}))
+                serde_json::to_string(&serde_json::json!({"error": "Upstream error"}))
                     .unwrap_or_default();
             Ok(Event::default().data(error_data))
         }
@@ -678,9 +679,10 @@ fn sse_stream_from_anthropic_chat_stream(
                     }
                 }
                 Err(e) => {
+                    tracing::error!("SSE stream error (Anthropic): {}", e);
                     let error_data = serde_json::json!({
                         "type": "error",
-                        "error": { "type": "api_error", "message": e.to_string() }
+                        "error": { "type": "api_error", "message": "Upstream error" }
                     });
                     let _ = tx
                         .send(
@@ -735,5 +737,277 @@ impl IntoResponse for AnthropicErrorReply {
 impl From<GatewayError> for AnthropicErrorReply {
     fn from(e: GatewayError) -> Self {
         AnthropicErrorReply(e)
+    }
+}
+
+// ============================================================
+// Pass-Through Mode
+// ============================================================
+
+/// Shared HTTP client for pass-through forwarding.
+static PT_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn pt_client() -> &'static reqwest::Client {
+    PT_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .expect("Failed to build pass-through HTTP client")
+    })
+}
+
+/// Hop-by-hop headers that must not be forwarded.
+const HOP_BY_HOP: &[&str] = &[
+    "host",
+    "connection",
+    "content-length",
+    "transfer-encoding",
+    "keep-alive",
+    "te",
+    "trailers",
+    "upgrade",
+];
+
+/// Forward raw bytes to the upstream gateway, preserving headers and streaming support.
+async fn forward_pass_through(
+    state: &AppState,
+    original_headers: &axum::http::HeaderMap,
+    body: &[u8],
+    path: &str,
+) -> Result<axum::response::Response, GatewayErrorReply> {
+    let url = state
+        .inner
+        .load()
+        .config
+        .pass_through
+        .as_ref()
+        .map(|pt| pt.url.clone())
+        .ok_or_else(|| {
+            GatewayErrorReply(GatewayError::ConfigError(
+                "pass_through not configured".to_string(),
+            ))
+        })?;
+
+    let target = format!("{}{}", url.trim_end_matches('/'), path);
+
+    let mut fwd_headers = reqwest::header::HeaderMap::new();
+    for (name, value) in original_headers.iter() {
+        let name_lower = name.as_str().to_lowercase();
+        if HOP_BY_HOP.contains(&name_lower.as_str()) {
+            continue;
+        }
+        if let Ok(v) = reqwest::header::HeaderValue::from_bytes(value.as_bytes()) {
+            if let Ok(n) = reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes()) {
+                fwd_headers.insert(n, v);
+            }
+        }
+    }
+
+    let resp = pt_client()
+        .post(&target)
+        .headers(fwd_headers)
+        .body(body.to_vec())
+        .send()
+        .await
+        .map_err(|e| {
+            GatewayErrorReply(GatewayError::ProviderError(format!(
+                "Pass-through forward failed: {}",
+                e
+            )))
+        })?;
+
+    let status = axum::http::StatusCode::from_u16(resp.status().as_u16())
+        .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+
+    let mut response_headers = axum::http::HeaderMap::new();
+    for (name, value) in resp.headers().iter() {
+        let name_lower = name.as_str().to_lowercase();
+        if HOP_BY_HOP.contains(&name_lower.as_str()) {
+            continue;
+        }
+        if let Ok(v) = axum::http::HeaderValue::from_bytes(value.as_bytes()) {
+            if let Ok(n) =
+                axum::http::HeaderName::from_lowercase(name.as_str().as_bytes())
+            {
+                response_headers.insert(n, v);
+            }
+        }
+    }
+
+    // Check if the response is streaming (SSE).
+    let is_sse = response_headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.contains("text/event-stream"))
+        .unwrap_or(false);
+
+    if is_sse {
+        // Stream the response body chunk by chunk.
+        let byte_stream = resp.bytes_stream();
+        let sse_stream = byte_stream.map(|result| match result {
+            Ok(chunk) => {
+                let data = String::from_utf8_lossy(&chunk).to_string();
+                Ok::<Event, Infallible>(Event::default().data(data))
+            }
+            Err(e) => {
+                tracing::error!("Pass-through stream error: {}", e);
+                Ok::<Event, Infallible>(Event::default().data("[DONE]"))
+            }
+        });
+
+        let mut response = Sse::new(sse_stream)
+            .keep_alive(KeepAlive::default())
+            .into_response();
+        *response.headers_mut() = response_headers;
+        Ok(response)
+    } else {
+        // Non-streaming: read full body and return.
+        let body_bytes = resp.bytes().await.map_err(|e| {
+            GatewayErrorReply(GatewayError::ProviderError(format!(
+                "Pass-through read body failed: {}",
+                e
+            )))
+        })?;
+
+        let mut response = (status, body_bytes.to_vec()).into_response();
+        *response.headers_mut() = response_headers;
+        Ok(response)
+    }
+}
+
+/// Pass-through handler for `/v1/chat/completions`.
+/// Auth + rate-limit checks run first, then raw request is forwarded.
+pub async fn pt_chat_completions(
+    State(state): State<AppState>,
+    auth: RequiredAuth,
+    req: axum::http::Request<axum::body::Body>,
+) -> Result<impl IntoResponse, GatewayErrorReply> {
+    let (parts, body) = req.into_parts();
+    let bytes = axum::body::to_bytes(body, 10_485_760).await.map_err(|e| {
+        GatewayErrorReply(GatewayError::ProviderError(format!(
+            "Failed to read request body: {}",
+            e
+        )))
+    })?;
+
+    // Parse model name for access check.
+    let chat_req: ChatCompletionRequest = serde_json::from_slice(&bytes).map_err(|e| {
+        GatewayErrorReply(GatewayError::ProviderError(format!(
+            "Invalid request body: {}",
+            e
+        )))
+    })?;
+
+    let identity = auth.identity();
+    let inner = state.inner.load();
+
+    // 1. Model access check.
+    check_model_access(
+        identity,
+        &chat_req.model,
+        &state.deployment_store,
+        &state.alias_store,
+    )
+    .map_err(GatewayErrorReply)?;
+
+    // 2. Rate limiting.
+    let window_limits: Vec<(u64, u64)> = inner
+        .config
+        .rate_limit
+        .window_limits
+        .iter()
+        .filter_map(|w| {
+            if w.len() >= 2 {
+                Some((w[0], w[1]))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let guard = check_plan_or_default_limits(
+        &state.plan_store,
+        &state.limiter,
+        &identity.key_hash,
+        &chat_req.model,
+        identity.rpm_limit,
+        &window_limits,
+    )
+    .await
+    .map_err(GatewayErrorReply)?;
+
+    // 3. Forward to upstream.
+    // Note: guard drops here for non-streaming responses, which is correct.
+    // For streaming, the upstream gateway manages its own concurrency.
+    drop(guard);
+    forward_pass_through(&state, &parts.headers, &bytes, "/v1/chat/completions").await
+}
+
+/// Pass-through handler for `/v1/messages` (Anthropic API).
+/// Auth + rate-limit checks run first, then raw request is forwarded.
+pub async fn pt_messages(
+    State(state): State<AppState>,
+    auth: RequiredAuth,
+    req: axum::http::Request<axum::body::Body>,
+) -> Result<impl IntoResponse, AnthropicErrorReply> {
+    let (parts, body) = req.into_parts();
+    let bytes = axum::body::to_bytes(body, 10_485_760).await.map_err(|e| {
+        AnthropicErrorReply(GatewayError::ProviderError(format!(
+            "Failed to read request body: {}",
+            e
+        )))
+    })?;
+
+    // Parse to get model name for access check.
+    let anthropic_req: AnthropicMessagesRequest = serde_json::from_slice(&bytes).map_err(|e| {
+        AnthropicErrorReply(GatewayError::ProviderError(format!(
+            "Invalid request body: {}",
+            e
+        )))
+    })?;
+    let model = anthropic_req.model.clone();
+
+    let identity = auth.identity();
+    let inner = state.inner.load();
+
+    // 1. Model access check.
+    check_model_access(
+        identity,
+        &model,
+        &state.deployment_store,
+        &state.alias_store,
+    )
+    .map_err(AnthropicErrorReply)?;
+
+    // 2. Rate limiting.
+    let window_limits: Vec<(u64, u64)> = inner
+        .config
+        .rate_limit
+        .window_limits
+        .iter()
+        .filter_map(|w| {
+            if w.len() >= 2 {
+                Some((w[0], w[1]))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let _guard = check_plan_or_default_limits(
+        &state.plan_store,
+        &state.limiter,
+        &identity.key_hash,
+        &model,
+        identity.rpm_limit,
+        &window_limits,
+    )
+    .await
+    .map_err(AnthropicErrorReply)?;
+
+    // 3. Forward to upstream.
+    match forward_pass_through(&state, &parts.headers, &bytes, "/v1/messages").await {
+        Ok(response) => Ok(response),
+        Err(GatewayErrorReply(e)) => Err(AnthropicErrorReply(e)),
     }
 }

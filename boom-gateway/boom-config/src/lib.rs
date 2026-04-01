@@ -19,6 +19,22 @@ pub struct Config {
     pub rate_limit: RateLimitSettings,
     #[serde(default)]
     pub plan_settings: PlanSettings,
+    #[serde(default)]
+    pub pass_through: Option<PassThroughConfig>,
+}
+
+/// Pass-through mode: forward authenticated requests to an upstream gateway.
+///
+/// ```yaml
+/// pass_through:
+///   enabled: true
+///   url: "http://old-gateway:4000"
+/// ```
+#[derive(Debug, Deserialize, Clone)]
+pub struct PassThroughConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    pub url: String,
 }
 
 /// A single plan definition in YAML config (plan name comes from the HashMap key).

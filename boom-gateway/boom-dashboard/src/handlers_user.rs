@@ -99,7 +99,7 @@ pub async fn get_key_info(
         r#"SELECT key_name, key_alias, spend, expires, blocked,
                   rpm_limit, tpm_limit, max_budget, budget_duration,
                   metadata, created_at
-           FROM "LiteLLM_VerificationToken" WHERE token = $1"#,
+           FROM "boom_verification_token" WHERE token = $1"#,
     )
     .bind(key_hash)
     .fetch_optional(db_pool)

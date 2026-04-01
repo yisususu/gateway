@@ -234,7 +234,7 @@ pub struct AuthIdentity {
     pub team_id: Option<String>,
     /// Allowed models from key. May contain model group names (e.g. "all-team-models").
     pub models: Vec<String>,
-    /// Resolved models from the key's team (LiteLLM_TeamTable.models).
+    /// Resolved models from the key's team (boom_team_table.models).
     /// Used as fallback when key's models contain group names.
     pub team_models: Vec<String>,
     pub rpm_limit: Option<u64>,
