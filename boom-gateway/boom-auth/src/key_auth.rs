@@ -205,14 +205,14 @@ impl Authenticator for DbAuthenticator {
 
         // Resolve special model names: replace key.models with the expanded list.
         if identity.models.contains(&"all-team-models".to_string()) {
-            tracing::info!(
+            tracing::debug!(
                 "Key {:?}: resolving 'all-team-models' → {:?}",
                 identity.key_name, identity.team_models
             );
             identity.models = identity.team_models.clone();
         }
         if identity.models.contains(&"all-proxy-models".to_string()) {
-            tracing::info!(
+            tracing::debug!(
                 "Key {:?}: resolving 'all-proxy-models' → all models allowed",
                 identity.key_name
             );
