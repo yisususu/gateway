@@ -58,8 +58,9 @@ impl SlidingWindowLimiter {
         format!("{}:{}:{}", key.key_hash, key.model, window_secs)
     }
 
-    /// Check a single window limit. Returns (allowed, current_count, limit, reset_at).
-    fn check_window(
+    /// Read-only check of a single window limit.
+    /// Returns (allowed, current_count, limit, reset_at) WITHOUT incrementing.
+    fn peek_window(
         &self,
         cache_key: &str,
         limit: u64,
@@ -67,49 +68,19 @@ impl SlidingWindowLimiter {
     ) -> (bool, u64, u64, chrono::DateTime<chrono::Utc>) {
         let now = now_epoch_secs();
 
-        let allowed = match self.windows.get(cache_key) {
+        let (allowed, current_count) = match self.windows.get(cache_key) {
             Some(counter) => {
                 let elapsed = now.saturating_sub(counter.window_start);
                 if elapsed >= counter.window_secs {
-                    // Window expired — reset.
-                    true
+                    // Window expired — would reset, so allowed with count 0.
+                    (true, 0)
                 } else {
-                    counter.count < limit
+                    (counter.count < limit, counter.count)
                 }
             }
-            None => true,
+            None => (true, 0),
         };
 
-        // Get or create counter to read current count.
-        let current_count = if allowed {
-            // Atomically increment.
-            let counter = self
-                .windows
-                .entry(cache_key.to_string())
-                .and_modify(|c| {
-                    let elapsed = now_epoch_secs().saturating_sub(c.window_start);
-                    if elapsed >= c.window_secs {
-                        // Reset window.
-                        c.count = 1;
-                        c.window_start = now_epoch_secs();
-                    } else {
-                        c.count += 1;
-                    }
-                })
-                .or_insert(WindowCounter {
-                    count: 1,
-                    window_start: now,
-                    window_secs,
-                });
-            counter.count
-        } else {
-            self.windows
-                .get(cache_key)
-                .map(|c| c.count)
-                .unwrap_or(0)
-        };
-
-        // Calculate reset time.
         let reset_at = match self.windows.get(cache_key) {
             Some(counter) => {
                 let elapsed = now.saturating_sub(counter.window_start);
@@ -120,6 +91,28 @@ impl SlidingWindowLimiter {
         };
 
         (allowed, current_count, limit, reset_at)
+    }
+
+    /// Increment a single window counter by 1.
+    /// If the window expired, it resets and starts fresh.
+    fn record_window(&self, cache_key: &str, window_secs: u64) {
+        let now = now_epoch_secs();
+        self.windows
+            .entry(cache_key.to_string())
+            .and_modify(|c| {
+                let elapsed = now_epoch_secs().saturating_sub(c.window_start);
+                if elapsed >= c.window_secs {
+                    c.count = 1;
+                    c.window_start = now_epoch_secs();
+                } else {
+                    c.count += 1;
+                }
+            })
+            .or_insert(WindowCounter {
+                count: 1,
+                window_start: now,
+                window_secs,
+            });
     }
 
     // ── Read-only query methods (for dashboard) ────────────
@@ -222,10 +215,11 @@ impl RateLimiter for SlidingWindowLimiter {
         rpm_limit: Option<u64>,
         window_limits: &[(u64, u64)],
     ) -> Result<RateLimitDecision, GatewayError> {
-        // 1. Check RPM (per-minute) if configured.
+        // Phase 1: Read-only check ALL windows. No counters incremented yet.
+        // If any window rejects, we return immediately without recording anything.
         if let Some(rpm) = rpm_limit {
             let rpm_key = Self::cache_key(key, 60);
-            let (allowed, _count, limit, reset_at) = self.check_window(&rpm_key, rpm, 60);
+            let (allowed, _count, limit, reset_at) = self.peek_window(&rpm_key, rpm, 60);
 
             if !allowed {
                 let elapsed = self
@@ -245,10 +239,9 @@ impl RateLimiter for SlidingWindowLimiter {
             }
         }
 
-        // 2. Check custom time windows.
         for &(limit, window_secs) in window_limits {
             let win_key = Self::cache_key(key, window_secs);
-            let (allowed, _count, _, reset_at) = self.check_window(&win_key, limit, window_secs);
+            let (allowed, _count, _, reset_at) = self.peek_window(&win_key, limit, window_secs);
 
             if !allowed {
                 let elapsed = self
@@ -268,7 +261,18 @@ impl RateLimiter for SlidingWindowLimiter {
             }
         }
 
-        // 3. All checks passed.
+        // Phase 2: All checks passed — increment all counters atomically.
+        if let Some(_) = rpm_limit {
+            let rpm_key = Self::cache_key(key, 60);
+            self.record_window(&rpm_key, 60);
+        }
+
+        for &(_, window_secs) in window_limits {
+            let win_key = Self::cache_key(key, window_secs);
+            self.record_window(&win_key, window_secs);
+        }
+
+        // Calculate remaining for response.
         let rpm_remaining = rpm_limit
             .map(|rpm| {
                 let rpm_key = Self::cache_key(key, 60);
@@ -368,6 +372,58 @@ mod tests {
         let usage = limiter2.get_usage_for_key("snap_key");
         assert!(!usage.is_empty());
         assert_eq!(usage[0].count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_rejected_request_does_not_consume_quota() {
+        // Verify: if a custom window rejects, the RPM counter is NOT incremented.
+        let limiter = SlidingWindowLimiter::new();
+        let key = RateLimitKey {
+            key_hash: "dual_key".to_string(),
+            model: "gpt-4".to_string(),
+        };
+
+        // RPM=10, custom window = 1 request per 18000 seconds.
+        let windows = vec![(1u64, 18000u64)];
+
+        // First request: both pass, both counters = 1.
+        let d = limiter
+            .check_and_record(&key, Some(10), &windows)
+            .await
+            .unwrap();
+        assert!(d.allowed);
+
+        // Second request: custom window (1/18000s) should reject.
+        // RPM has plenty of room (2/10), so only custom window blocks.
+        let d = limiter
+            .check_and_record(&key, Some(10), &windows)
+            .await
+            .unwrap();
+        assert!(!d.allowed);
+
+        // Verify: RPM counter should still be 1 (NOT 2).
+        let rpm_key = "dual_key:gpt-4:60";
+        let rpm_count = limiter
+            .windows
+            .get(rpm_key)
+            .map(|c| c.count)
+            .unwrap_or(0);
+        assert_eq!(
+            rpm_count, 1,
+            "RPM counter should be 1 — rejected request must NOT increment it"
+        );
+
+        // Verify: custom window counter should still be 1 (NOT 2).
+        let win_key = "dual_key:gpt-4:18000";
+        let win_count = limiter
+            .windows
+            .get(win_key)
+            .map(|c| c.count)
+            .unwrap_or(0);
+        assert_eq!(
+            win_count, 1,
+            "Custom window counter should be 1 — rejected request must NOT increment it"
+        );
     }
 
     #[tokio::test]
