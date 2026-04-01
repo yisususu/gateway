@@ -1,4 +1,5 @@
 use crate::extractor::RequiredAuth;
+use crate::request_log::{log_error, log_request, RequestLog};
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -14,6 +15,7 @@ use boom_limiter::{AliasStore, ConcurrencyGuard, DeploymentStore, GuardedStream,
 use futures::StreamExt;
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Instant;
 
 // ============================================================
 // Chat Completions
@@ -24,12 +26,18 @@ pub async fn chat_completions(
     auth: RequiredAuth,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<impl IntoResponse, GatewayErrorReply> {
+    let start = Instant::now();
     let identity = auth.identity();
     let inner = state.inner.load();
+    let model = req.model.clone();
+    let is_stream = req.stream.unwrap_or(false);
 
     // 1. Model access check (deployment-aware, alias-aware).
     check_model_access(identity, &req.model, &state.deployment_store, &state.alias_store)
-        .map_err(GatewayErrorReply)?;
+        .map_err(|e| {
+            log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e);
+            GatewayErrorReply(e)
+        })?;
 
     // 2. Plan-based or default rate limiting.
     let window_limits: Vec<(u64, u64)> = inner
@@ -55,24 +63,80 @@ pub async fn chat_completions(
         &window_limits,
     )
     .await
-    .map_err(GatewayErrorReply)?;
+    .map_err(|e| {
+        log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e);
+        GatewayErrorReply(e)
+    })?;
 
     // 3. Select provider deployment.
     let provider = state
         .select_deployment(&req.model)
-        .ok_or_else(|| GatewayErrorReply(GatewayError::ModelNotFound(req.model.clone())))?;
+        .ok_or_else(|| {
+            let e = GatewayError::ModelNotFound(req.model.clone());
+            log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e);
+            GatewayErrorReply(e)
+        })?;
 
     // 4. Route to provider (streaming or non-streaming).
-    let is_stream = req.stream.unwrap_or(false);
-
     if is_stream {
-        let stream = provider.chat_stream(req).await.map_err(GatewayErrorReply)?;
+        let stream = provider.chat_stream(req).await.map_err(|e| {
+            log_error(&state, &identity, &model, "/v1/chat/completions", true, start, &e);
+            GatewayErrorReply(e)
+        })?;
         let sse_stream = sse_stream_from_chat_stream(stream);
         let guarded = GuardedStream::new(sse_stream, guard);
         let response = Sse::new(guarded).keep_alive(KeepAlive::default());
+
+        // Stream: no usage available, just log occurrence + duration.
+        log_request(
+            state.db_pool.clone(),
+            RequestLog {
+                request_id: None,
+                key_hash: identity.key_hash.clone(),
+                key_name: identity.key_name.clone(),
+                team_id: identity.team_id.clone(),
+                model,
+                api_path: "/v1/chat/completions".to_string(),
+                is_stream: true,
+                status_code: 200,
+                error_type: None,
+                error_message: None,
+                input_tokens: None,
+                output_tokens: None,
+                duration_ms: Some(start.elapsed().as_millis() as i32),
+            },
+        );
+
         Ok(response.into_response())
     } else {
-        let response = provider.chat(req).await.map_err(GatewayErrorReply)?;
+        let response = provider.chat(req).await.map_err(|e| {
+            log_error(&state, &identity, &model, "/v1/chat/completions", false, start, &e);
+            GatewayErrorReply(e)
+        })?;
+
+        let duration_ms = start.elapsed().as_millis() as i32;
+        let input_tokens = response.usage.prompt_tokens as i32;
+        let output_tokens = response.usage.completion_tokens as i32;
+
+        log_request(
+            state.db_pool.clone(),
+            RequestLog {
+                request_id: Some(response.id.clone()),
+                key_hash: identity.key_hash.clone(),
+                key_name: identity.key_name.clone(),
+                team_id: identity.team_id.clone(),
+                model,
+                api_path: "/v1/chat/completions".to_string(),
+                is_stream: false,
+                status_code: 200,
+                error_type: None,
+                error_message: None,
+                input_tokens: Some(input_tokens),
+                output_tokens: Some(output_tokens),
+                duration_ms: Some(duration_ms),
+            },
+        );
+
         // guard dropped here (non-streaming: request processing complete).
         Ok(Json(response).into_response())
     }
@@ -598,13 +662,19 @@ pub async fn messages(
     auth: RequiredAuth,
     Json(req): Json<AnthropicMessagesRequest>,
 ) -> Result<impl IntoResponse, AnthropicErrorReply> {
+    let start = Instant::now();
     let openai_req = anthropic_request_to_openai(&req);
     let identity = auth.identity();
     let inner = state.inner.load();
+    let model = openai_req.model.clone();
+    let is_stream = openai_req.stream.unwrap_or(false);
 
     // 1. Model access check (deployment-aware, alias-aware).
     check_model_access(identity, &openai_req.model, &state.deployment_store, &state.alias_store)
-        .map_err(AnthropicErrorReply)?;
+        .map_err(|e| {
+            log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e);
+            AnthropicErrorReply(e)
+        })?;
 
     // 2. Plan-based or default rate limiting.
     let window_limits: Vec<(u64, u64)> = inner
@@ -630,25 +700,80 @@ pub async fn messages(
         &window_limits,
     )
     .await
-    .map_err(AnthropicErrorReply)?;
+    .map_err(|e| {
+        log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e);
+        AnthropicErrorReply(e)
+    })?;
 
     // 3. Select provider deployment.
     let provider = state
         .select_deployment(&openai_req.model)
-        .ok_or_else(|| AnthropicErrorReply(GatewayError::ModelNotFound(openai_req.model.clone())))?;
+        .ok_or_else(|| {
+            let e = GatewayError::ModelNotFound(openai_req.model.clone());
+            log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e);
+            AnthropicErrorReply(e)
+        })?;
 
     // 4. Route to provider.
-    let is_stream = openai_req.stream.unwrap_or(false);
-
     if is_stream {
-        let model = openai_req.model.clone();
-        let stream = provider.chat_stream(openai_req).await.map_err(AnthropicErrorReply)?;
-        let sse_stream = sse_stream_from_anthropic_chat_stream(stream, model);
+        let stream = provider.chat_stream(openai_req).await.map_err(|e| {
+            log_error(&state, &identity, &model, "/v1/messages", true, start, &e);
+            AnthropicErrorReply(e)
+        })?;
+        let sse_stream = sse_stream_from_anthropic_chat_stream(stream, model.clone());
         let guarded = GuardedStream::new(sse_stream, guard);
         let response = Sse::new(guarded).keep_alive(KeepAlive::default());
+
+        // Stream: no usage available.
+        log_request(
+            state.db_pool.clone(),
+            RequestLog {
+                request_id: None,
+                key_hash: identity.key_hash.clone(),
+                key_name: identity.key_name.clone(),
+                team_id: identity.team_id.clone(),
+                model,
+                api_path: "/v1/messages".to_string(),
+                is_stream: true,
+                status_code: 200,
+                error_type: None,
+                error_message: None,
+                input_tokens: None,
+                output_tokens: None,
+                duration_ms: Some(start.elapsed().as_millis() as i32),
+            },
+        );
+
         Ok(response.into_response())
     } else {
-        let response = provider.chat(openai_req).await.map_err(AnthropicErrorReply)?;
+        let response = provider.chat(openai_req).await.map_err(|e| {
+            log_error(&state, &identity, &model, "/v1/messages", false, start, &e);
+            AnthropicErrorReply(e)
+        })?;
+
+        let duration_ms = start.elapsed().as_millis() as i32;
+        let input_tokens = response.usage.prompt_tokens as i32;
+        let output_tokens = response.usage.completion_tokens as i32;
+
+        log_request(
+            state.db_pool.clone(),
+            RequestLog {
+                request_id: Some(response.id.clone()),
+                key_hash: identity.key_hash.clone(),
+                key_name: identity.key_name.clone(),
+                team_id: identity.team_id.clone(),
+                model,
+                api_path: "/v1/messages".to_string(),
+                is_stream: false,
+                status_code: 200,
+                error_type: None,
+                error_message: None,
+                input_tokens: Some(input_tokens),
+                output_tokens: Some(output_tokens),
+                duration_ms: Some(duration_ms),
+            },
+        );
+
         let anthropic_resp = openai_response_to_anthropic(&response);
         Ok(Json(anthropic_resp).into_response())
     }
@@ -882,24 +1007,27 @@ pub async fn pt_chat_completions(
     auth: RequiredAuth,
     req: axum::http::Request<axum::body::Body>,
 ) -> Result<impl IntoResponse, GatewayErrorReply> {
+    let start = Instant::now();
     let (parts, body) = req.into_parts();
     let bytes = axum::body::to_bytes(body, 10_485_760).await.map_err(|e| {
-        GatewayErrorReply(GatewayError::ProviderError(format!(
-            "Failed to read request body: {}",
-            e
-        )))
+        let err = GatewayError::ProviderError(format!("Failed to read request body: {}", e));
+        let identity = auth.identity();
+        log_error(&state, &identity, "unknown", "/v1/chat/completions", false, start, &err);
+        GatewayErrorReply(err)
     })?;
 
     // Parse model name for access check.
     let chat_req: ChatCompletionRequest = serde_json::from_slice(&bytes).map_err(|e| {
-        GatewayErrorReply(GatewayError::ProviderError(format!(
-            "Invalid request body: {}",
-            e
-        )))
+        let err = GatewayError::ProviderError(format!("Invalid request body: {}", e));
+        let identity = auth.identity();
+        log_error(&state, &identity, "unknown", "/v1/chat/completions", false, start, &err);
+        GatewayErrorReply(err)
     })?;
 
     let identity = auth.identity();
     let inner = state.inner.load();
+    let model = chat_req.model.clone();
+    let is_stream = chat_req.stream.unwrap_or(false);
 
     // 1. Model access check.
     check_model_access(
@@ -908,7 +1036,10 @@ pub async fn pt_chat_completions(
         &state.deployment_store,
         &state.alias_store,
     )
-    .map_err(GatewayErrorReply)?;
+    .map_err(|e| {
+        log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e);
+        GatewayErrorReply(e)
+    })?;
 
     // 2. Rate limiting.
     let window_limits: Vec<(u64, u64)> = inner
@@ -934,13 +1065,39 @@ pub async fn pt_chat_completions(
         &window_limits,
     )
     .await
-    .map_err(GatewayErrorReply)?;
+    .map_err(|e| {
+        log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e);
+        GatewayErrorReply(e)
+    })?;
 
     // 3. Forward to upstream.
     // Note: guard drops here for non-streaming responses, which is correct.
     // For streaming, the upstream gateway manages its own concurrency.
     drop(guard);
-    forward_pass_through(&state, &parts.headers, &bytes, "/v1/chat/completions").await
+
+    let result = forward_pass_through(&state, &parts.headers, &bytes, "/v1/chat/completions").await;
+
+    // Log pass-through request (no token usage — we don't parse the response).
+    log_request(
+        state.db_pool.clone(),
+        RequestLog {
+            request_id: None,
+            key_hash: identity.key_hash.clone(),
+            key_name: identity.key_name.clone(),
+            team_id: identity.team_id.clone(),
+            model,
+            api_path: "/v1/chat/completions".to_string(),
+            is_stream,
+            status_code: if result.is_ok() { 200 } else { 502 },
+            error_type: result.as_ref().err().map(|e| e.0.error_type().to_string()),
+            error_message: result.as_ref().err().map(|e| e.0.to_string()),
+            input_tokens: None,
+            output_tokens: None,
+            duration_ms: Some(start.elapsed().as_millis() as i32),
+        },
+    );
+
+    result
 }
 
 /// Pass-through handler for `/v1/messages` (Anthropic API).
@@ -950,22 +1107,24 @@ pub async fn pt_messages(
     auth: RequiredAuth,
     req: axum::http::Request<axum::body::Body>,
 ) -> Result<impl IntoResponse, AnthropicErrorReply> {
+    let start = Instant::now();
     let (parts, body) = req.into_parts();
     let bytes = axum::body::to_bytes(body, 10_485_760).await.map_err(|e| {
-        AnthropicErrorReply(GatewayError::ProviderError(format!(
-            "Failed to read request body: {}",
-            e
-        )))
+        let err = GatewayError::ProviderError(format!("Failed to read request body: {}", e));
+        let identity = auth.identity();
+        log_error(&state, &identity, "unknown", "/v1/messages", false, start, &err);
+        AnthropicErrorReply(err)
     })?;
 
     // Parse to get model name for access check.
     let anthropic_req: AnthropicMessagesRequest = serde_json::from_slice(&bytes).map_err(|e| {
-        AnthropicErrorReply(GatewayError::ProviderError(format!(
-            "Invalid request body: {}",
-            e
-        )))
+        let err = GatewayError::ProviderError(format!("Invalid request body: {}", e));
+        let identity = auth.identity();
+        log_error(&state, &identity, "unknown", "/v1/messages", false, start, &err);
+        AnthropicErrorReply(err)
     })?;
     let model = anthropic_req.model.clone();
+    let is_stream = anthropic_req.stream.unwrap_or(false);
 
     let identity = auth.identity();
     let inner = state.inner.load();
@@ -977,7 +1136,10 @@ pub async fn pt_messages(
         &state.deployment_store,
         &state.alias_store,
     )
-    .map_err(AnthropicErrorReply)?;
+    .map_err(|e| {
+        log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e);
+        AnthropicErrorReply(e)
+    })?;
 
     // 2. Rate limiting.
     let window_limits: Vec<(u64, u64)> = inner
@@ -1003,10 +1165,35 @@ pub async fn pt_messages(
         &window_limits,
     )
     .await
-    .map_err(AnthropicErrorReply)?;
+    .map_err(|e| {
+        log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e);
+        AnthropicErrorReply(e)
+    })?;
 
     // 3. Forward to upstream.
-    match forward_pass_through(&state, &parts.headers, &bytes, "/v1/messages").await {
+    let result = forward_pass_through(&state, &parts.headers, &bytes, "/v1/messages").await;
+
+    // Log pass-through request (no token usage — we don't parse the response).
+    log_request(
+        state.db_pool.clone(),
+        RequestLog {
+            request_id: None,
+            key_hash: identity.key_hash.clone(),
+            key_name: identity.key_name.clone(),
+            team_id: identity.team_id.clone(),
+            model,
+            api_path: "/v1/messages".to_string(),
+            is_stream,
+            status_code: if result.is_ok() { 200 } else { 502 },
+            error_type: result.as_ref().err().map(|e| e.0.error_type().to_string()),
+            error_message: result.as_ref().err().map(|e| e.0.to_string()),
+            input_tokens: None,
+            output_tokens: None,
+            duration_ms: Some(start.elapsed().as_millis() as i32),
+        },
+    );
+
+    match result {
         Ok(response) => Ok(response),
         Err(GatewayErrorReply(e)) => Err(AnthropicErrorReply(e)),
     }

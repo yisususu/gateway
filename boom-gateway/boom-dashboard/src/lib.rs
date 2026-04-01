@@ -105,6 +105,11 @@ pub fn build_router<S: Clone + Send + Sync + 'static>(state: DashboardState) -> 
             "/dashboard/api/admin/config",
             get(handlers_admin::get_config).patch(handlers_admin::patch_config),
         )
+        // Admin — Request Logs.
+        .route(
+            "/dashboard/api/admin/logs",
+            get(handlers_admin::list_logs),
+        )
         // SPA fallback — must be last.
         .route("/dashboard/{*path}", get(handlers_static::spa_fallback))
         // Inject state via Extension layer.

@@ -298,9 +298,7 @@ pub async fn create_key(
         .as_deref()
         .and_then(|s| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok());
 
-    let models_json = req
-        .models
-        .map(|m| serde_json::to_value(m).unwrap_or(json!([])));
+    let models_list: Vec<String> = req.models.unwrap_or_default();
 
     // 3. INSERT into DB.
     let result = sqlx::query(
@@ -315,7 +313,7 @@ pub async fn create_key(
     .bind(&req.key_alias)
     .bind(&req.user_id)
     .bind(&req.team_id)
-    .bind(&models_json)
+    .bind(&models_list)
     .bind(req.rpm_limit)
     .bind(req.tpm_limit)
     .bind(req.max_budget)
@@ -375,9 +373,7 @@ pub async fn update_key(
         }
     };
 
-    let models_json = req
-        .models
-        .map(|m| serde_json::to_value(m).unwrap_or(json!([])));
+    let models_list: Option<Vec<String>> = req.models.clone();
 
     let expires: Option<NaiveDateTime> = req
         .expires
@@ -399,7 +395,7 @@ pub async fn update_key(
     )
     .bind(&token_hash)
     .bind(&req.key_name)
-    .bind(&models_json)
+    .bind(&models_list)
     .bind(req.max_budget)
     .bind(&req.budget_duration)
     .bind(req.rpm_limit)
@@ -663,9 +659,7 @@ pub async fn batch_create_keys(
             .as_deref()
             .and_then(|s| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok());
 
-        let models_json = req
-            .models
-            .map(|m| serde_json::to_value(m).unwrap_or(json!([])));
+        let models_list: Vec<String> = req.models.clone().unwrap_or_default();
 
         let result = sqlx::query(
             r#"INSERT INTO "boom_verification_token"
@@ -679,7 +673,7 @@ pub async fn batch_create_keys(
         .bind(&req.key_alias)
         .bind(&req.user_id)
         .bind(&req.team_id)
-        .bind(&models_json)
+        .bind(&models_list)
         .bind(req.rpm_limit)
         .bind(req.tpm_limit)
         .bind(req.max_budget)
@@ -1300,4 +1294,156 @@ pub async fn patch_config(
 
     tracing::info!(key = %req.key, "Config updated");
     Json(json!({"ok": true, "key": req.key})).into_response()
+}
+
+// ═══════════════════════════════════════════════════════════
+// Request Logs
+// ═══════════════════════════════════════════════════════════
+
+#[derive(Debug, Deserialize)]
+pub struct ListLogsQuery {
+    #[serde(default = "default_page")]
+    pub page: i64,
+    #[serde(default = "default_per_page")]
+    pub per_page: i64,
+    pub key_hash: Option<String>,
+    pub model: Option<String>,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct LogRow {
+    request_id: Option<String>,
+    key_hash: String,
+    key_name: Option<String>,
+    team_id: Option<String>,
+    model: String,
+    api_path: String,
+    is_stream: bool,
+    status_code: i16,
+    error_type: Option<String>,
+    error_message: Option<String>,
+    input_tokens: Option<i32>,
+    output_tokens: Option<i32>,
+    duration_ms: Option<i32>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+pub async fn list_logs(
+    _session: AdminSession,
+    Extension(state): Extension<std::sync::Arc<DashboardState>>,
+    Query(query): Query<ListLogsQuery>,
+) -> Response {
+    let db_pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => {
+            return Json(json!({"error": "Database not available"})).into_response();
+        }
+    };
+
+    let offset = (query.page - 1).max(0) * query.per_page;
+
+    // Build WHERE clause dynamically.
+    let mut where_clauses = Vec::new();
+    let mut param_idx = 1u32;
+
+    let key_hash_param = if query.key_hash.is_some() { let i = param_idx; param_idx += 1; Some(i) } else { None };
+    let model_param = if query.model.is_some() { let i = param_idx; param_idx += 1; Some(i) } else { None };
+    let status_param = if query.status.as_deref() == Some("error") { let i = param_idx; param_idx += 1; Some(i) } else { None };
+
+    if query.key_hash.is_some() {
+        where_clauses.push(format!("key_hash = ${}", key_hash_param.unwrap()));
+    }
+    if query.model.is_some() {
+        where_clauses.push(format!("model = ${}", model_param.unwrap()));
+    }
+    if query.status.as_deref() == Some("error") {
+        where_clauses.push(format!("status_code != ${}", status_param.unwrap()));
+    }
+
+    let where_sql = if where_clauses.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", where_clauses.join(" AND "))
+    };
+
+    let limit_idx = param_idx;
+    param_idx += 1;
+    let offset_idx = param_idx;
+
+    let sql = format!(
+        r#"SELECT request_id, key_hash, key_name, team_id, model, api_path,
+                  is_stream, status_code, error_type, error_message,
+                  input_tokens, output_tokens, duration_ms, created_at
+           FROM boom_request_log
+           {where_sql}
+           ORDER BY created_at DESC
+           LIMIT ${limit_idx} OFFSET ${offset_idx}"#,
+    );
+
+    let count_sql = format!(
+        r#"SELECT COUNT(*) FROM boom_request_log {where_sql}"#,
+    );
+
+    let mut q = sqlx::query_as::<_, LogRow>(&sql);
+    let mut cq = sqlx::query_scalar::<_, i64>(&count_sql);
+
+    if let Some(ref v) = query.key_hash {
+        q = q.bind(v);
+        cq = cq.bind(v);
+    }
+    if let Some(ref v) = query.model {
+        q = q.bind(v);
+        cq = cq.bind(v);
+    }
+    if query.status.as_deref() == Some("error") {
+        q = q.bind(200i16);
+        cq = cq.bind(200i16);
+    }
+
+    q = q.bind(query.per_page).bind(offset);
+
+    let rows: Vec<LogRow> = match q.fetch_all(db_pool).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Dashboard list_logs query failed: {}", e);
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal error",
+            )
+                .into_response();
+        }
+    };
+
+    let total: i64 = cq.fetch_one(db_pool).await.unwrap_or(0);
+
+    let logs: Vec<Value> = rows
+        .into_iter()
+        .map(|r| {
+            json!({
+                "request_id": r.request_id,
+                "key_hash": r.key_hash,
+                "key_name": r.key_name,
+                "team_id": r.team_id,
+                "model": r.model,
+                "api_path": r.api_path,
+                "is_stream": r.is_stream,
+                "status_code": r.status_code,
+                "error_type": r.error_type,
+                "error_message": r.error_message,
+                "input_tokens": r.input_tokens,
+                "output_tokens": r.output_tokens,
+                "duration_ms": r.duration_ms,
+                "created_at": r.created_at.map(|d| d.to_rfc3339()),
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "logs": logs,
+        "page": query.page,
+        "per_page": query.per_page,
+        "total": total,
+    }))
+    .into_response()
 }

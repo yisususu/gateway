@@ -122,6 +122,7 @@
     else if (section === "admin-plans") loadPlans();
     else if (section === "admin-keys") loadKeys();
     else if (section === "admin-assignments") loadAssignments();
+    else if (section === "admin-logs") loadLogs();
     else if (section === "admin-config") loadConfig();
   }
 
@@ -131,6 +132,7 @@
     if (hash.includes("/admin/plans")) return "admin-plans";
     if (hash.includes("/admin/keys")) return "admin-keys";
     if (hash.includes("/admin/assignments")) return "admin-assignments";
+    if (hash.includes("/admin/logs")) return "admin-logs";
     if (hash.includes("/admin/config")) return "admin-config";
     return "admin-models";
   }
@@ -723,6 +725,54 @@
     });
   }
 
+  // ── Admin: Logs ──────────────────────────────────────
+  let logsPage = 1;
+
+  async function loadLogs(page) {
+    if (page !== undefined) logsPage = page;
+    try {
+      const data = await api(`/admin/logs?page=${logsPage}&per_page=50`);
+      renderLogsTable(data.logs || []);
+      renderLogsPagination(data);
+    } catch (err) {
+      const wrap = document.getElementById("logs-table-wrap");
+      if (wrap) wrap.innerHTML = `<p class="error-msg">Failed to load logs: ${esc(err.message)}</p>`;
+    }
+  }
+
+  function renderLogsTable(logs) {
+    const wrap = document.getElementById("logs-table-wrap");
+    if (logs.length === 0) { wrap.innerHTML = "<p>No request logs found.</p>"; return; }
+    wrap.innerHTML = `<table>
+      <tr><th>Time</th><th>Key</th><th>Model</th><th>Path</th><th>Stream</th><th>Status</th><th>Input</th><th>Output</th><th>Duration</th><th>Error</th></tr>
+      ${logs.map((l) => `<tr>
+        <td>${formatTimeAgo(l.created_at)}</td>
+        <td class="mono" title="${esc(l.key_hash)}">${esc((l.key_name || l.key_hash || "").substring(0, 12))}</td>
+        <td class="mono">${esc(l.model)}</td>
+        <td class="mono">${esc(l.api_path)}</td>
+        <td>${l.is_stream ? "Yes" : "No"}</td>
+        <td>${l.status_code >= 400 ? '<span style="color:var(--danger)">' + l.status_code + '</span>' : l.status_code}</td>
+        <td>${l.input_tokens != null ? formatNumber(l.input_tokens) : "-"}</td>
+        <td>${l.output_tokens != null ? formatNumber(l.output_tokens) : "-"}</td>
+        <td>${l.duration_ms != null ? l.duration_ms + "ms" : "-"}</td>
+        <td>${l.error_message ? '<span style="color:var(--danger)" title="' + esc(l.error_message) + '">' + esc((l.error_type || "").substring(0, 20)) + '</span>' : "-"}</td>
+      </tr>`).join("")}
+    </table>`;
+  }
+
+  function renderLogsPagination(data) {
+    const el = document.getElementById("logs-pagination");
+    const pages = Math.ceil(data.total / data.per_page);
+    if (pages <= 1) { el.innerHTML = ""; return; }
+    el.innerHTML = `
+      <button ${data.page <= 1 ? "disabled" : ""} onclick="window._loadLogsPage(${data.page - 1})">&lt;</button>
+      <span>Page ${data.page} of ${pages} (${data.total} logs)</span>
+      <button ${data.page >= pages ? "disabled" : ""} onclick="window._loadLogsPage(${data.page + 1})">&gt;</button>
+    `;
+  }
+
+  window._loadLogsPage = (p) => loadLogs(p);
+
   // ── Helpers ───────────────────────────────────────────
   function esc(s) {
     const d = document.createElement("div");
@@ -741,5 +791,19 @@
     if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + "M";
     if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
     return String(n);
+  }
+
+  function formatTimeAgo(iso) {
+    if (!iso) return "-";
+    const diff = Date.now() - new Date(iso).getTime();
+    if (diff < 0) return "just now";
+    const secs = Math.floor(diff / 1000);
+    if (secs < 60) return secs + "s ago";
+    const mins = Math.floor(secs / 60);
+    if (mins < 60) return mins + "m ago";
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return hrs + "h ago";
+    const days = Math.floor(hrs / 24);
+    return days + "d ago";
   }
 })();

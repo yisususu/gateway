@@ -1,4 +1,5 @@
 mod extractor;
+mod request_log;
 mod routes;
 mod state;
 
