@@ -59,9 +59,22 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("BooMGateway listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+
+    // Do NOT use axum's with_graceful_shutdown — it waits for ALL connections
+    // (including idle browser keep-alive) to close, which can hang indefinitely
+    // when the dashboard's 5s polling keeps connections active.
+    // Instead, just abort the server on Ctrl+C via tokio::select!.
+    let server = axum::serve(listener, app);
+    tokio::select! {
+        result = server => {
+            if let Err(e) = result {
+                tracing::error!("Server error: {}", e);
+            }
+        }
+        _ = shutdown_signal() => {
+            tracing::info!("Received shutdown signal, aborting server...");
+        }
+    }
 
     // Signal all background tasks to stop.
     tracing::info!("Shutting down background tasks...");
