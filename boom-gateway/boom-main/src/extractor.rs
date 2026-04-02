@@ -31,7 +31,7 @@ impl FromRequestParts<AppState> for RequiredAuth {
         let raw_key = extract_api_key(parts);
 
         let raw_key = raw_key.ok_or_else(|| {
-            GatewayErrorReply(GatewayError::AuthError("Missing API key".to_string()))
+            GatewayErrorReply(GatewayError::AuthError("Missing API key".to_string()), false)
         })?;
 
         let inner = state.inner.load();
@@ -39,7 +39,7 @@ impl FromRequestParts<AppState> for RequiredAuth {
             .auth
             .authenticate(&raw_key)
             .await
-            .map_err(GatewayErrorReply)?;
+            .map_err(|e| GatewayErrorReply(e, false))?;
 
         Ok(Self { identity })
     }

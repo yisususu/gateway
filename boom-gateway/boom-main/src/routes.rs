@@ -90,7 +90,7 @@ pub async fn chat_completions(
     check_model_access(identity, &req.model, &state.deployment_store, &state.alias_store)
         .map_err(|e| {
             log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e, Some(request_id.clone()));
-            GatewayErrorReply(e)
+            GatewayErrorReply(e, false)
         })?;
 
     // 2. Plan-based or default rate limiting.
@@ -119,7 +119,7 @@ pub async fn chat_completions(
     .await
     .map_err(|e| {
         log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e, Some(request_id.clone()));
-        GatewayErrorReply(e)
+        GatewayErrorReply(e, false)
     })?;
 
     // 3. Select provider deployment.
@@ -128,14 +128,14 @@ pub async fn chat_completions(
         .ok_or_else(|| {
             let e = GatewayError::ModelNotFound(req.model.clone());
             log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e, Some(request_id.clone()));
-            GatewayErrorReply(e)
+            GatewayErrorReply(e, false)
         })?;
 
     // 4. Route to provider (streaming or non-streaming).
     if is_stream {
         let stream = provider.chat_stream(req).await.map_err(|e| {
             log_error(&state, &identity, &model, "/v1/chat/completions", true, start, &e, Some(request_id.clone()));
-            GatewayErrorReply(e)
+            GatewayErrorReply(e, true)
         })?;
         let sse_stream = sse_stream_from_chat_stream(stream);
         let guarded = GuardedStream::new(sse_stream, guard);
@@ -162,7 +162,7 @@ pub async fn chat_completions(
     } else {
         let response = provider.chat(req).await.map_err(|e| {
             log_error(&state, &identity, &model, "/v1/chat/completions", false, start, &e, Some(request_id.clone()));
-            GatewayErrorReply(e)
+            GatewayErrorReply(e, false)
         })?;
 
         let duration_ms = start.elapsed().as_millis() as i32;
@@ -334,7 +334,7 @@ pub async fn admin_reload_config(
     if identity.key_hash != "master" {
         return Err(GatewayErrorReply(GatewayError::AuthError(
             "Only master key can trigger config reload".to_string(),
-        )));
+        ), false));
     }
 
     match state.reload().await {
@@ -342,10 +342,7 @@ pub async fn admin_reload_config(
             status: "ok".to_string(),
             message: summary,
         })),
-        Err(e) => Err(GatewayErrorReply(GatewayError::ConfigError(format!(
-            "Reload failed: {}",
-            e
-        )))),
+        Err(e) => Err(GatewayErrorReply(GatewayError::ConfigError(format!("Reload failed: {}", e)), false)),
     }
 }
 
@@ -393,10 +390,9 @@ pub async fn admin_delete_plan(
             "message": format!("Plan '{}' deleted", name),
         })))
     } else {
-        Err(GatewayErrorReply(GatewayError::ConfigError(format!(
-            "Plan '{}' not found",
+        Err(GatewayErrorReply(GatewayError::ConfigError(format!("Plan '{}' not found",
             name
-        ))))
+        )), false))
     }
 }
 
@@ -416,7 +412,7 @@ pub async fn admin_assign_key(
     state
         .plan_store
         .assign_key(&body.key_hash, &body.plan_name)
-        .map_err(|e| GatewayErrorReply(GatewayError::ConfigError(e)))?;
+        .map_err(|e| GatewayErrorReply(GatewayError::ConfigError(e), false))?;
     tracing::info!(key_hash = %body.key_hash, plan = %body.plan_name, "Key assigned to plan");
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -438,10 +434,9 @@ pub async fn admin_unassign_key(
             "message": format!("Key '{}' unassigned", key_hash),
         })))
     } else {
-        Err(GatewayErrorReply(GatewayError::ConfigError(format!(
-            "Key '{}' not assigned to any plan",
+        Err(GatewayErrorReply(GatewayError::ConfigError(format!("Key '{}' not assigned to any plan",
             key_hash
-        ))))
+        )), false))
     }
 }
 
@@ -468,48 +463,87 @@ fn require_master(identity: &AuthIdentity) -> Result<(), GatewayErrorReply> {
     if identity.key_hash != "master" {
         return Err(GatewayErrorReply(GatewayError::AuthError(
             "Only master key can manage plans".to_string(),
-        )));
+        ), false));
     }
     Ok(())
 }
 
 // ============================================================
-// Error Response — wrapper to satisfy Rust's orphan rules.
+// Error Response — stream-aware wrappers
 // ============================================================
 
-pub struct GatewayErrorReply(pub GatewayError);
+/// OpenAI-style error reply. When `is_stream` is true, returns SSE format
+/// so streaming clients receive a clear error instead of hanging.
+pub struct GatewayErrorReply(pub GatewayError, pub bool /* is_stream */);
 
 impl IntoResponse for GatewayErrorReply {
     fn into_response(self) -> axum::response::Response {
         let status = axum::http::StatusCode::from_u16(self.0.status_code())
             .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
 
-        let body = serde_json::json!({
-            "error": {
-                "message": self.0.to_string(),
-                "type": self.0.error_type(),
-                "code": self.0.status_code(),
-            }
-        });
+        if self.1 {
+            // Streaming mode: return SSE-formatted error so the client
+            // (which expects text/event-stream) can parse it correctly.
+            let body = serde_json::json!({
+                "error": {
+                    "message": self.0.to_string(),
+                    "type": self.0.error_type(),
+                    "code": self.0.status_code(),
+                }
+            });
+            let data = serde_json::to_string(&body).unwrap_or_default();
+            let sse_body = format!("data: {data}\n\ndata: [DONE]\n\n");
 
-        let mut response = (status, Json(body)).into_response();
-        if let GatewayError::RateLimitExceeded {
-            retry_after_secs: Some(secs),
-            ..
-        } = self.0
-        {
+            let mut response = sse_body.into_response();
+            *response.status_mut() = status;
             response.headers_mut().insert(
-                axum::http::header::RETRY_AFTER,
-                secs.to_string().parse().unwrap(),
+                axum::http::header::CONTENT_TYPE,
+                "text/event-stream".parse().unwrap(),
             );
+            response.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                "no-cache".parse().unwrap(),
+            );
+            if let GatewayError::RateLimitExceeded {
+                retry_after_secs: Some(secs),
+                ..
+            } = self.0
+            {
+                response.headers_mut().insert(
+                    axum::http::header::RETRY_AFTER,
+                    secs.to_string().parse().unwrap(),
+                );
+            }
+            response
+        } else {
+            // Non-streaming: standard JSON error.
+            let body = serde_json::json!({
+                "error": {
+                    "message": self.0.to_string(),
+                    "type": self.0.error_type(),
+                    "code": self.0.status_code(),
+                }
+            });
+
+            let mut response = (status, Json(body)).into_response();
+            if let GatewayError::RateLimitExceeded {
+                retry_after_secs: Some(secs),
+                ..
+            } = self.0
+            {
+                response.headers_mut().insert(
+                    axum::http::header::RETRY_AFTER,
+                    secs.to_string().parse().unwrap(),
+                );
+            }
+            response
         }
-        response
     }
 }
 
 impl From<GatewayError> for GatewayErrorReply {
     fn from(e: GatewayError) -> Self {
-        GatewayErrorReply(e)
+        GatewayErrorReply(e, false)
     }
 }
 
@@ -727,7 +761,7 @@ pub async fn messages(
     check_model_access(identity, &openai_req.model, &state.deployment_store, &state.alias_store)
         .map_err(|e| {
             log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()));
-            AnthropicErrorReply(e)
+            AnthropicErrorReply(e, is_stream)
         })?;
 
     // 2. Plan-based or default rate limiting.
@@ -756,7 +790,7 @@ pub async fn messages(
     .await
     .map_err(|e| {
         log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()));
-        AnthropicErrorReply(e)
+        AnthropicErrorReply(e, is_stream)
     })?;
 
     // 3. Select provider deployment.
@@ -765,14 +799,14 @@ pub async fn messages(
         .ok_or_else(|| {
             let e = GatewayError::ModelNotFound(openai_req.model.clone());
             log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()));
-            AnthropicErrorReply(e)
+            AnthropicErrorReply(e, is_stream)
         })?;
 
     // 4. Route to provider.
     if is_stream {
         let stream = provider.chat_stream(openai_req).await.map_err(|e| {
             log_error(&state, &identity, &model, "/v1/messages", true, start, &e, Some(request_id.clone()));
-            AnthropicErrorReply(e)
+            AnthropicErrorReply(e, true)
         })?;
         let sse_stream = sse_stream_from_anthropic_chat_stream(stream, model.clone());
         let guarded = GuardedStream::new(sse_stream, guard);
@@ -799,7 +833,7 @@ pub async fn messages(
     } else {
         let response = provider.chat(openai_req).await.map_err(|e| {
             log_error(&state, &identity, &model, "/v1/messages", false, start, &e, Some(request_id.clone()));
-            AnthropicErrorReply(e)
+            AnthropicErrorReply(e, false)
         })?;
 
         let duration_ms = start.elapsed().as_millis() as i32;
@@ -880,39 +914,75 @@ fn sse_stream_from_anthropic_chat_stream(
 // Anthropic Error Response
 // ============================================================
 
-pub struct AnthropicErrorReply(pub GatewayError);
+pub struct AnthropicErrorReply(pub GatewayError, pub bool /* is_stream */);
 
 impl IntoResponse for AnthropicErrorReply {
     fn into_response(self) -> axum::response::Response {
         let status = axum::http::StatusCode::from_u16(self.0.status_code())
             .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
 
-        let body = serde_json::json!({
-            "type": "error",
-            "error": {
-                "type": self.0.error_type(),
-                "message": self.0.to_string(),
-            }
-        });
+        if self.1 {
+            // Streaming mode: return Anthropic SSE error event.
+            let body = serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": self.0.error_type(),
+                    "message": self.0.to_string(),
+                }
+            });
+            let data = serde_json::to_string(&body).unwrap_or_default();
+            let sse_body = format!("event: error\ndata: {data}\n\n");
 
-        let mut response = (status, Json(body)).into_response();
-        if let GatewayError::RateLimitExceeded {
-            retry_after_secs: Some(secs),
-            ..
-        } = self.0
-        {
+            let mut response = sse_body.into_response();
+            *response.status_mut() = status;
             response.headers_mut().insert(
-                axum::http::header::RETRY_AFTER,
-                secs.to_string().parse().unwrap(),
+                axum::http::header::CONTENT_TYPE,
+                "text/event-stream".parse().unwrap(),
             );
+            response.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                "no-cache".parse().unwrap(),
+            );
+            if let GatewayError::RateLimitExceeded {
+                retry_after_secs: Some(secs),
+                ..
+            } = self.0
+            {
+                response.headers_mut().insert(
+                    axum::http::header::RETRY_AFTER,
+                    secs.to_string().parse().unwrap(),
+                );
+            }
+            response
+        } else {
+            // Non-streaming: standard Anthropic JSON error.
+            let body = serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": self.0.error_type(),
+                    "message": self.0.to_string(),
+                }
+            });
+
+            let mut response = (status, Json(body)).into_response();
+            if let GatewayError::RateLimitExceeded {
+                retry_after_secs: Some(secs),
+                ..
+            } = self.0
+            {
+                response.headers_mut().insert(
+                    axum::http::header::RETRY_AFTER,
+                    secs.to_string().parse().unwrap(),
+                );
+            }
+            response
         }
-        response
     }
 }
 
 impl From<GatewayError> for AnthropicErrorReply {
     fn from(e: GatewayError) -> Self {
-        AnthropicErrorReply(e)
+        AnthropicErrorReply(e, false)
     }
 }
 
@@ -972,7 +1042,7 @@ async fn forward_pass_through(
         .ok_or_else(|| {
             GatewayErrorReply(GatewayError::ConfigError(
                 "pass_through not configured".to_string(),
-            ))
+            ), false)
         })?;
 
     let target = format!("{}{}", url.trim_end_matches('/'), path);
@@ -1000,7 +1070,7 @@ async fn forward_pass_through(
             GatewayErrorReply(GatewayError::ProviderError(format!(
                 "Pass-through forward failed: {}",
                 e
-            )))
+            )), false)
         })?;
 
     let status = axum::http::StatusCode::from_u16(resp.status().as_u16())
@@ -1061,7 +1131,7 @@ async fn forward_pass_through(
             GatewayErrorReply(GatewayError::ProviderError(format!(
                 "Pass-through read body failed: {}",
                 e
-            )))
+            )), false)
         })?;
 
         let mut response = (status, body_bytes.to_vec()).into_response();
@@ -1084,7 +1154,7 @@ pub async fn pt_chat_completions(
         let err = GatewayError::ProviderError(format!("Failed to read request body: {}", e));
         let identity = auth.identity();
         log_error(&state, &identity, "unknown", "/v1/chat/completions", false, start, &err, Some(request_id.clone()));
-        GatewayErrorReply(err)
+        GatewayErrorReply(err, false)
     })?;
 
     // Parse model name for access check.
@@ -1092,7 +1162,7 @@ pub async fn pt_chat_completions(
         let err = GatewayError::ProviderError(format!("Invalid request body: {}", e));
         let identity = auth.identity();
         log_error(&state, &identity, "unknown", "/v1/chat/completions", false, start, &err, Some(request_id.clone()));
-        GatewayErrorReply(err)
+        GatewayErrorReply(err, false)
     })?;
 
     let identity = auth.identity();
@@ -1111,7 +1181,7 @@ pub async fn pt_chat_completions(
     )
     .map_err(|e| {
         log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e, Some(request_id.clone()));
-        GatewayErrorReply(e)
+        GatewayErrorReply(e, false)
     })?;
 
     // 2. Rate limiting.
@@ -1140,7 +1210,7 @@ pub async fn pt_chat_completions(
     .await
     .map_err(|e| {
         log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e, Some(request_id.clone()));
-        GatewayErrorReply(e)
+        GatewayErrorReply(e, false)
     })?;
 
     // 3. Forward to upstream.
@@ -1214,7 +1284,7 @@ pub async fn pt_messages(
         let err = GatewayError::ProviderError(format!("Failed to read request body: {}", e));
         let identity = auth.identity();
         log_error(&state, &identity, "unknown", "/v1/messages", false, start, &err, Some(request_id.clone()));
-        AnthropicErrorReply(err)
+        AnthropicErrorReply(err, false)
     })?;
 
     // Parse to get model name for access check.
@@ -1222,7 +1292,7 @@ pub async fn pt_messages(
         let err = GatewayError::ProviderError(format!("Invalid request body: {}", e));
         let identity = auth.identity();
         log_error(&state, &identity, "unknown", "/v1/messages", false, start, &err, Some(request_id.clone()));
-        AnthropicErrorReply(err)
+        AnthropicErrorReply(err, false)
     })?;
     let model = anthropic_req.model.clone();
     let is_stream = anthropic_req.stream.unwrap_or(false);
@@ -1240,7 +1310,7 @@ pub async fn pt_messages(
     )
     .map_err(|e| {
         log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()));
-        AnthropicErrorReply(e)
+        AnthropicErrorReply(e, is_stream)
     })?;
 
     // 2. Rate limiting.
@@ -1269,7 +1339,7 @@ pub async fn pt_messages(
     .await
     .map_err(|e| {
         log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()));
-        AnthropicErrorReply(e)
+        AnthropicErrorReply(e, is_stream)
     })?;
 
     // 3. Forward to upstream.
@@ -1324,6 +1394,6 @@ pub async fn pt_messages(
 
     match result {
         Ok(response) => Ok(response),
-        Err(GatewayErrorReply(e)) => Err(AnthropicErrorReply(e)),
+        Err(GatewayErrorReply(e, is_stream)) => Err(AnthropicErrorReply(e, is_stream)),
     }
 }
