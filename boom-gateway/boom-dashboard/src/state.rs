@@ -37,6 +37,8 @@ pub enum AdminCommand {
         id: Uuid,
         reply: oneshot::Sender<Result<Value, String>>,
     },
+    /// Fire-and-forget: config changed, dump snapshot.
+    ConfigChanged,
 }
 
 pub type AdminTx = mpsc::Sender<AdminCommand>;

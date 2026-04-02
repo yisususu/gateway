@@ -18,14 +18,20 @@ pub async fn admin_command_handler(mut rx: tokio::sync::mpsc::Receiver<AdminComm
             AdminCommand::CreateModel { req, reply } => {
                 let result = handle_create_model(&state, req).await;
                 let _ = reply.send(result);
+                state.dump_config_snapshot().await;
             }
             AdminCommand::UpdateModel { id, req, reply } => {
                 let result = handle_update_model(&state, id, req).await;
                 let _ = reply.send(result);
+                state.dump_config_snapshot().await;
             }
             AdminCommand::DeleteModel { id, reply } => {
                 let result = handle_delete_model(&state, id).await;
                 let _ = reply.send(result);
+                state.dump_config_snapshot().await;
+            }
+            AdminCommand::ConfigChanged => {
+                state.dump_config_snapshot().await;
             }
         }
     }

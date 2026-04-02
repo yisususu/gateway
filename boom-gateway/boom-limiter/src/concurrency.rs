@@ -228,6 +228,21 @@ impl PlanStore {
         self.key_assignments.remove(key_hash).is_some()
     }
 
+    /// Clear all plan definitions and default_plan, but keep key assignments
+    /// and concurrency counters intact. Used during hot-reload.
+    pub fn clear_plans(&self) {
+        self.plans.clear();
+        let mut guard = self.default_plan_name.lock().unwrap();
+        *guard = None;
+    }
+
+    /// Remove assignments pointing to plans that no longer exist.
+    /// Call after reloading plans to clean up orphaned entries.
+    pub fn cleanup_assignments(&self) {
+        self.key_assignments
+            .retain(|_, plan_name| self.plans.contains_key(plan_name));
+    }
+
     /// Remove concurrency entries with count==0 to free memory.
     /// Returns the count of removed entries.
     pub fn cleanup_concurrency(&self) -> usize {

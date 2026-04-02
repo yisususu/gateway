@@ -93,6 +93,7 @@ pub async fn upsert_plan(
     }
 
     state.plan_store.upsert_plan(plan);
+    let _ = state.admin_tx.send(crate::state::AdminCommand::ConfigChanged).await;
     Json(json!({"ok": true, "plan_name": req.name}))
 }
 
@@ -116,6 +117,7 @@ pub async fn delete_plan(
                 tracing::error!("Failed to delete plan from DB: {}", e);
             }
         }
+        let _ = state.admin_tx.send(crate::state::AdminCommand::ConfigChanged).await;
     }
 
     Json(json!({"ok": deleted, "plan_name": name}))
@@ -549,6 +551,7 @@ pub async fn assign_key(
                     tracing::error!("Failed to persist assignment to DB: {}", e);
                 }
             }
+            let _ = state.admin_tx.send(crate::state::AdminCommand::ConfigChanged).await;
             Json(json!({"ok": true})).into_response()
         }
         Err(e) => (axum::http::StatusCode::BAD_REQUEST, e).into_response(),
@@ -575,6 +578,7 @@ pub async fn unassign_key(
                 tracing::error!("Failed to delete assignment from DB: {}", e);
             }
         }
+        let _ = state.admin_tx.send(crate::state::AdminCommand::ConfigChanged).await;
     }
 
     Json(json!({"ok": removed}))
@@ -1014,6 +1018,7 @@ pub async fn create_alias(
     );
 
     tracing::info!(alias = %req.alias_name, target = %req.target_model, "Alias created");
+    let _ = state.admin_tx.send(crate::state::AdminCommand::ConfigChanged).await;
     Json(json!({"ok": true, "alias_name": req.alias_name})).into_response()
 }
 
@@ -1050,6 +1055,7 @@ pub async fn update_alias(
                 req.target_model.clone(),
                 req.hidden,
             );
+            let _ = state.admin_tx.send(crate::state::AdminCommand::ConfigChanged).await;
             Json(json!({"ok": true})).into_response()
         }
         Ok(_) => Json(json!({"error": "Alias not found"})).into_response(),
@@ -1083,6 +1089,7 @@ pub async fn delete_alias(
         Ok(r) if r.rows_affected() > 0 => {
             state.alias_store.remove_alias(&alias_name);
             tracing::info!(alias = %alias_name, "Alias deleted");
+            let _ = state.admin_tx.send(crate::state::AdminCommand::ConfigChanged).await;
             Json(json!({"ok": true, "alias_name": alias_name})).into_response()
         }
         Ok(_) => Json(json!({"error": "Alias not found"})).into_response(),

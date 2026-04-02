@@ -277,7 +277,10 @@
         <td>${p.concurrency_limit || "-"}</td>
         <td>${p.rpm_limit || "-"}</td>
         <td>${(p.window_limits || []).map(([l, w]) => `${l}/${formatDuration(w)}`).join(", ") || "-"}</td>
-        <td><button class="btn-danger" onclick="window._deletePlan('${esc(p.name)}')">Delete</button></td>
+        <td>
+          <button class="btn-small" onclick="window._editPlan('${esc(p.name)}')">Edit</button>
+          <button class="btn-danger" onclick="window._deletePlan('${esc(p.name)}')">Delete</button>
+        </td>
       </tr>`).join("")}
     </table>`;
   }
@@ -626,16 +629,17 @@
     if (e.target === e.currentTarget) hideModal();
   });
 
-  function showNewPlanModal() {
+  function showNewPlanModal(prefill) {
+    const p = prefill || {};
     showModal(`
-      <h3>Create / Update Plan</h3>
-      <div class="form-group"><label>Name</label><input id="m-plan-name" required></div>
-      <div class="form-group"><label>Concurrency Limit</label><input id="m-plan-concurrency" type="number"></div>
-      <div class="form-group"><label>RPM Limit</label><input id="m-plan-rpm" type="number"></div>
-      <div class="form-group"><label>Window Limits (JSON array e.g. [[100,18000]])</label><textarea id="m-plan-windows" rows="2">[]</textarea></div>
+      <h3>${p.name ? "Edit" : "Create"} Plan</h3>
+      <div class="form-group"><label>Name</label><input id="m-plan-name" value="${esc(p.name || "")}" ${p.name ? "readonly" : ""} required></div>
+      <div class="form-group"><label>Concurrency Limit</label><input id="m-plan-concurrency" type="number" value="${p.concurrency_limit || ""}"></div>
+      <div class="form-group"><label>RPM Limit</label><input id="m-plan-rpm" type="number" value="${p.rpm_limit || ""}"></div>
+      <div class="form-group"><label>Window Limits (JSON e.g. [[100,18000]])</label><textarea id="m-plan-windows" rows="2">${JSON.stringify(p.window_limits || [])}</textarea></div>
       <div class="modal-actions">
         <button class="btn-secondary" onclick="hideModal()" style="width:auto">Cancel</button>
-        <button class="btn-primary" id="m-plan-submit">Save</button>
+        <button class="btn-primary" id="m-plan-submit">${p.name ? "Update" : "Create"}</button>
       </div>
     `);
     document.getElementById("m-plan-submit").addEventListener("click", async () => {
@@ -655,6 +659,15 @@
       } catch (err) { alert("Error: " + err.message); }
     });
   }
+
+  window._editPlan = async (name) => {
+    try {
+      const data = await api("/admin/plans");
+      const p = (data.plans || []).find((x) => x.name === name);
+      if (!p) return;
+      showNewPlanModal(p);
+    } catch (err) { alert("Error: " + err.message); }
+  };
 
   function showNewKeyModal() {
     showModal(`

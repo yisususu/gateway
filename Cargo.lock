@@ -344,6 +344,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sqlx",
  "tokio",
  "tokio-stream",
