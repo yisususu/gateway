@@ -108,7 +108,7 @@ pub async fn chat_completions(
         })
         .collect();
 
-    let guard = check_plan_or_default_limits(
+    let (guard, rl_info) = check_plan_or_default_limits(
         &state.plan_store,
         &state.limiter,
         &identity.key_hash,
@@ -121,6 +121,18 @@ pub async fn chat_completions(
         log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e, Some(request_id.clone()));
         GatewayErrorReply(e, false)
     })?;
+
+    let input_chars: usize = req.messages.iter().map(|m| match &m.content {
+        boom_core::types::MessageContent::Text(t) => t.len(),
+        boom_core::types::MessageContent::Parts(parts) => parts.iter().map(|p| match p {
+            boom_core::types::ContentPart::Text { text } => text.len(),
+            _ => 0,
+        }).sum(),
+    }).sum();
+    log_request_summary(
+        &request_id, &identity.key_name, &model, input_chars, is_stream,
+        "/v1/chat/completions", &rl_info,
+    );
 
     // 3. Select provider deployment.
     let provider = state
@@ -632,6 +644,20 @@ fn check_model_access(
 // Plan-based Rate Limiting Helper
 // ============================================================
 
+/// Rate-limit check result returned on success.
+struct RateLimitInfo {
+    /// Name of the plan applied (if any).
+    plan_name: Option<String>,
+    /// RPM remaining (from the sliding window decision).
+    rpm_remaining: u64,
+    /// RPM limit.
+    rpm_limit: u64,
+    /// Current concurrency count for this key.
+    concurrency: u32,
+    /// Concurrency limit (if plan has one).
+    concurrency_limit: Option<u32>,
+}
+
 /// Check plan-based limits if a plan is assigned, otherwise fall back to
 /// default per-model rate limits.
 async fn check_plan_or_default_limits(
@@ -641,7 +667,7 @@ async fn check_plan_or_default_limits(
     model: &str,
     rpm_limit: Option<u64>,
     window_limits: &[(u64, u64)],
-) -> Result<Option<ConcurrencyGuard>, GatewayError> {
+) -> Result<(Option<ConcurrencyGuard>, RateLimitInfo), GatewayError> {
     let plan = plan_store
         .resolve_plan(key_hash)
         .or_else(|| plan_store.get_default_plan());
@@ -691,7 +717,14 @@ async fn check_plan_or_default_limits(
                 });
             }
 
-            Ok(guard)
+            let concurrency = plan_store.get_concurrency(key_hash);
+            Ok((guard, RateLimitInfo {
+                plan_name: Some(plan.name.clone()),
+                rpm_remaining: decision.remaining,
+                rpm_limit: decision.limit,
+                concurrency,
+                concurrency_limit,
+            }))
         }
         None => {
             let rl_key = RateLimitKey {
@@ -715,7 +748,13 @@ async fn check_plan_or_default_limits(
                 });
             }
 
-            Ok(None)
+            Ok((None, RateLimitInfo {
+                plan_name: None,
+                rpm_remaining: decision.remaining,
+                rpm_limit: decision.limit,
+                concurrency: 0,
+                concurrency_limit: None,
+            }))
         }
     }
 }
@@ -723,6 +762,37 @@ async fn check_plan_or_default_limits(
 // ============================================================
 // Helpers
 // ============================================================
+
+/// Print a concise one-line summary of an accepted request to the server console.
+fn log_request_summary(
+    request_id: &str,
+    key_name: &Option<String>,
+    model: &str,
+    input_chars: usize,
+    is_stream: bool,
+    api_path: &str,
+    rl_info: &RateLimitInfo,
+) {
+    let key_display = key_name.as_deref().unwrap_or("-");
+    let plan_display = rl_info.plan_name.as_deref().unwrap_or("-");
+    let concurrency_display = match rl_info.concurrency_limit {
+        Some(limit) => format!("{}/{}", rl_info.concurrency, limit),
+        None => "-".to_string(),
+    };
+    tracing::info!(
+        "[{}] {} {} stream={} key={} plan={} rpm={}/{} input_chars={} concurrency={}",
+        &request_id[..8],
+        api_path,
+        model,
+        is_stream,
+        key_display,
+        plan_display,
+        rl_info.rpm_remaining,
+        rl_info.rpm_limit,
+        input_chars,
+        concurrency_display,
+    );
+}
 
 fn sse_stream_from_chat_stream(
     stream: ChatStream,
@@ -783,7 +853,7 @@ pub async fn messages(
         })
         .collect();
 
-    let guard = check_plan_or_default_limits(
+    let (guard, rl_info) = check_plan_or_default_limits(
         &state.plan_store,
         &state.limiter,
         &identity.key_hash,
@@ -796,6 +866,18 @@ pub async fn messages(
         log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()));
         AnthropicErrorReply(e, is_stream)
     })?;
+
+    let input_chars: usize = req.messages.iter().map(|m| match &m.content {
+        boom_core::types::AnthropicContent::Text(t) => t.len(),
+        boom_core::types::AnthropicContent::Blocks(blocks) => blocks.iter().map(|b| match b {
+            boom_core::types::AnthropicContentBlock::Text { text } => text.len(),
+            _ => 0,
+        }).sum(),
+    }).sum();
+    log_request_summary(
+        &request_id, &identity.key_name, &model, input_chars, is_stream,
+        "/v1/messages", &rl_info,
+    );
 
     // 3. Select provider deployment.
     let provider = state
@@ -1203,7 +1285,7 @@ pub async fn pt_chat_completions(
         })
         .collect();
 
-    let guard = check_plan_or_default_limits(
+    let (guard, rl_info) = check_plan_or_default_limits(
         &state.plan_store,
         &state.limiter,
         &identity.key_hash,
@@ -1216,6 +1298,18 @@ pub async fn pt_chat_completions(
         log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e, Some(request_id.clone()));
         GatewayErrorReply(e, false)
     })?;
+
+    let input_chars: usize = chat_req.messages.iter().map(|m| match &m.content {
+        boom_core::types::MessageContent::Text(t) => t.len(),
+        boom_core::types::MessageContent::Parts(parts) => parts.iter().map(|p| match p {
+            boom_core::types::ContentPart::Text { text } => text.len(),
+            _ => 0,
+        }).sum(),
+    }).sum();
+    log_request_summary(
+        &request_id, &identity.key_name, &model, input_chars, is_stream,
+        "/v1/chat/completions", &rl_info,
+    );
 
     // 3. Forward to upstream.
     // Note: guard drops here for non-streaming responses, which is correct.
@@ -1332,7 +1426,7 @@ pub async fn pt_messages(
         })
         .collect();
 
-    let _guard = check_plan_or_default_limits(
+    let (_guard, rl_info) = check_plan_or_default_limits(
         &state.plan_store,
         &state.limiter,
         &identity.key_hash,
@@ -1345,6 +1439,18 @@ pub async fn pt_messages(
         log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()));
         AnthropicErrorReply(e, is_stream)
     })?;
+
+    let input_chars: usize = anthropic_req.messages.iter().map(|m| match &m.content {
+        boom_core::types::AnthropicContent::Text(t) => t.len(),
+        boom_core::types::AnthropicContent::Blocks(blocks) => blocks.iter().map(|b| match b {
+            boom_core::types::AnthropicContentBlock::Text { text } => text.len(),
+            _ => 0,
+        }).sum(),
+    }).sum();
+    log_request_summary(
+        &request_id, &identity.key_name, &model, input_chars, is_stream,
+        "/v1/messages", &rl_info,
+    );
 
     // 3. Forward to upstream.
     // Build a deferred log for streaming responses — actual duration recorded on stream end.
