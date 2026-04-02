@@ -114,6 +114,7 @@ pub fn openai_response_to_anthropic(resp: &ChatCompletionResponse) -> AnthropicM
                 })
                 .collect::<Vec<_>>()
                 .join(""),
+            MessageContent::Null => String::new(),
         };
         if !text.is_empty() {
             content_blocks.push(AnthropicResponseContentBlock::Text { text });

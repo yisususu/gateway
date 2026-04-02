@@ -21,6 +21,7 @@ pub enum MessageRole {
 pub enum MessageContent {
     Text(String),
     Parts(Vec<ContentPart>),
+    Null,
 }
 
 impl Default for MessageContent {

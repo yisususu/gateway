@@ -42,6 +42,7 @@ impl GeminiProvider {
                     })
                     .collect::<Vec<_>>()
                     .join("\n"),
+                MessageContent::Null => String::new(),
             };
 
             match msg.role {

@@ -128,6 +128,7 @@ pub async fn chat_completions(
             boom_core::types::ContentPart::Text { text } => text.len(),
             _ => 0,
         }).sum(),
+        boom_core::types::MessageContent::Null => 0,
     }).sum();
     log_request_summary(
         &request_id, identity, &model, input_chars, is_stream,
@@ -1308,6 +1309,7 @@ pub async fn pt_chat_completions(
             boom_core::types::ContentPart::Text { text } => text.len(),
             _ => 0,
         }).sum(),
+        boom_core::types::MessageContent::Null => 0,
     }).sum();
     log_request_summary(
         &request_id, identity, &model, input_chars, is_stream,

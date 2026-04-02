@@ -55,6 +55,7 @@ impl AnthropicProvider {
                             })
                             .collect::<Vec<_>>()
                             .join("\n"),
+                        MessageContent::Null => String::new(),
                     };
                 }
                 _ => {
@@ -65,6 +66,7 @@ impl AnthropicProvider {
                         MessageContent::Parts(parts) => {
                             serde_json::json!(parts)
                         }
+                        MessageContent::Null => serde_json::json!([]),
                     };
                     messages.push(serde_json::json!({
                         "role": match msg.role {
