@@ -660,8 +660,8 @@ async fn check_plan_or_default_limits(
                     GatewayError::ConcurrencyExceeded {
                         limit,
                         message: format!(
-                            "Concurrency limit exceeded. Limit: {}",
-                            limit
+                            "Concurrency limit exceeded. Plan: {}, Limit: {}",
+                            plan.name, limit
                         ),
                     }
                 })?)
@@ -680,12 +680,14 @@ async fn check_plan_or_default_limits(
 
             if !decision.allowed {
                 drop(guard);
+                let limit_type = match decision.rejected_window_secs {
+                    Some(60) | None => ("plan_rpm_limit", format!("Plan '{}' RPM limit exceeded. Limit: {}/min", plan.name, decision.limit)),
+                    Some(secs) => ("plan_window_limit", format!("Plan '{}' window limit exceeded. Limit: {} per {}s", plan.name, decision.limit, secs)),
+                };
                 return Err(GatewayError::RateLimitExceeded {
                     retry_after_secs: decision.retry_after_secs,
-                    message: format!(
-                        "Rate limit exceeded. Limit: {} per minute.",
-                        decision.limit
-                    ),
+                    message: limit_type.1,
+                    limit_type: limit_type.0,
                 });
             }
 
@@ -702,12 +704,14 @@ async fn check_plan_or_default_limits(
                 .await?;
 
             if !decision.allowed {
+                let limit_type = match decision.rejected_window_secs {
+                    Some(60) | None => ("rpm_limit", format!("RPM limit exceeded. Model: {}, Limit: {}/min", model, decision.limit)),
+                    Some(secs) => ("window_limit", format!("Window limit exceeded. Model: {}, Limit: {} per {}s", model, decision.limit, secs)),
+                };
                 return Err(GatewayError::RateLimitExceeded {
                     retry_after_secs: decision.retry_after_secs,
-                    message: format!(
-                        "Rate limit exceeded. Limit: {} per minute.",
-                        decision.limit
-                    ),
+                    message: limit_type.1,
+                    limit_type: limit_type.0,
                 });
             }
 

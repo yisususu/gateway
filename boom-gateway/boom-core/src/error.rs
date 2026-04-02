@@ -8,10 +8,13 @@ pub enum GatewayError {
     #[error("Authentication failed: {0}")]
     AuthError(String),
 
-    #[error("Rate limit exceeded")]
+    #[error("{message}")]
     RateLimitExceeded {
         retry_after_secs: Option<u64>,
         message: String,
+        /// Specific limit type for diagnostics: "plan_rpm_limit", "plan_window_limit",
+        /// "rpm_limit", "window_limit".
+        limit_type: &'static str,
     },
 
     #[error("Concurrency limit exceeded: {message}")]
@@ -71,7 +74,7 @@ impl GatewayError {
     pub fn error_type(&self) -> &str {
         match self {
             Self::AuthError(_) => "authentication_error",
-            Self::RateLimitExceeded { .. } => "rate_limit_exceeded",
+            Self::RateLimitExceeded { limit_type, .. } => limit_type,
             Self::ConcurrencyExceeded { .. } => "concurrency_exceeded",
             Self::ModelNotFound(_) => "model_not_found",
             Self::BudgetExceeded => "budget_exceeded",

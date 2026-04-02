@@ -235,6 +235,7 @@ impl RateLimiter for SlidingWindowLimiter {
                     limit,
                     reset_at,
                     retry_after_secs: Some(retry_after),
+                    rejected_window_secs: Some(60),
                 });
             }
         }
@@ -257,6 +258,7 @@ impl RateLimiter for SlidingWindowLimiter {
                     limit,
                     reset_at,
                     retry_after_secs: Some(retry_after),
+                    rejected_window_secs: Some(window_secs),
                 });
             }
         }
@@ -289,6 +291,7 @@ impl RateLimiter for SlidingWindowLimiter {
             limit: rpm_limit.unwrap_or(0),
             reset_at: chrono::Utc::now() + chrono::Duration::seconds(60),
             retry_after_secs: None,
+            rejected_window_secs: None,
         })
     }
 }

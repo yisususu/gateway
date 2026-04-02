@@ -449,4 +449,7 @@ pub struct RateLimitDecision {
     pub limit: u64,
     pub reset_at: chrono::DateTime<chrono::Utc>,
     pub retry_after_secs: Option<u64>,
+    /// When `allowed` is false, the window duration that triggered the rejection.
+    /// 60 = RPM window, other = custom window limit.
+    pub rejected_window_secs: Option<u64>,
 }
