@@ -108,7 +108,8 @@ impl DbAuthenticator {
     fn token_to_identity(&self, token: VerificationToken) -> AuthIdentity {
         AuthIdentity {
             key_hash: token.token.clone(),
-            key_name: token.key_name,
+            key_name: token.key_name.clone(),
+            key_alias: token.key_alias,
             user_id: token.user_id,
             team_id: token.team_id,
             models: token.models,
@@ -154,6 +155,7 @@ impl Authenticator for DbAuthenticator {
             return Ok(AuthIdentity {
                 key_hash: "master".to_string(),
                 key_name: Some("master".to_string()),
+                key_alias: Some("master".to_string()),
                 user_id: None,
                 team_id: None,
                 models: vec![], // master can access all models

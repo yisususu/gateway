@@ -130,7 +130,7 @@ pub async fn chat_completions(
         }).sum(),
     }).sum();
     log_request_summary(
-        &request_id, &identity.key_name, &model, input_chars, is_stream,
+        &request_id, identity, &model, input_chars, is_stream,
         "/v1/chat/completions", &rl_info,
     );
 
@@ -766,14 +766,17 @@ async fn check_plan_or_default_limits(
 /// Print a concise one-line summary of an accepted request to the server console.
 fn log_request_summary(
     request_id: &str,
-    key_name: &Option<String>,
+    identity: &AuthIdentity,
     model: &str,
     input_chars: usize,
     is_stream: bool,
     api_path: &str,
     rl_info: &RateLimitInfo,
 ) {
-    let key_display = key_name.as_deref().unwrap_or("-");
+    let key_display = identity.key_alias.as_deref()
+        .or(identity.key_name.as_deref())
+        .or(identity.user_id.as_deref())
+        .unwrap_or("-");
     let plan_display = rl_info.plan_name.as_deref().unwrap_or("-");
     let concurrency_display = match rl_info.concurrency_limit {
         Some(limit) => format!("{}/{}", rl_info.concurrency, limit),
@@ -875,7 +878,7 @@ pub async fn messages(
         }).sum(),
     }).sum();
     log_request_summary(
-        &request_id, &identity.key_name, &model, input_chars, is_stream,
+        &request_id, identity, &model, input_chars, is_stream,
         "/v1/messages", &rl_info,
     );
 
@@ -1307,7 +1310,7 @@ pub async fn pt_chat_completions(
         }).sum(),
     }).sum();
     log_request_summary(
-        &request_id, &identity.key_name, &model, input_chars, is_stream,
+        &request_id, identity, &model, input_chars, is_stream,
         "/v1/chat/completions", &rl_info,
     );
 
@@ -1448,7 +1451,7 @@ pub async fn pt_messages(
         }).sum(),
     }).sum();
     log_request_summary(
-        &request_id, &identity.key_name, &model, input_chars, is_stream,
+        &request_id, identity, &model, input_chars, is_stream,
         "/v1/messages", &rl_info,
     );
 

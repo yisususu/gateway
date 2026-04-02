@@ -230,6 +230,7 @@ pub struct ModelInfo {
 pub struct AuthIdentity {
     pub key_hash: String,
     pub key_name: Option<String>,
+    pub key_alias: Option<String>,
     pub user_id: Option<String>,
     pub team_id: Option<String>,
     /// Allowed models from key. May contain model group names (e.g. "all-team-models").
