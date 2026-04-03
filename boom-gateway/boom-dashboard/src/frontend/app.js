@@ -122,6 +122,7 @@
     else if (section === "admin-plans") loadPlans();
     else if (section === "admin-keys") { setupKeysSearch(); loadKeys(); }
     else if (section === "admin-assignments") loadAssignments();
+    else if (section === "admin-teams") loadTeams();
     else if (section === "admin-logs") { setupLogsFilters(); loadLogs(); }
     else if (section === "admin-config") loadConfig();
   }
@@ -131,6 +132,7 @@
     if (hash.includes("/admin/aliases")) return "admin-aliases";
     if (hash.includes("/admin/plans")) return "admin-plans";
     if (hash.includes("/admin/keys")) return "admin-keys";
+    if (hash.includes("/admin/teams")) return "admin-teams";
     if (hash.includes("/admin/assignments")) return "admin-assignments";
     if (hash.includes("/admin/logs")) return "admin-logs";
     if (hash.includes("/admin/config")) return "admin-config";
@@ -803,6 +805,34 @@
     });
   }
 
+  // ── Admin: Teams ──────────────────────────────────────
+  async function loadTeams() {
+    try {
+      const data = await api("/admin/teams");
+      renderTeamsTable(data.teams || []);
+    } catch (err) {
+      const wrap = document.getElementById("teams-table-wrap");
+      if (wrap) wrap.innerHTML = `<p class="error-msg">Failed to load teams: ${esc(err.message)}</p>`;
+    }
+  }
+
+  function renderTeamsTable(teams) {
+    const wrap = document.getElementById("teams-table-wrap");
+    if (teams.length === 0) { wrap.innerHTML = "<p>No teams found.</p>"; return; }
+    wrap.innerHTML = `<table>
+      <tr><th>Team Alias</th><th>Team ID</th><th>Keys</th><th>Requests</th><th>Input Tokens</th><th>Output Tokens</th><th>Total Tokens</th></tr>
+      ${teams.map((t) => `<tr>
+        <td>${esc(t.team_alias || "-")}</td>
+        <td class="mono" title="${esc(t.team_id)}">${esc((t.team_id || "").substring(0, 8))}</td>
+        <td>${t.key_count}</td>
+        <td>${formatNumber(t.request_count)}</td>
+        <td>${formatNumber(t.total_input_tokens || 0)}</td>
+        <td>${formatNumber(t.total_output_tokens || 0)}</td>
+        <td>${formatNumber((t.total_input_tokens || 0) + (t.total_output_tokens || 0))}</td>
+      </tr>`).join("")}
+    </table>`;
+  }
+
   // ── Admin: Logs ──────────────────────────────────────
   let logsPage = 1;
   let logsFilters = {};
@@ -853,7 +883,7 @@
 
   const LOGS_FILTER_COLS = [
     { col: "",           placeholder: "",     label: "Time" },
-    { col: "request_id", placeholder: "filter", label: "Req ID" },
+    { col: "team_alias", placeholder: "filter", label: "Team" },
     { col: "key_alias",  placeholder: "filter", label: "Key Alias" },
     { col: "model",      placeholder: "filter", label: "Model" },
     { col: "api_path",   placeholder: "filter", label: "Path" },
@@ -894,7 +924,7 @@
       <tr>${headerRow}</tr>
       ${logs.map((l) => `<tr>
         <td class="mono">${formatTimestamp(l.created_at)}</td>
-        <td class="mono" title="${esc(l.request_id || "")}">${esc((l.request_id || "").substring(0, 8)) || "-"}</td>
+        <td>${esc(l.team_alias || l.team_id || "-")}</td>
         <td>${esc(l.key_alias || l.key_name || "-")}</td>
         <td class="mono">${esc(l.model)}</td>
         <td class="mono">${esc(l.api_path)}</td>

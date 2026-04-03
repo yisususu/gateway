@@ -1273,6 +1273,7 @@ pub struct ListLogsQuery {
     pub status_code: Option<i16>,
     pub stream: Option<String>,
     pub error: Option<String>,
+    pub team_alias: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1282,6 +1283,7 @@ struct LogRow {
     key_name: Option<String>,
     key_alias: Option<String>,
     team_id: Option<String>,
+    team_alias: Option<String>,
     model: String,
     api_path: String,
     is_stream: bool,
@@ -1328,38 +1330,42 @@ pub async fn list_logs(
     let status_code_param= slot!(query.status_code);
     // stream is handled as a static WHERE clause (no param slot needed).
     let error_param      = slot!(query.error);
+    let team_alias_param = slot!(query.team_alias);
 
     if query.key_hash.is_some() {
-        where_clauses.push(format!("key_hash = ${}", key_hash_param.unwrap()));
+        where_clauses.push(format!("rl.key_hash = ${}", key_hash_param.unwrap()));
     }
     if query.model.is_some() {
-        where_clauses.push(format!("model ILIKE ${}", model_param.unwrap()));
+        where_clauses.push(format!("rl.model ILIKE ${}", model_param.unwrap()));
     }
     if query.status.as_deref() == Some("error") {
-        where_clauses.push(format!("status_code != ${}", status_param.unwrap()));
+        where_clauses.push(format!("rl.status_code != ${}", status_param.unwrap()));
     }
     if query.request_id.is_some() {
-        where_clauses.push(format!("request_id ILIKE ${}", request_id_param.unwrap()));
+        where_clauses.push(format!("rl.request_id ILIKE ${}", request_id_param.unwrap()));
     }
     if query.key_alias.is_some() {
-        where_clauses.push(format!("(key_alias ILIKE ${0} OR key_name ILIKE ${0})", key_alias_param.unwrap()));
+        where_clauses.push(format!("(rl.key_alias ILIKE ${0} OR rl.key_name ILIKE ${0})", key_alias_param.unwrap()));
     }
     if query.api_path.is_some() {
-        where_clauses.push(format!("api_path ILIKE ${}", api_path_param.unwrap()));
+        where_clauses.push(format!("rl.api_path ILIKE ${}", api_path_param.unwrap()));
     }
     if query.status_code.is_some() {
-        where_clauses.push(format!("status_code = ${}", status_code_param.unwrap()));
+        where_clauses.push(format!("rl.status_code = ${}", status_code_param.unwrap()));
     }
     if query.stream.is_some() {
         let s = query.stream.as_deref().unwrap().to_lowercase();
         if s == "yes" || s == "true" || s == "1" {
-            where_clauses.push("is_stream = true".to_string());
+            where_clauses.push("rl.is_stream = true".to_string());
         } else if s == "no" || s == "false" || s == "0" {
-            where_clauses.push("is_stream = false".to_string());
+            where_clauses.push("rl.is_stream = false".to_string());
         }
     }
     if query.error.is_some() {
-        where_clauses.push(format!("error_message ILIKE ${}", error_param.unwrap()));
+        where_clauses.push(format!("rl.error_message ILIKE ${}", error_param.unwrap()));
+    }
+    if query.team_alias.is_some() {
+        where_clauses.push(format!("bt.team_alias ILIKE ${}", team_alias_param.unwrap()));
     }
 
     let where_sql = if where_clauses.is_empty() {
@@ -1373,17 +1379,22 @@ pub async fn list_logs(
     let offset_idx = param_idx;
 
     let sql = format!(
-        r#"SELECT request_id, key_hash, key_name, key_alias, team_id, model, api_path,
-                  is_stream, status_code, error_type, error_message,
-                  input_tokens, output_tokens, duration_ms, created_at
-           FROM boom_request_log
+        r#"SELECT rl.request_id, rl.key_hash, rl.key_name, rl.key_alias, rl.team_id,
+                  bt.team_alias,
+                  rl.model, rl.api_path,
+                  rl.is_stream, rl.status_code, rl.error_type, rl.error_message,
+                  rl.input_tokens, rl.output_tokens, rl.duration_ms, rl.created_at
+           FROM boom_request_log rl
+           LEFT JOIN boom_team_table bt ON rl.team_id = bt.team_id
            {where_sql}
-           ORDER BY created_at DESC
+           ORDER BY rl.created_at DESC
            LIMIT ${limit_idx} OFFSET ${offset_idx}"#,
     );
 
     let count_sql = format!(
-        r#"SELECT COUNT(*) FROM boom_request_log {where_sql}"#,
+        r#"SELECT COUNT(*) FROM boom_request_log rl
+           LEFT JOIN boom_team_table bt ON rl.team_id = bt.team_id
+           {where_sql}"#,
     );
 
     let mut q = sqlx::query_as::<_, LogRow>(&sql);
@@ -1395,6 +1406,7 @@ pub async fn list_logs(
     let key_alias_pattern  = query.key_alias.as_ref().map(|v| format!("%{}%", v));
     let api_path_pattern   = query.api_path.as_ref().map(|v| format!("%{}%", v));
     let error_pattern      = query.error.as_ref().map(|v| format!("%{}%", v));
+    let team_alias_pattern = query.team_alias.as_ref().map(|v| format!("%{}%", v));
 
     // Bind parameters (order must match slot allocation above).
     if let Some(ref v) = query.key_hash {
@@ -1430,6 +1442,10 @@ pub async fn list_logs(
         q = q.bind(p.clone());
         cq = cq.bind(p.clone());
     }
+    if let Some(ref p) = team_alias_pattern {
+        q = q.bind(p.clone());
+        cq = cq.bind(p.clone());
+    }
 
     q = q.bind(query.per_page).bind(offset);
 
@@ -1456,6 +1472,7 @@ pub async fn list_logs(
                 "key_name": r.key_name,
                 "key_alias": r.key_alias,
                 "team_id": r.team_id,
+                "team_alias": r.team_alias,
                 "model": r.model,
                 "api_path": r.api_path,
                 "is_stream": r.is_stream,
@@ -1477,4 +1494,79 @@ pub async fn list_logs(
         "total": total,
     }))
     .into_response()
+}
+
+// ═══════════════════════════════════════════════════════════
+// Teams
+// ═══════════════════════════════════════════════════════════
+
+#[derive(Debug, sqlx::FromRow)]
+struct TeamUsageRow {
+    team_id: String,
+    team_alias: Option<String>,
+    key_count: i64,
+    total_input_tokens: Option<i64>,
+    total_output_tokens: Option<i64>,
+    request_count: i64,
+}
+
+pub async fn list_teams(
+    _session: AdminSession,
+    Extension(state): Extension<std::sync::Arc<DashboardState>>,
+) -> Response {
+    let db_pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => {
+            return Json(json!({"error": "Database not available"})).into_response();
+        }
+    };
+
+    let sql = r#"
+        SELECT bt.team_id,
+               bt.team_alias,
+               COALESCE(kc.cnt, 0) AS key_count,
+               COALESCE(rl.total_input, 0) AS total_input_tokens,
+               COALESCE(rl.total_output, 0) AS total_output_tokens,
+               COALESCE(rl.cnt, 0) AS request_count
+        FROM boom_team_table bt
+        LEFT JOIN (
+            SELECT team_id, COUNT(*) AS cnt FROM boom_verification_token GROUP BY team_id
+        ) kc ON bt.team_id = kc.team_id
+        LEFT JOIN (
+            SELECT team_id,
+                   SUM(input_tokens)  AS total_input,
+                   SUM(output_tokens) AS total_output,
+                   COUNT(*)           AS cnt
+            FROM boom_request_log GROUP BY team_id
+        ) rl ON bt.team_id = rl.team_id
+        ORDER BY (COALESCE(rl.total_input, 0) + COALESCE(rl.total_output, 0)) DESC
+    "#;
+
+    let rows: Vec<TeamUsageRow> = match sqlx::query_as(sql).fetch_all(db_pool).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Dashboard list_teams query failed: {}", e);
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal error",
+            )
+                .into_response();
+        }
+    };
+
+    let teams: Vec<Value> = rows
+        .into_iter()
+        .map(|r| {
+            json!({
+                "team_id": r.team_id,
+                "team_alias": r.team_alias,
+                "key_count": r.key_count,
+                "total_input_tokens": r.total_input_tokens,
+                "total_output_tokens": r.total_output_tokens,
+                "request_count": r.request_count,
+            })
+        })
+        .collect();
+
+    Json(json!({ "teams": teams })).into_response()
 }

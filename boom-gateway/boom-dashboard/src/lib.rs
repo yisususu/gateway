@@ -110,6 +110,11 @@ pub fn build_router<S: Clone + Send + Sync + 'static>(state: DashboardState) -> 
             "/dashboard/api/admin/logs",
             get(handlers_admin::list_logs),
         )
+        // Admin — Teams.
+        .route(
+            "/dashboard/api/admin/teams",
+            get(handlers_admin::list_teams),
+        )
         // SPA fallback — must be last.
         .route("/dashboard/{*path}", get(handlers_static::spa_fallback))
         // Inject state via Extension layer.
