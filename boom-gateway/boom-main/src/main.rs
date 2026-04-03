@@ -157,6 +157,11 @@ fn build_router(state: AppState) -> Router {
         .merge(dashboard_router)
         .with_state(state)
         .layer(CorsLayer::permissive())
+        // ── DEBUG: catch failures (remove after diagnosing) ──
+        .layer(axum::middleware::from_fn(debug_error_log))
+        .fallback(debug_fallback)
+        // ── END DEBUG ──
+        // ── Original request counter middleware ──
         .layer(axum::middleware::from_fn(move |req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| {
             let count = request_count.clone();
             async move {
@@ -367,3 +372,73 @@ async fn shutdown_signal() {
         },
     }
 }
+
+// ============================================================
+// DEBUG — remove after diagnosing OpenCode routing issue
+// ============================================================
+
+use axum::body::Body;
+use axum::http::Request;
+
+/// Fallback: unmatched route → eprintln directly, no RUST_LOG needed.
+async fn debug_fallback(req: Request<Body>) -> impl axum::response::IntoResponse {
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let headers = req.headers().clone();
+
+    let mut hdr_dump = String::new();
+    for (k, v) in headers.iter() {
+        if let Ok(val) = v.to_str() {
+            hdr_dump.push_str(&format!("\n    {}: {}", k, val));
+        }
+    }
+
+    let (_, body) = req.into_parts();
+    let bytes = axum::body::to_bytes(body, 16).await.unwrap_or_default();
+    let head_hex: String = bytes.iter().take(16).map(|b| format!("{:02x}", b)).collect();
+    let head_ascii = String::from_utf8_lossy(&bytes);
+
+    eprintln!(
+        "[DEBUG-UNMATCHED] {} {}\n  headers:{}\n  body[0..16]: hex={} ascii=\"{}\"",
+        method, uri,
+        if hdr_dump.is_empty() { " (none)".to_string() } else { hdr_dump },
+        head_hex, head_ascii,
+    );
+
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        axum::Json(serde_json::json!({
+            "error": { "message": format!("Not Found: {} {}", method, uri), "type": "not_found" }
+        })),
+    )
+}
+
+/// Middleware: only prints when response status >= 400 (auth fail, JSON parse fail, etc.)
+async fn debug_error_log(
+    req: Request<Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let ct = req.headers().get("content-type")
+        .and_then(|v| v.to_str().ok()).unwrap_or("-").to_string();
+    let has_auth = req.headers().get("authorization").is_some()
+        || req.headers().get("x-api-key").is_some()
+        || req.headers().get("api-key").is_some();
+
+    let resp = next.run(req).await;
+    let status = resp.status().as_u16();
+
+    if status >= 400 {
+        eprintln!(
+            "[DEBUG-REJECTED] {} {} -> {} (ct={}, auth={})",
+            method, uri, status, ct, has_auth,
+        );
+    }
+
+    resp
+}
+
+// ============================================================
+// END DEBUG
+// ============================================================
