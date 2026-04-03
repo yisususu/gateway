@@ -120,7 +120,7 @@
     if (section === "admin-models") loadModels();
     else if (section === "admin-aliases") loadAliases();
     else if (section === "admin-plans") loadPlans();
-    else if (section === "admin-keys") loadKeys();
+    else if (section === "admin-keys") { setupKeysSearch(); loadKeys(); }
     else if (section === "admin-assignments") loadAssignments();
     else if (section === "admin-logs") loadLogs();
     else if (section === "admin-config") loadConfig();
@@ -293,12 +293,32 @@
 
   // ── Admin: Keys ───────────────────────────────────────
   let keysPage = 1;
+  let keysSearch = "";
+  let keysSearchTimer = null;
+  let keysDataCache = [];
+
+  function setupKeysSearch() {
+    const el = document.getElementById("keys-search");
+    if (!el) return;
+    el.value = keysSearch;
+    el.addEventListener("input", () => {
+      clearTimeout(keysSearchTimer);
+      keysSearchTimer = setTimeout(() => {
+        keysSearch = el.value.trim();
+        keysPage = 1;
+        loadKeys();
+      }, 300);
+    });
+  }
 
   async function loadKeys(page) {
     if (page !== undefined) keysPage = page;
     try {
-      const data = await api(`/admin/keys?page=${keysPage}&per_page=50`);
-      renderKeysTable(data.keys || []);
+      let url = `/admin/keys?page=${keysPage}&per_page=50`;
+      if (keysSearch) url += `&search=${encodeURIComponent(keysSearch)}`;
+      const data = await api(url);
+      keysDataCache = data.keys || [];
+      renderKeysTable(keysDataCache);
       renderKeysPagination(data);
     } catch (err) {
       const wrap = document.getElementById("keys-table-wrap");
@@ -321,6 +341,7 @@
         <td>${k.max_budget != null ? "$" + k.max_budget : "-"}</td>
         <td>${k.blocked ? '<span style="color:var(--danger)">Blocked</span>' : "Active"}</td>
         <td>
+          <button class="btn-small" onclick="window._editKey('${esc(k.token_hash)}')">Edit</button>
           ${k.blocked
             ? `<button class="btn-small" onclick="window._unblockKey('${esc(k.token_hash)}')">Unblock</button>`
             : `<button class="btn-danger" onclick="window._blockKey('${esc(k.token_hash)}')">Block</button>`}
@@ -341,6 +362,10 @@
   }
 
   window._loadKeysPage = (p) => loadKeys(p);
+  window._editKey = (tokenHash) => {
+    const key = keysDataCache.find((k) => k.token_hash === tokenHash);
+    if (key) showEditKeyModal(key);
+  };
   window._blockKey = async (hash) => {
     await api(`/admin/keys/${encodeURIComponent(hash)}/block`, { method: "POST" });
     loadKeys();
@@ -709,6 +734,42 @@
             <button class="btn-primary" onclick="hideModal(); window._loadKeysPage();">Done</button>
           </div>
         `);
+      } catch (err) { alert("Error: " + err.message); }
+    });
+  }
+
+  function showEditKeyModal(key) {
+    const modelsStr = Array.isArray(key.models) ? key.models.join(", ") : "";
+    showModal(`
+      <h3>Edit Key</h3>
+      <div class="form-group"><label>Alias</label><input id="m-edit-alias" value="${esc(key.key_alias || "")}"></div>
+      <div class="form-group"><label>User ID</label><input id="m-edit-user" value="${esc(key.user_id || "")}"></div>
+      <div class="form-group"><label>Models (comma-separated)</label><input id="m-edit-models" value="${esc(modelsStr)}"></div>
+      <div class="form-group"><label>Max Budget</label><input id="m-edit-budget" type="number" step="0.01" value="${key.max_budget != null ? key.max_budget : ""}"></div>
+      <div class="form-group"><label>RPM Limit</label><input id="m-edit-rpm" type="number" value="${key.rpm_limit || ""}"></div>
+      <div class="modal-actions">
+        <button class="btn-secondary" onclick="hideModal()" style="width:auto">Cancel</button>
+        <button class="btn-primary" id="m-edit-submit">Save</button>
+      </div>
+    `);
+    document.getElementById("m-edit-submit").addEventListener("click", async () => {
+      try {
+        const aliasVal = document.getElementById("m-edit-alias").value.trim();
+        const userVal = document.getElementById("m-edit-user").value.trim();
+        const modelsVal = document.getElementById("m-edit-models").value.trim();
+        const body = {
+          key_alias: aliasVal || null,
+          user_id: userVal || null,
+          models: modelsVal ? modelsVal.split(",").map((s) => s.trim()) : null,
+          max_budget: document.getElementById("m-edit-budget").value ? Number(document.getElementById("m-edit-budget").value) : null,
+          rpm_limit: document.getElementById("m-edit-rpm").value ? Number(document.getElementById("m-edit-rpm").value) : null,
+        };
+        await api(`/admin/keys/${encodeURIComponent(key.token_hash)}`, {
+          method: "PUT",
+          body: JSON.stringify(body),
+        });
+        hideModal();
+        loadKeys();
       } catch (err) { alert("Error: " + err.message); }
     });
   }

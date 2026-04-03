@@ -223,6 +223,20 @@ tr:hover td { background: var(--surface2); }
 .modal .form-group input:focus, .modal .form-group textarea:focus, .modal .form-group select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-bg); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 
+/* ── Search & Toolbar ─────────────────────────────────── */
+.keys-toolbar { display: flex; gap: 8px; align-items: center; }
+.search-input {
+  padding: 8px 14px; background: var(--surface2);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text); outline: none; width: 260px;
+  transition: border var(--transition), box-shadow var(--transition);
+}
+.search-input::placeholder { color: var(--text3); }
+.search-input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-bg);
+}
+
 /* ── Key display ──────────────────────────────────────── */
 .key-display {
   background: var(--surface2); color: var(--success); padding: 14px;

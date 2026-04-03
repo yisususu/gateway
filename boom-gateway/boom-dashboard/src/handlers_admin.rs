@@ -156,6 +156,7 @@ pub struct ListKeysQuery {
     pub page: i64,
     #[serde(default = "default_per_page")]
     pub per_page: i64,
+    pub search: Option<String>,
 }
 
 fn default_page() -> i64 {
@@ -179,28 +180,78 @@ pub async fn list_keys(
 
     let offset = (query.page - 1).max(0) * query.per_page;
 
-    let rows: Vec<KeyRow> = match sqlx::query_as(
-        r#"SELECT token, key_name, key_alias, user_id, team_id, models,
-                  spend, blocked, rpm_limit, tpm_limit, max_budget,
-                  budget_duration, expires, metadata, created_at
-           FROM "boom_verification_token"
-           ORDER BY created_at DESC NULLS LAST
-           LIMIT $1 OFFSET $2"#,
-    )
-    .bind(query.per_page)
-    .bind(offset)
-    .fetch_all(db_pool)
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!("Dashboard list_keys query failed: {}", e);
-            return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal error",
-            )
-                .into_response();
-        }
+    let search_pattern = query
+        .search
+        .as_deref()
+        .map(|s| format!("%{}%", s.replace('%', "\\%").replace('_', "\\_")));
+
+    let (rows, total): (Vec<KeyRow>, i64) = if let Some(ref pattern) = search_pattern {
+        let rows = match sqlx::query_as(
+            r#"SELECT token, key_name, key_alias, user_id, team_id, models,
+                      spend, blocked, rpm_limit, tpm_limit, max_budget,
+                      budget_duration, expires, metadata, created_at
+               FROM "boom_verification_token"
+               WHERE (key_name ILIKE $1 OR key_alias ILIKE $1 OR user_id ILIKE $1 OR token ILIKE $1)
+               ORDER BY created_at DESC NULLS LAST
+               LIMIT $2 OFFSET $3"#,
+        )
+        .bind(pattern)
+        .bind(query.per_page)
+        .bind(offset)
+        .fetch_all(db_pool)
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Dashboard list_keys query failed: {}", e);
+                return (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal error",
+                )
+                    .into_response();
+            }
+        };
+
+        let total: (i64,) =
+            sqlx::query_as(r#"SELECT COUNT(*) FROM "boom_verification_token" WHERE (key_name ILIKE $1 OR key_alias ILIKE $1 OR user_id ILIKE $1 OR token ILIKE $1)"#)
+                .bind(pattern)
+                .fetch_one(db_pool)
+                .await
+                .unwrap_or((0,));
+
+        (rows, total.0)
+    } else {
+        let rows = match sqlx::query_as(
+            r#"SELECT token, key_name, key_alias, user_id, team_id, models,
+                      spend, blocked, rpm_limit, tpm_limit, max_budget,
+                      budget_duration, expires, metadata, created_at
+               FROM "boom_verification_token"
+               ORDER BY created_at DESC NULLS LAST
+               LIMIT $1 OFFSET $2"#,
+        )
+        .bind(query.per_page)
+        .bind(offset)
+        .fetch_all(db_pool)
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Dashboard list_keys query failed: {}", e);
+                return (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal error",
+                )
+                    .into_response();
+            }
+        };
+
+        let total: (i64,) =
+            sqlx::query_as(r#"SELECT COUNT(*) FROM "boom_verification_token""#)
+                .fetch_one(db_pool)
+                .await
+                .unwrap_or((0,));
+
+        (rows, total.0)
     };
 
     let keys: Vec<Value> = rows
@@ -228,17 +279,11 @@ pub async fn list_keys(
         })
         .collect();
 
-    // Get total count.
-    let total: (i64,) = sqlx::query_as(r#"SELECT COUNT(*) FROM "boom_verification_token""#)
-        .fetch_one(db_pool)
-        .await
-        .unwrap_or((0,));
-
     Json(json!({
         "keys": keys,
         "page": query.page,
         "per_page": query.per_page,
-        "total": total.0,
+        "total": total,
     }))
     .into_response()
 }
@@ -353,6 +398,8 @@ pub async fn create_key(
 #[derive(Debug, Deserialize)]
 pub struct UpdateKeyRequest {
     pub key_name: Option<String>,
+    pub key_alias: Option<String>,
+    pub user_id: Option<String>,
     pub models: Option<Vec<String>>,
     pub max_budget: Option<f64>,
     pub budget_duration: Option<String>,
@@ -375,6 +422,28 @@ pub async fn update_key(
         }
     };
 
+    // Check key_alias uniqueness if provided.
+    if let Some(ref alias) = req.key_alias {
+        if !alias.is_empty() {
+            let exists: bool = sqlx::query_scalar(
+                r#"SELECT EXISTS(SELECT 1 FROM "boom_verification_token" WHERE key_alias = $1 AND token != $2)"#,
+            )
+            .bind(alias)
+            .bind(&token_hash)
+            .fetch_one(db_pool)
+            .await
+            .unwrap_or(false);
+
+            if exists {
+                return (
+                    axum::http::StatusCode::CONFLICT,
+                    format!("key_alias '{}' already exists", alias),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     let models_list: Option<Vec<String>> = req.models.clone();
 
     let expires: Option<NaiveDateTime> = req
@@ -385,18 +454,22 @@ pub async fn update_key(
     let result = sqlx::query(
         r#"UPDATE "boom_verification_token"
            SET key_name = COALESCE($2, key_name),
-               models = COALESCE($3, models),
-               max_budget = COALESCE($4, max_budget),
-               budget_duration = COALESCE($5, budget_duration),
-               rpm_limit = COALESCE($6, rpm_limit),
-               tpm_limit = COALESCE($7, tpm_limit),
-               expires = COALESCE($8, expires),
-               metadata = COALESCE($9, metadata),
+               key_alias = COALESCE($3, key_alias),
+               user_id = COALESCE($4, user_id),
+               models = COALESCE($5, models),
+               max_budget = COALESCE($6, max_budget),
+               budget_duration = COALESCE($7, budget_duration),
+               rpm_limit = COALESCE($8, rpm_limit),
+               tpm_limit = COALESCE($9, tpm_limit),
+               expires = COALESCE($10, expires),
+               metadata = COALESCE($11, metadata),
                updated_at = NOW()
            WHERE token = $1"#,
     )
     .bind(&token_hash)
     .bind(&req.key_name)
+    .bind(&req.key_alias)
+    .bind(&req.user_id)
     .bind(&models_list)
     .bind(req.max_budget)
     .bind(&req.budget_duration)
