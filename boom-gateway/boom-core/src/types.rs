@@ -240,6 +240,17 @@ pub struct ChatStreamChunk {
     pub created: u64,
     pub model: String,
     pub choices: Vec<StreamChoice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<StreamUsage>,
+}
+
+/// Usage stats returned in the last SSE chunk of a stream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamUsage {
+    pub prompt_tokens: Option<i32>,
+    pub completion_tokens: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

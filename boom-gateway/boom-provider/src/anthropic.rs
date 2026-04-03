@@ -292,6 +292,7 @@ impl Provider for AnthropicProvider {
                                                 },
                                                 finish_reason: None,
                                             }],
+                                            usage: None,
                                         };
                                         if tx.send(Ok(Some(chunk))).await.is_err() {
                                             return;
