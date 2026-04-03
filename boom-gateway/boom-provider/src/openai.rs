@@ -75,9 +75,13 @@ impl Provider for OpenAIProvider {
 
     async fn chat_stream(&self, req: ChatCompletionRequest) -> Result<ChatStream, GatewayError> {
         let mut body = self.build_request(req);
-        // Ensure stream is enabled.
+        // Ensure stream is enabled and request usage in the final chunk.
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".to_string(), serde_json::Value::Bool(true));
+            obj.insert(
+                "stream_options".to_string(),
+                serde_json::json!({ "include_usage": true }),
+            );
         }
 
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));

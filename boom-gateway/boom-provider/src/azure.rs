@@ -87,6 +87,10 @@ impl Provider for AzureProvider {
 
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".to_string(), serde_json::Value::Bool(true));
+            obj.insert(
+                "stream_options".to_string(),
+                serde_json::json!({ "include_usage": true }),
+            );
         }
 
         let mut builder = self.client.post(self.azure_url());
