@@ -186,8 +186,8 @@
         const windowLabel = formatDuration(w.window_secs);
         const limit = w.limit;
         const countLabel = limit != null ? `${w.count} / ${limit}` : `${w.count}`;
-        const pct = limit != null ? Math.min((w.count / limit) * 100, 100) : (w.count > 0 && w.window_secs > 0 ? Math.min((w.elapsed_secs / w.window_secs) * 100, 100) : 0);
-        const fillClass = limit != null && w.count >= limit ? "danger" : limit != null && pct >= 80 ? "warn" : "";
+        const pct = w.count > 0 && w.window_secs > 0 ? Math.min((w.elapsed_secs / w.window_secs) * 100, 100) : 0;
+        const fillClass = limit != null && w.count >= limit ? "danger" : limit != null && w.count / limit >= 0.8 ? "warn" : "";
         html += `<tr>
           <td class="mono">${esc(model)}</td>
           <td>${esc(windowLabel)}</td>
