@@ -235,14 +235,10 @@ pub async fn login(
             remaining_secs = remaining.as_secs(),
             "Login blocked: too many attempts"
         );
-        return (
+        return json_error_response(
             axum::http::StatusCode::TOO_MANY_REQUESTS,
-            format!(
-                "Too many login attempts. Try again in {} seconds.",
-                remaining.as_secs()
-            ),
-        )
-            .into_response();
+            &format!("Too many login attempts. Try again in {} seconds.", remaining.as_secs()),
+        );
     }
 
     // 2. Deserialize body.
@@ -250,30 +246,34 @@ pub async fn login(
     {
         Ok(bytes) => match serde_json::from_slice::<LoginRequest>(&bytes) {
             Ok(req) => req,
-            Err(_) => {
-                return (
+            Err(e) => {
+                tracing::warn!(ip = %client_ip, "Login: invalid JSON body: {}", e);
+                return json_error_response(
                     axum::http::StatusCode::BAD_REQUEST,
                     "Invalid request body",
-                )
-                    .into_response();
+                );
             }
         },
-        Err(_) => {
-            return (
+        Err(e) => {
+            tracing::warn!(ip = %client_ip, "Login: failed to read body: {}", e);
+            return json_error_response(
                 axum::http::StatusCode::BAD_REQUEST,
                 "Failed to read request body",
-            )
-                .into_response();
+            );
         }
     };
+
+    tracing::info!(ip = %client_ip, user_id = %user_id, "Login attempt");
 
     // 3. Admin login: user_id == "admin" + constant-time comparison with master_key.
     if user_id == "admin" {
         let master_key = match &state.master_key {
             Some(k) => k,
             None => {
-                return (axum::http::StatusCode::FORBIDDEN, "Admin login disabled")
-                    .into_response();
+                return json_error_response(
+                    axum::http::StatusCode::FORBIDDEN,
+                    "Admin login disabled",
+                );
             }
         };
 
@@ -281,11 +281,15 @@ pub async fn login(
         let equal = constant_time_eq(api_key.as_bytes(), master_key.as_bytes());
         if !equal {
             let _locked = record_login_failure(&state, &client_ip);
-            return (axum::http::StatusCode::UNAUTHORIZED, "Invalid credentials")
-                .into_response();
+            tracing::warn!(ip = %client_ip, "Admin login: invalid credentials");
+            return json_error_response(
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Invalid credentials",
+            );
         }
 
         clear_login_failures(&state, &client_ip);
+        tracing::info!(ip = %client_ip, "Admin login success");
         return sign_and_respond(&state, "admin".to_string(), "admin".to_string(), String::new());
     }
 
@@ -293,36 +297,74 @@ pub async fn login(
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
-            return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "Database not available")
-                .into_response();
+            tracing::error!("Login failed: no database pool configured");
+            return json_error_response(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Database not available",
+            );
         }
     };
 
     let token_hash = hash_token(&api_key);
 
-    let row: Option<(Option<String>, Option<String>, Option<bool>)> = sqlx::query_as(
+    let row_result: Result<Option<(Option<String>, Option<String>, Option<bool>)>, _> = sqlx::query_as(
         r#"SELECT user_id, key_alias, blocked FROM "boom_verification_token" WHERE token = $1"#,
     )
     .bind(&token_hash)
     .fetch_optional(db_pool)
-    .await
-    .unwrap_or(None);
+    .await;
+
+    let row = match row_result {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(
+                ip = %client_ip,
+                token_hash = &token_hash[..8.min(token_hash.len())],
+                "Login DB query failed: {}",
+                e
+            );
+            return json_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "Database error during login",
+            );
+        }
+    };
 
     let (uid, key_alias, blocked) = match row {
         Some((uid, alias, blk)) => (uid, alias, blk),
         None => {
             let _locked = record_login_failure(&state, &client_ip);
-            return (axum::http::StatusCode::UNAUTHORIZED, "Invalid API key")
-                .into_response();
+            tracing::warn!(
+                ip = %client_ip,
+                token_hash = &token_hash[..8.min(token_hash.len())],
+                "Login: key not found in DB"
+            );
+            return json_error_response(
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Invalid API key",
+            );
         }
     };
 
     // Check blocked.
     if blocked.unwrap_or(false) {
-        return (axum::http::StatusCode::FORBIDDEN, "Key is blocked").into_response();
+        tracing::warn!(
+            ip = %client_ip,
+            token_hash = &token_hash[..8.min(token_hash.len())],
+            "Login: key is blocked"
+        );
+        return json_error_response(
+            axum::http::StatusCode::FORBIDDEN,
+            "Key is blocked",
+        );
     }
 
     clear_login_failures(&state, &client_ip);
+    tracing::info!(
+        ip = %client_ip,
+        alias = ?key_alias,
+        "User login success"
+    );
 
     // Use key_alias as display name, fallback to user_id or "user".
     let display_name = key_alias
@@ -367,7 +409,7 @@ fn sign_and_respond(
         SESSION_COOKIE_NAME, token, SESSION_DURATION_SECS
     );
 
-    let body = serde_json::to_string(&LoginResponse { role, user_id }).unwrap();
+    let body = Json(LoginResponse { role, user_id });
 
     ([(SET_COOKIE, cookie)], body).into_response()
 }
@@ -392,6 +434,12 @@ pub async fn me(session: DashboardSession) -> Json<MeResponse> {
 }
 
 // ── Helpers ────────────────────────────────────────────────
+
+fn json_error_response(status: axum::http::StatusCode, message: &str) -> Response {
+    let mut resp = Json(serde_json::json!({ "error": message })).into_response();
+    *resp.status_mut() = status;
+    resp
+}
 
 pub fn hash_token(token: &str) -> String {
     let mut hasher = Sha256::new();
