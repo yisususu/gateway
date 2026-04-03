@@ -29,6 +29,8 @@ fn new_request_id() -> String {
 // LoggedStream — delays log write until the stream is fully consumed
 // ============================================================
 
+type UsageTracker = std::sync::Arc<std::sync::Mutex<(Option<i32>, Option<i32>)>>;
+
 /// Wrapper stream that writes the request log when dropped (i.e. when the
 /// stream has been fully consumed or the connection is torn down).
 /// This captures the *real* duration for streaming requests instead of
@@ -38,15 +40,17 @@ struct LoggedStream<S> {
     pool: Option<PgPool>,
     log: Option<RequestLog>,
     start: Instant,
+    usage: UsageTracker,
 }
 
 impl<S> LoggedStream<S> {
-    fn new(inner: S, pool: Option<PgPool>, log: RequestLog, start: Instant) -> Self {
+    fn new(inner: S, pool: Option<PgPool>, log: RequestLog, start: Instant, usage: UsageTracker) -> Self {
         Self {
             inner,
             pool,
             log: Some(log),
             start,
+            usage,
         }
     }
 }
@@ -55,6 +59,11 @@ impl<S> Drop for LoggedStream<S> {
     fn drop(&mut self) {
         if let Some(mut log) = self.log.take() {
             log.duration_ms = Some(self.start.elapsed().as_millis() as i32);
+            // Read accumulated usage from tracker (written by stream mapper).
+            if let Ok(guard) = self.usage.lock() {
+                log.input_tokens = guard.0;
+                log.output_tokens = guard.1;
+            }
             log_request(self.pool.clone(), log);
         }
     }
@@ -160,7 +169,8 @@ async fn chat_completions_inner(
             log_error(&state, &identity, &model, api_path, true, start, &e, Some(request_id.clone()));
             GatewayErrorReply(e, true)
         })?;
-        let sse_stream = sse_stream_from_chat_stream(stream);
+        let usage = UsageTracker::default();
+        let sse_stream = sse_stream_from_chat_stream(stream, usage.clone());
         let guarded = GuardedStream::new(sse_stream, guard);
 
         let api_path_owned = api_path.to_string();
@@ -179,7 +189,7 @@ async fn chat_completions_inner(
             input_tokens: None,
             output_tokens: None,
             duration_ms: None,
-        }, start);
+        }, start, usage);
 
         let response = Sse::new(logged).keep_alive(KeepAlive::default());
         Ok(response.into_response())
@@ -892,9 +902,17 @@ fn log_request_summary(
 
 fn sse_stream_from_chat_stream(
     stream: ChatStream,
+    usage: UsageTracker,
 ) -> impl futures::Stream<Item = Result<Event, Infallible>> {
-    stream.map(|result| match result {
+    stream.map(move |result| match result {
         Ok(chunk) => {
+            // Extract usage from the last chunk (OpenAI sends usage in the final chunk).
+            if let Some(ref u) = chunk.usage {
+                if let Ok(mut g) = usage.lock() {
+                    g.0 = u.prompt_tokens;
+                    g.1 = u.completion_tokens;
+                }
+            }
             let data = serde_json::to_string(&chunk).unwrap_or_default();
             Ok(Event::default().data(data))
         }
@@ -990,7 +1008,8 @@ pub async fn messages(
             log_error(&state, &identity, &model, "/v1/messages", true, start, &e, Some(request_id.clone()));
             AnthropicErrorReply(e, true)
         })?;
-        let sse_stream = sse_stream_from_anthropic_chat_stream(stream, model.clone());
+        let usage = UsageTracker::default();
+        let sse_stream = sse_stream_from_anthropic_chat_stream(stream, model.clone(), usage.clone());
         let guarded = GuardedStream::new(sse_stream, guard);
 
         // Wrap with LoggedStream — log is written when stream finishes (Drop).
@@ -1009,7 +1028,7 @@ pub async fn messages(
             input_tokens: None,
             output_tokens: None,
             duration_ms: None, // filled by LoggedStream::drop
-        }, start);
+        }, start, usage);
 
         let response = Sse::new(logged).keep_alive(KeepAlive::default());
         Ok(response.into_response())
@@ -1052,6 +1071,7 @@ pub async fn messages(
 fn sse_stream_from_anthropic_chat_stream(
     stream: ChatStream,
     model: String,
+    usage: UsageTracker,
 ) -> impl futures::Stream<Item = Result<Event, Infallible>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
 
@@ -1062,6 +1082,13 @@ fn sse_stream_from_anthropic_chat_stream(
         while let Some(result) = stream.next().await {
             match result {
                 Ok(chunk) => {
+                    // Extract usage from the chunk (OpenAI sends usage in the final chunk).
+                    if let Some(ref u) = chunk.usage {
+                        if let Ok(mut g) = usage.lock() {
+                            g.0 = u.prompt_tokens;
+                            g.1 = u.completion_tokens;
+                        }
+                    }
                     let events = transcoder.transcode(&chunk);
                     for ev in events {
                         let axum_event = Event::default()
@@ -1299,7 +1326,8 @@ async fn forward_pass_through(
         // Wrap with LoggedStream if deferred log is provided.
         let sse_stream: Box<dyn futures::Stream<Item = Result<Event, Infallible>> + Send + Unpin> =
             if let Some(sl) = stream_log {
-                Box::new(LoggedStream::new(sse_stream, sl.pool, sl.log, sl.start))
+                let usage = UsageTracker::default();
+                Box::new(LoggedStream::new(sse_stream, sl.pool, sl.log, sl.start, usage))
             } else {
                 Box::new(sse_stream)
             };
