@@ -106,6 +106,73 @@ pub struct ChatCompletionRequest {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+// ============================================================
+// Legacy Completion Request (OpenAI /v1/completions)
+// ============================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletionRequest {
+    pub model: String,
+    pub prompt: CompletionPrompt,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop: Option<StopSequence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub n: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suffix: Option<String>,
+    /// Catch-all for provider-specific parameters.
+    #[serde(default, flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// The `prompt` field in legacy completions: string, array of strings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CompletionPrompt {
+    String(String),
+    Strings(Vec<String>),
+}
+
+impl CompletionRequest {
+    /// Convert a legacy completion request into a ChatCompletionRequest
+    /// by wrapping the prompt in a user message.
+    pub fn into_chat_request(self) -> ChatCompletionRequest {
+        let content = match &self.prompt {
+            CompletionPrompt::String(s) => s.clone(),
+            CompletionPrompt::Strings(v) => v.join("\n"),
+        };
+        ChatCompletionRequest {
+            model: self.model,
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: MessageContent::Text(content),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            temperature: self.temperature,
+            top_p: self.top_p,
+            max_tokens: self.max_tokens,
+            max_completion_tokens: None,
+            stream: self.stream,
+            stop: self.stop,
+            n: self.n,
+            tools: None,
+            tool_choice: None,
+            response_format: None,
+            extra: self.extra,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum StopSequence {

@@ -47,6 +47,9 @@ pub enum GatewayError {
     #[error("Upstream error ({status}): {message}")]
     UpstreamError { status: u16, message: String },
 
+    #[error("Endpoint not supported: {0}")]
+    NotSupported(String),
+
     #[error("Internal error: {0}")]
     InternalError(String),
 }
@@ -66,6 +69,7 @@ impl GatewayError {
             Self::ModelNotAllowed(_) => 403,
             Self::UpstreamTimeout => 504,
             Self::UpstreamError { .. } => 502,
+            Self::NotSupported(_) => 404,
             Self::InternalError(_) => 500,
         }
     }
@@ -83,6 +87,7 @@ impl GatewayError {
             Self::ModelNotAllowed(_) => "model_not_allowed",
             Self::UpstreamTimeout => "timeout",
             Self::UpstreamError { .. } => "upstream_error",
+            Self::NotSupported(_) => "not_supported",
             Self::ProviderError(_) => "provider_error",
             Self::ConfigError(_) | Self::InternalError(_) => "internal_error",
         }

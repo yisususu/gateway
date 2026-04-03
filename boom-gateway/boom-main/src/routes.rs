@@ -77,6 +77,16 @@ pub async fn chat_completions(
     auth: RequiredAuth,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<impl IntoResponse, GatewayErrorReply> {
+    chat_completions_inner(state, auth, req, "/v1/chat/completions").await
+}
+
+/// Shared inner logic for chat completions and legacy completions.
+async fn chat_completions_inner(
+    state: AppState,
+    auth: RequiredAuth,
+    req: ChatCompletionRequest,
+    api_path: &str,
+) -> Result<impl IntoResponse, GatewayErrorReply> {
     let start = Instant::now();
     let request_id = new_request_id();
     let identity = auth.identity();
@@ -84,12 +94,12 @@ pub async fn chat_completions(
     let model = req.model.clone();
     let is_stream = req.stream.unwrap_or(false);
 
-    tracing::info!(request_id = %request_id, model = %model, stream = is_stream, "chat_completions request started");
+    tracing::info!(request_id = %request_id, model = %model, stream = is_stream, path = api_path, "chat_completions request started");
 
     // 1. Model access check (deployment-aware, alias-aware).
     check_model_access(identity, &req.model, &state.deployment_store, &state.alias_store)
         .map_err(|e| {
-            log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e, Some(request_id.clone()));
+            log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()));
             GatewayErrorReply(e, false)
         })?;
 
@@ -118,7 +128,7 @@ pub async fn chat_completions(
     )
     .await
     .map_err(|e| {
-        log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e, Some(request_id.clone()));
+        log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()));
         GatewayErrorReply(e, false)
     })?;
 
@@ -132,7 +142,7 @@ pub async fn chat_completions(
     }).sum();
     log_request_summary(
         &request_id, identity, &model, input_chars, is_stream,
-        "/v1/chat/completions", &rl_info,
+        api_path, &rl_info,
     );
 
     // 3. Select provider deployment.
@@ -140,20 +150,20 @@ pub async fn chat_completions(
         .select_deployment(&req.model)
         .ok_or_else(|| {
             let e = GatewayError::ModelNotFound(req.model.clone());
-            log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e, Some(request_id.clone()));
+            log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()));
             GatewayErrorReply(e, false)
         })?;
 
     // 4. Route to provider (streaming or non-streaming).
     if is_stream {
         let stream = provider.chat_stream(req).await.map_err(|e| {
-            log_error(&state, &identity, &model, "/v1/chat/completions", true, start, &e, Some(request_id.clone()));
+            log_error(&state, &identity, &model, api_path, true, start, &e, Some(request_id.clone()));
             GatewayErrorReply(e, true)
         })?;
         let sse_stream = sse_stream_from_chat_stream(stream);
         let guarded = GuardedStream::new(sse_stream, guard);
 
-        // Wrap with LoggedStream — log is written when stream finishes (Drop).
+        let api_path_owned = api_path.to_string();
         let logged = LoggedStream::new(guarded, state.db_pool.clone(), RequestLog {
             request_id: Some(request_id),
             key_hash: identity.key_hash.clone(),
@@ -161,21 +171,21 @@ pub async fn chat_completions(
             key_alias: identity.key_alias.clone(),
             team_id: identity.team_id.clone(),
             model,
-            api_path: "/v1/chat/completions".to_string(),
+            api_path: api_path_owned,
             is_stream: true,
             status_code: 200,
             error_type: None,
             error_message: None,
             input_tokens: None,
             output_tokens: None,
-            duration_ms: None, // filled by LoggedStream::drop
+            duration_ms: None,
         }, start);
 
         let response = Sse::new(logged).keep_alive(KeepAlive::default());
         Ok(response.into_response())
     } else {
         let response = provider.chat(req).await.map_err(|e| {
-            log_error(&state, &identity, &model, "/v1/chat/completions", false, start, &e, Some(request_id.clone()));
+            log_error(&state, &identity, &model, api_path, false, start, &e, Some(request_id.clone()));
             GatewayErrorReply(e, false)
         })?;
 
@@ -192,7 +202,7 @@ pub async fn chat_completions(
                 key_alias: identity.key_alias.clone(),
                 team_id: identity.team_id.clone(),
                 model,
-                api_path: "/v1/chat/completions".to_string(),
+                api_path: api_path.to_string(),
                 is_stream: false,
                 status_code: 200,
                 error_type: None,
@@ -203,9 +213,21 @@ pub async fn chat_completions(
             },
         );
 
-        // guard dropped here (non-streaming: request processing complete).
         Ok(Json(response).into_response())
     }
+}
+
+// ============================================================
+// Legacy Completions (OpenAI /v1/completions, /completions)
+// ============================================================
+
+pub async fn completions(
+    State(state): State<AppState>,
+    auth: RequiredAuth,
+    Json(req): Json<CompletionRequest>,
+) -> Result<impl IntoResponse, GatewayErrorReply> {
+    let chat_req = req.into_chat_request();
+    chat_completions_inner(state, auth, chat_req, "/v1/completions").await
 }
 
 // ============================================================
@@ -279,6 +301,74 @@ pub async fn list_models(
         "data": visible,
     })))
 }
+
+// ============================================================
+// Get Single Model
+// ============================================================
+
+pub async fn get_model(
+    State(state): State<AppState>,
+    auth: RequiredAuth,
+    Path(model_id): Path<String>,
+) -> Result<Json<serde_json::Value>, GatewayErrorReply> {
+    let identity = auth.identity();
+
+    // Collect all visible model names (same logic as list_models).
+    let all_names: Vec<String> = state.deployment_store.model_names()
+        .into_iter()
+        .filter(|k| k != "*")
+        .chain(state.alias_store.visible_names())
+        .collect();
+
+    let is_accessible = if identity.models.is_empty() {
+        true // Unrestricted key — check existence only.
+    } else {
+        // Restricted key — check if model_id is in the accessible set.
+        let accessible: Vec<&String> = all_names.iter().filter(|name| {
+            identity.models.iter().any(|m| *m == **name && m != "*")
+                || state.alias_store.resolve(name)
+                    .map(|target| identity.models.iter().any(|m| *m == target && m != "*"))
+                    .unwrap_or(false)
+                || identity.models.iter().any(|allowed| {
+                    state.alias_store.resolve(allowed)
+                        .map(|target| target == **name)
+                        .unwrap_or(false)
+                })
+        }).collect();
+        accessible.iter().any(|name| ***name == model_id)
+    };
+
+    if !is_accessible || !all_names.iter().any(|n| n == &model_id) {
+        return Err(GatewayErrorReply(GatewayError::ModelNotFound(model_id), false));
+    }
+
+    Ok(Json(serde_json::json!({
+        "id": model_id,
+        "object": "model",
+        "created": 0,
+        "owned_by": "boom-gateway",
+    })))
+}
+
+// ============================================================
+// Unsupported Endpoints (return proper OpenAI-style errors)
+// ============================================================
+
+macro_rules! unsupported_handler {
+    ($name:ident, $label:expr) => {
+        pub async fn $name(
+            State(_state): State<AppState>,
+            _auth: RequiredAuth,
+        ) -> Result<axum::http::StatusCode, GatewayErrorReply> {
+            Err(GatewayErrorReply(GatewayError::NotSupported($label.to_string()), false))
+        }
+    };
+}
+
+unsupported_handler!(embeddings, "The /v1/embeddings endpoint is not supported by BooMGateway");
+unsupported_handler!(audio_speech, "The /v1/audio/speech endpoint is not supported by BooMGateway");
+unsupported_handler!(audio_transcriptions, "The /v1/audio/transcriptions endpoint is not supported by BooMGateway");
+unsupported_handler!(moderations, "The /v1/moderations endpoint is not supported by BooMGateway");
 
 // ============================================================
 // Health Check
@@ -1519,4 +1609,139 @@ pub async fn pt_messages(
         Ok(response) => Ok(response),
         Err(GatewayErrorReply(e, is_stream)) => Err(AnthropicErrorReply(e, is_stream)),
     }
+}
+
+// ============================================================
+// Pass-through Legacy Completions
+// ============================================================
+
+/// Pass-through handler for `/v1/completions` and `/completions`.
+/// Parses the body as CompletionRequest for model extraction + access check,
+/// then forwards the raw bytes to upstream at `/v1/completions`.
+pub async fn pt_completions(
+    State(state): State<AppState>,
+    auth: RequiredAuth,
+    req: axum::http::Request<axum::body::Body>,
+) -> Result<impl IntoResponse, GatewayErrorReply> {
+    let start = Instant::now();
+    let request_id = new_request_id();
+    let (parts, body) = req.into_parts();
+    let bytes = axum::body::to_bytes(body, 10_485_760).await.map_err(|e| {
+        let err = GatewayError::ProviderError(format!("Failed to read request body: {}", e));
+        let identity = auth.identity();
+        log_error(&state, &identity, "unknown", "/v1/completions", false, start, &err, Some(request_id.clone()));
+        GatewayErrorReply(err, false)
+    })?;
+
+    // Parse model name for access check (legacy completion format).
+    let comp_req: CompletionRequest = serde_json::from_slice(&bytes).map_err(|e| {
+        let err = GatewayError::ProviderError(format!("Invalid request body: {}", e));
+        let identity = auth.identity();
+        log_error(&state, &identity, "unknown", "/v1/completions", false, start, &err, Some(request_id.clone()));
+        GatewayErrorReply(err, false)
+    })?;
+
+    let identity = auth.identity();
+    let inner = state.inner.load();
+    let model = comp_req.model.clone();
+    let is_stream = comp_req.stream.unwrap_or(false);
+
+    tracing::info!(request_id = %request_id, model = %model, stream = is_stream, "pt_completions request started");
+
+    // 1. Model access check.
+    check_model_access(identity, &model, &state.deployment_store, &state.alias_store)
+        .map_err(|e| {
+            log_error(&state, &identity, &model, "/v1/completions", is_stream, start, &e, Some(request_id.clone()));
+            GatewayErrorReply(e, false)
+        })?;
+
+    // 2. Rate limiting.
+    let window_limits: Vec<(u64, u64)> = inner
+        .config
+        .rate_limit
+        .window_limits
+        .iter()
+        .filter_map(|w| {
+            if w.len() >= 2 {
+                Some((w[0], w[1]))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let (_guard, rl_info) = check_plan_or_default_limits(
+        &state.plan_store,
+        &state.limiter,
+        &identity.key_hash,
+        &model,
+        identity.rpm_limit,
+        &window_limits,
+    )
+    .await
+    .map_err(|e| {
+        log_error(&state, &identity, &model, "/v1/completions", is_stream, start, &e, Some(request_id.clone()));
+        GatewayErrorReply(e, false)
+    })?;
+
+    let input_chars: usize = match &comp_req.prompt {
+        CompletionPrompt::String(s) => s.len(),
+        CompletionPrompt::Strings(v) => v.iter().map(|s| s.len()).sum(),
+    };
+    log_request_summary(
+        &request_id, identity, &model, input_chars, is_stream,
+        "/v1/completions", &rl_info,
+    );
+
+    // 3. Forward to upstream.
+    let stream_log = if is_stream {
+        Some(DeferredStreamLog {
+            pool: state.db_pool.clone(),
+            log: RequestLog {
+                request_id: Some(request_id.clone()),
+                key_hash: identity.key_hash.clone(),
+                key_name: identity.key_name.clone(),
+                key_alias: identity.key_alias.clone(),
+                team_id: identity.team_id.clone(),
+                model: model.clone(),
+                api_path: "/v1/completions".to_string(),
+                is_stream: true,
+                status_code: 200,
+                error_type: None,
+                error_message: None,
+                input_tokens: None,
+                output_tokens: None,
+                duration_ms: None,
+            },
+            start,
+        })
+    } else {
+        None
+    };
+
+    let result = forward_pass_through(&state, &parts.headers, &bytes, "/v1/completions", stream_log).await;
+
+    if !is_stream {
+        log_request(
+            state.db_pool.clone(),
+            RequestLog {
+                request_id: Some(request_id),
+                key_hash: identity.key_hash.clone(),
+                key_name: identity.key_name.clone(),
+                key_alias: identity.key_alias.clone(),
+                team_id: identity.team_id.clone(),
+                model,
+                api_path: "/v1/completions".to_string(),
+                is_stream: false,
+                status_code: if result.is_ok() { 200 } else { 502 },
+                error_type: result.as_ref().err().map(|e| e.0.error_type().to_string()),
+                error_message: result.as_ref().err().map(|e| e.0.to_string()),
+                input_tokens: None,
+                output_tokens: None,
+                duration_ms: Some(start.elapsed().as_millis() as i32),
+            },
+        );
+    }
+
+    result
 }
