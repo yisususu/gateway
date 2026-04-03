@@ -1273,6 +1273,7 @@ struct LogRow {
     request_id: Option<String>,
     key_hash: String,
     key_name: Option<String>,
+    key_alias: Option<String>,
     team_id: Option<String>,
     model: String,
     api_path: String,
@@ -1329,7 +1330,7 @@ pub async fn list_logs(
     let offset_idx = param_idx;
 
     let sql = format!(
-        r#"SELECT request_id, key_hash, key_name, team_id, model, api_path,
+        r#"SELECT request_id, key_hash, key_name, key_alias, team_id, model, api_path,
                   is_stream, status_code, error_type, error_message,
                   input_tokens, output_tokens, duration_ms, created_at
            FROM boom_request_log
@@ -1381,6 +1382,7 @@ pub async fn list_logs(
                 "request_id": r.request_id,
                 "key_hash": r.key_hash,
                 "key_name": r.key_name,
+                "key_alias": r.key_alias,
                 "team_id": r.team_id,
                 "model": r.model,
                 "api_path": r.api_path,

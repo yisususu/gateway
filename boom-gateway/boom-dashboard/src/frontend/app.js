@@ -822,12 +822,11 @@
     const wrap = document.getElementById("logs-table-wrap");
     if (logs.length === 0) { wrap.innerHTML = "<p>No request logs found.</p>"; return; }
     wrap.innerHTML = `<table>
-      <tr><th>Time</th><th>Req ID</th><th>Key Alias</th><th>Key</th><th>Model</th><th>Path</th><th>Status</th><th>Stream</th><th>Input</th><th>Output</th><th>Duration</th><th>Error</th></tr>
+      <tr><th>Time</th><th>Req ID</th><th>Key Alias</th><th>Model</th><th>Path</th><th>Status</th><th>Stream</th><th>Input</th><th>Output</th><th>Duration</th><th>Error</th></tr>
       ${logs.map((l) => `<tr>
         <td class="mono">${formatTimestamp(l.created_at)}</td>
         <td class="mono" title="${esc(l.request_id || "")}">${esc((l.request_id || "").substring(0, 8)) || "-"}</td>
-        <td>${esc(l.key_name || "-")}</td>
-        <td class="mono" title="${esc(l.key_hash)}">${esc((l.key_hash || "").substring(0, 12))}</td>
+        <td>${esc(l.key_alias || l.key_name || "-")}</td>
         <td class="mono">${esc(l.model)}</td>
         <td class="mono">${esc(l.api_path)}</td>
         <td>${l.status_code >= 400 ? '<span style="color:var(--danger)">' + l.status_code + '</span>' : l.status_code}</td>

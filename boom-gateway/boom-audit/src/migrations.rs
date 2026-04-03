@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS boom_request_log (
     request_id     TEXT,
     key_hash       TEXT NOT NULL,
     key_name       TEXT,
+    key_alias      TEXT,
     team_id        TEXT,
     model          TEXT NOT NULL,
     api_path       TEXT NOT NULL,
@@ -35,5 +36,11 @@ pub async fn run_request_log_migration(pool: &sqlx::PgPool) -> Result<(), sqlx::
             sqlx::query(trimmed).execute(pool).await?;
         }
     }
+    // Add key_alias column to existing tables (no-op if already present).
+    let _ = sqlx::query(
+        r#"ALTER TABLE boom_request_log ADD COLUMN IF NOT EXISTS key_alias TEXT"#,
+    )
+    .execute(pool)
+    .await;
     Ok(())
 }

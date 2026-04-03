@@ -9,6 +9,7 @@ pub struct RequestLog {
     pub request_id: Option<String>,
     pub key_hash: String,
     pub key_name: Option<String>,
+    pub key_alias: Option<String>,
     pub team_id: Option<String>,
     pub model: String,
     pub api_path: String,
@@ -28,14 +29,15 @@ pub fn log_request(pool: Option<PgPool>, log: RequestLog) {
         tokio::spawn(async move {
             if let Err(e) = sqlx::query(
                 r#"INSERT INTO boom_request_log
-                   (request_id, key_hash, key_name, team_id, model, api_path,
+                   (request_id, key_hash, key_name, key_alias, team_id, model, api_path,
                     is_stream, status_code, error_type, error_message,
                     input_tokens, output_tokens, duration_ms)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#,
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"#,
             )
             .bind(&log.request_id)
             .bind(&log.key_hash)
             .bind(&log.key_name)
+            .bind(&log.key_alias)
             .bind(&log.team_id)
             .bind(&log.model)
             .bind(&log.api_path)
@@ -72,6 +74,7 @@ pub fn log_error(
             request_id,
             key_hash: identity.key_hash.clone(),
             key_name: identity.key_name.clone(),
+            key_alias: identity.key_alias.clone(),
             team_id: identity.team_id.clone(),
             model: model.to_string(),
             api_path: api_path.to_string(),
