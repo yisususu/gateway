@@ -194,12 +194,6 @@
         <td>${l.error_message ? '<span style="color:var(--danger)" title="' + esc(l.error_message) + '">' + esc((l.error_type || "").substring(0, 20)) + '</span>' : "-"}</td>
       </tr>`).join("")}
     </table>`;
-        <td>${l.input_tokens != null ? formatNumber(l.input_tokens) : "-"}</td>
-        <td>${l.output_tokens != null ? formatNumber(l.output_tokens) : "-"}</td>
-        <td>${l.duration_ms != null ? l.duration_ms + "ms" : "-"}</td>
-        <td>${l.error_message ? '<span style="color:var(--danger)" title="' + esc(l.error_message) + '">' + esc((l.error_type || "").substring(0, 20)) + '</span>' : "-"}</td>
-      </tr>`).join("")}
-    </table>`;
   }
 
   function renderUserLogsPagination(data) {
