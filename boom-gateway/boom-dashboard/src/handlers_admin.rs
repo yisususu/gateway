@@ -1266,6 +1266,13 @@ pub struct ListLogsQuery {
     pub key_hash: Option<String>,
     pub model: Option<String>,
     pub status: Option<String>,
+    // Column-level filters (partial match via ILIKE where applicable)
+    pub request_id: Option<String>,
+    pub key_alias: Option<String>,
+    pub api_path: Option<String>,
+    pub status_code: Option<i16>,
+    pub stream: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1305,18 +1312,54 @@ pub async fn list_logs(
     let mut where_clauses = Vec::new();
     let mut param_idx = 1u32;
 
-    let key_hash_param = if query.key_hash.is_some() { let i = param_idx; param_idx += 1; Some(i) } else { None };
-    let model_param = if query.model.is_some() { let i = param_idx; param_idx += 1; Some(i) } else { None };
-    let status_param = if query.status.as_deref() == Some("error") { let i = param_idx; param_idx += 1; Some(i) } else { None };
+    // Helper: register a param slot, return its index.
+    macro_rules! slot {
+        ($field:expr) => {
+            if $field.is_some() { let i = param_idx; param_idx += 1; Some(i) } else { None }
+        };
+    }
+
+    let key_hash_param   = slot!(query.key_hash);
+    let model_param      = slot!(query.model);
+    let status_param     = if query.status.as_deref() == Some("error") { let i = param_idx; param_idx += 1; Some(i) } else { None };
+    let request_id_param = slot!(query.request_id);
+    let key_alias_param  = slot!(query.key_alias);
+    let api_path_param   = slot!(query.api_path);
+    let status_code_param= slot!(query.status_code);
+    // stream is handled as a static WHERE clause (no param slot needed).
+    let error_param      = slot!(query.error);
 
     if query.key_hash.is_some() {
         where_clauses.push(format!("key_hash = ${}", key_hash_param.unwrap()));
     }
     if query.model.is_some() {
-        where_clauses.push(format!("model = ${}", model_param.unwrap()));
+        where_clauses.push(format!("model ILIKE ${}", model_param.unwrap()));
     }
     if query.status.as_deref() == Some("error") {
         where_clauses.push(format!("status_code != ${}", status_param.unwrap()));
+    }
+    if query.request_id.is_some() {
+        where_clauses.push(format!("request_id ILIKE ${}", request_id_param.unwrap()));
+    }
+    if query.key_alias.is_some() {
+        where_clauses.push(format!("(key_alias ILIKE ${0} OR key_name ILIKE ${0})", key_alias_param.unwrap()));
+    }
+    if query.api_path.is_some() {
+        where_clauses.push(format!("api_path ILIKE ${}", api_path_param.unwrap()));
+    }
+    if query.status_code.is_some() {
+        where_clauses.push(format!("status_code = ${}", status_code_param.unwrap()));
+    }
+    if query.stream.is_some() {
+        let s = query.stream.as_deref().unwrap().to_lowercase();
+        if s == "yes" || s == "true" || s == "1" {
+            where_clauses.push("is_stream = true".to_string());
+        } else if s == "no" || s == "false" || s == "0" {
+            where_clauses.push("is_stream = false".to_string());
+        }
+    }
+    if query.error.is_some() {
+        where_clauses.push(format!("error_message ILIKE ${}", error_param.unwrap()));
     }
 
     let where_sql = if where_clauses.is_empty() {
@@ -1346,17 +1389,46 @@ pub async fn list_logs(
     let mut q = sqlx::query_as::<_, LogRow>(&sql);
     let mut cq = sqlx::query_scalar::<_, i64>(&count_sql);
 
+    // Pre-build LIKE patterns so they outlive the bind chain.
+    let model_pattern      = query.model.as_ref().map(|v| format!("%{}%", v));
+    let request_id_pattern = query.request_id.as_ref().map(|v| format!("%{}%", v));
+    let key_alias_pattern  = query.key_alias.as_ref().map(|v| format!("%{}%", v));
+    let api_path_pattern   = query.api_path.as_ref().map(|v| format!("%{}%", v));
+    let error_pattern      = query.error.as_ref().map(|v| format!("%{}%", v));
+
+    // Bind parameters (order must match slot allocation above).
     if let Some(ref v) = query.key_hash {
-        q = q.bind(v);
-        cq = cq.bind(v);
+        q = q.bind(v.clone());
+        cq = cq.bind(v.clone());
     }
-    if let Some(ref v) = query.model {
-        q = q.bind(v);
-        cq = cq.bind(v);
+    if let Some(ref p) = model_pattern {
+        q = q.bind(p.clone());
+        cq = cq.bind(p.clone());
     }
     if query.status.as_deref() == Some("error") {
         q = q.bind(200i16);
         cq = cq.bind(200i16);
+    }
+    if let Some(ref p) = request_id_pattern {
+        q = q.bind(p.clone());
+        cq = cq.bind(p.clone());
+    }
+    if let Some(ref p) = key_alias_pattern {
+        q = q.bind(p.clone());
+        cq = cq.bind(p.clone());
+    }
+    if let Some(ref p) = api_path_pattern {
+        q = q.bind(p.clone());
+        cq = cq.bind(p.clone());
+    }
+    if let Some(v) = query.status_code {
+        q = q.bind(v);
+        cq = cq.bind(v);
+    }
+    // stream is handled as a static WHERE clause (no bind needed).
+    if let Some(ref p) = error_pattern {
+        q = q.bind(p.clone());
+        cq = cq.bind(p.clone());
     }
 
     q = q.bind(query.per_page).bind(offset);

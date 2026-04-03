@@ -122,7 +122,7 @@
     else if (section === "admin-plans") loadPlans();
     else if (section === "admin-keys") { setupKeysSearch(); loadKeys(); }
     else if (section === "admin-assignments") loadAssignments();
-    else if (section === "admin-logs") loadLogs();
+    else if (section === "admin-logs") { setupLogsFilters(); loadLogs(); }
     else if (section === "admin-config") loadConfig();
   }
 
@@ -805,11 +805,37 @@
 
   // ── Admin: Logs ──────────────────────────────────────
   let logsPage = 1;
+  let logsFilters = {};
+  let logsFiltersTimer = null;
+  let logsFiltersSetup = false;
+
+  function setupLogsFilters() {
+    if (logsFiltersSetup) return;
+    logsFiltersSetup = true;
+    // Restore any previously typed values after re-render.
+    const wrap = document.getElementById("logs-table-wrap");
+    if (!wrap) return;
+    wrap.addEventListener("input", (e) => {
+      if (!e.target.classList.contains("col-filter")) return;
+      clearTimeout(logsFiltersTimer);
+      logsFiltersTimer = setTimeout(() => {
+        const col = e.target.dataset.col;
+        const val = e.target.value.trim();
+        if (val) { logsFilters[col] = val; } else { delete logsFilters[col]; }
+        logsPage = 1;
+        loadLogs();
+      }, 400);
+    });
+  }
 
   async function loadLogs(page) {
     if (page !== undefined) logsPage = page;
     try {
-      const data = await api(`/admin/logs?page=${logsPage}&per_page=50`);
+      let url = `/admin/logs?page=${logsPage}&per_page=50`;
+      for (const [k, v] of Object.entries(logsFilters)) {
+        url += `&${encodeURIComponent(k)}=${encodeURIComponent(v)}`;
+      }
+      const data = await api(url);
       renderLogsTable(data.logs || []);
       renderLogsPagination(data);
     } catch (err) {
@@ -818,11 +844,32 @@
     }
   }
 
+  const LOGS_FILTER_COLS = [
+    { col: "",           placeholder: "",     label: "Time" },
+    { col: "request_id", placeholder: "filter", label: "Req ID" },
+    { col: "key_alias",  placeholder: "filter", label: "Key Alias" },
+    { col: "model",      placeholder: "filter", label: "Model" },
+    { col: "api_path",   placeholder: "filter", label: "Path" },
+    { col: "status_code",placeholder: "filter", label: "Status" },
+    { col: "stream",     placeholder: "filter", label: "Stream" },
+    { col: "",           placeholder: "",     label: "Input" },
+    { col: "",           placeholder: "",     label: "Output" },
+    { col: "",           placeholder: "",     label: "Duration" },
+    { col: "error",      placeholder: "filter", label: "Error" },
+  ];
+
   function renderLogsTable(logs) {
     const wrap = document.getElementById("logs-table-wrap");
     if (logs.length === 0) { wrap.innerHTML = "<p>No request logs found.</p>"; return; }
+    const filterRow = LOGS_FILTER_COLS.map(f =>
+      f.col
+        ? `<td><input class="col-filter" data-col="${f.col}" placeholder="${f.placeholder}" value="${esc(logsFilters[f.col] || "")}"></td>`
+        : "<td></td>"
+    ).join("");
+    const headerRow = LOGS_FILTER_COLS.map(f => `<th>${f.label}</th>`).join("");
     wrap.innerHTML = `<table>
-      <tr><th>Time</th><th>Req ID</th><th>Key Alias</th><th>Model</th><th>Path</th><th>Status</th><th>Stream</th><th>Input</th><th>Output</th><th>Duration</th><th>Error</th></tr>
+      <tr class="filter-row">${filterRow}</tr>
+      <tr>${headerRow}</tr>
       ${logs.map((l) => `<tr>
         <td class="mono">${formatTimestamp(l.created_at)}</td>
         <td class="mono" title="${esc(l.request_id || "")}">${esc((l.request_id || "").substring(0, 8)) || "-"}</td>
