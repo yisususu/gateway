@@ -38,6 +38,10 @@ pub fn build_router<S: Clone + Send + Sync + 'static>(state: DashboardState) -> 
             "/dashboard/api/user/key-info",
             get(handlers_user::get_key_info),
         )
+        .route(
+            "/dashboard/api/user/logs",
+            get(handlers_user::get_user_logs),
+        )
         // Admin — Plan management.
         .route(
             "/dashboard/api/admin/plans",

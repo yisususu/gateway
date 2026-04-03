@@ -1,5 +1,8 @@
+use axum::extract::Query;
+use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use axum::Json;
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::auth::DashboardSession;
@@ -154,31 +157,118 @@ pub async fn get_key_info(
     }
 }
 
-/// Query aggregated token usage from litellm's SpendLogs table.
-/// Returns (input, output) token counts. Returns (None, None) if the table
-/// doesn't exist or the query fails.
+/// Query aggregated token usage from our own boom_request_log table.
+/// Returns (input, output) token counts.
 async fn query_token_usage(
     pool: &sqlx::PgPool,
     key_hash: &str,
 ) -> (Option<i64>, Option<i64>) {
-    // SUM always produces a row; COALESCE handles the no-matches case.
-    // ::BIGINT ensures sqlx can decode into i64 regardless of source column type.
-    let row: Option<(i64, i64)> = sqlx::query_as(
-        r#"SELECT COALESCE(SUM(prompt_tokens), 0)::BIGINT,
-                  COALESCE(SUM(completion_tokens), 0)::BIGINT
-           FROM "LiteLLM_SpendLogs" WHERE api_key = $1"#,
+    let row: (i64, i64) = sqlx::query_as(
+        r#"SELECT COALESCE(SUM(input_tokens), 0)::BIGINT,
+                  COALESCE(SUM(output_tokens), 0)::BIGINT
+           FROM boom_request_log WHERE key_hash = $1"#,
     )
     .bind(key_hash)
     .fetch_one(pool)
     .await
-    .ok();
+    .unwrap_or((0, 0));
 
-    match row {
-        Some((input, output)) => {
-            // If both are 0 the table exists but has no data for this key.
-            // Still return the values so the frontend can show "0".
-            (Some(input), Some(output))
+    (Some(row.0), Some(row.1))
+}
+
+// ── GET /dashboard/api/user/logs ─────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct UserLogsQuery {
+    #[serde(default = "default_page")]
+    pub page: i64,
+    #[serde(default = "default_per_page")]
+    pub per_page: i64,
+}
+
+fn default_page() -> i64 { 1 }
+fn default_per_page() -> i64 { 50 }
+
+#[derive(Debug, sqlx::FromRow)]
+struct UserLogRow {
+    model: String,
+    api_path: String,
+    is_stream: bool,
+    status_code: i16,
+    input_tokens: Option<i32>,
+    output_tokens: Option<i32>,
+    duration_ms: Option<i32>,
+    error_type: Option<String>,
+    error_message: Option<String>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+pub async fn get_user_logs(
+    session: DashboardSession,
+    Extension(state): Extension<std::sync::Arc<DashboardState>>,
+    Query(query): Query<UserLogsQuery>,
+) -> Response {
+    let key_hash = &session.claims.key_hash;
+    let db_pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => return Json(json!({"error": "Database not available"})).into_response(),
+    };
+
+    let offset = (query.page - 1).max(0) * query.per_page;
+
+    let rows: Vec<UserLogRow> = match sqlx::query_as(
+        r#"SELECT model, api_path, is_stream, status_code,
+                  input_tokens, output_tokens, duration_ms,
+                  error_type, error_message, created_at
+           FROM boom_request_log
+           WHERE key_hash = $1
+           ORDER BY created_at DESC
+           LIMIT $2 OFFSET $3"#,
+    )
+    .bind(key_hash)
+    .bind(query.per_page)
+    .bind(offset)
+    .fetch_all(db_pool)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("User get_user_logs query failed: {}", e);
+            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
         }
-        None => (None, None),
-    }
+    };
+
+    let total: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM boom_request_log WHERE key_hash = $1"#,
+    )
+    .bind(key_hash)
+    .fetch_one(db_pool)
+    .await
+    .unwrap_or(0);
+
+    let logs: Vec<Value> = rows
+        .into_iter()
+        .map(|r| {
+            json!({
+                "model": r.model,
+                "api_path": r.api_path,
+                "is_stream": r.is_stream,
+                "status_code": r.status_code,
+                "input_tokens": r.input_tokens,
+                "output_tokens": r.output_tokens,
+                "duration_ms": r.duration_ms,
+                "error_type": r.error_type,
+                "error_message": r.error_message,
+                "created_at": r.created_at.map(|d| d.to_rfc3339()),
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "logs": logs,
+        "page": query.page,
+        "per_page": query.per_page,
+        "total": total,
+    }))
+    .into_response()
 }

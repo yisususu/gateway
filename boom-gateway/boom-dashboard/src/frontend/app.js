@@ -11,7 +11,7 @@
     setupLogin();
     setupLogout();
     setupAdminButtons();
-    window.addEventListener("hashchange", onRoute);
+    window.addEventListener("hashchange", () => { onRoute(); onUserRoute(); });
     checkSession();
   });
 
@@ -57,6 +57,7 @@
       document.getElementById("page-dashboard").classList.add("active");
       loadUserData();
       startUsageRefresh();
+      onUserRoute();
     }
   }
 
@@ -140,6 +141,80 @@
   }
 
   // ── User Dashboard ────────────────────────────────────
+
+  let userLogsPage = 1;
+
+  function onUserRoute() {
+    const hash = location.hash || "#/dashboard";
+    document.querySelectorAll("#page-dashboard .nav-link").forEach((a) => {
+      a.classList.toggle("active", a.getAttribute("href") === hash);
+    });
+    document.querySelectorAll("#page-dashboard .section").forEach((s) => {
+      s.classList.toggle("active", s.id === userSectionFromHash(hash));
+    });
+    const section = userSectionFromHash(hash);
+    if (section === "user-logs") loadUserLogs();
+  }
+
+  function userSectionFromHash(hash) {
+    if (hash.includes("/dashboard/logs")) return "user-logs";
+    return "user-overview";
+  }
+
+  async function loadUserLogs(page) {
+    if (page !== undefined) userLogsPage = page;
+    const wrap = document.getElementById("user-logs-table-wrap");
+    if (!wrap) return;
+    try {
+      const data = await api(`/user/logs?page=${userLogsPage}&per_page=50`);
+      renderUserLogsTable(data.logs || []);
+      renderUserLogsPagination(data);
+    } catch (err) {
+      wrap.innerHTML = `<p class="error-msg">Failed to load logs: ${esc(err.message)}</p>`;
+    }
+  }
+
+  function renderUserLogsTable(logs) {
+    const wrap = document.getElementById("user-logs-table-wrap");
+    if (logs.length === 0) {
+      wrap.innerHTML = "<p>No request logs found.</p>";
+      return;
+    }
+    wrap.innerHTML = `<table>
+      <tr><th>Time</th><th>Model</th><th>Path</th><th>Status</th><th>Stream</th><th>Input</th><th>Output</th><th>Duration</th><th>Error</th></tr>
+      ${logs.map((l) => `<tr>
+        <td class="mono">${formatTimestamp(l.created_at)}</td>
+        <td class="mono">${esc(l.model)}</td>
+        <td class="mono">${esc(l.api_path)}</td>
+        <td>${l.status_code >= 400 ? '<span style="color:var(--danger)">' + l.status_code + '</span>' : l.status_code}</td>
+        <td>${l.is_stream ? "Yes" : "No"}</td>
+        <td>${l.input_tokens != null ? formatNumber(l.input_tokens) : "-"}</td>
+        <td>${l.output_tokens != null ? formatNumber(l.output_tokens) : "-"}</td>
+        <td>${l.duration_ms != null ? l.duration_ms + "ms" : "-"}</td>
+        <td>${l.error_message ? '<span style="color:var(--danger)" title="' + esc(l.error_message) + '">' + esc((l.error_type || "").substring(0, 20)) + '</span>' : "-"}</td>
+      </tr>`).join("")}
+    </table>`;
+        <td>${l.input_tokens != null ? formatNumber(l.input_tokens) : "-"}</td>
+        <td>${l.output_tokens != null ? formatNumber(l.output_tokens) : "-"}</td>
+        <td>${l.duration_ms != null ? l.duration_ms + "ms" : "-"}</td>
+        <td>${l.error_message ? '<span style="color:var(--danger)" title="' + esc(l.error_message) + '">' + esc((l.error_type || "").substring(0, 20)) + '</span>' : "-"}</td>
+      </tr>`).join("")}
+    </table>`;
+  }
+
+  function renderUserLogsPagination(data) {
+    const el = document.getElementById("user-logs-pagination");
+    if (!el) return;
+    const pages = Math.ceil(data.total / data.per_page);
+    if (pages <= 1) { el.innerHTML = ""; return; }
+    el.innerHTML = `
+      <button ${data.page <= 1 ? "disabled" : ""} onclick="window._loadUserLogsPage(${data.page - 1})">&lt;</button>
+      <span>Page ${data.page} of ${pages} (${data.total} logs)</span>
+      <button ${data.page >= pages ? "disabled" : ""} onclick="window._loadUserLogsPage(${data.page + 1})">&gt;</button>
+    `;
+  }
+
+  window._loadUserLogsPage = (p) => loadUserLogs(p);
   async function loadUserData() {
     try {
       const [plan, usage, keyInfo] = await Promise.all([
@@ -844,6 +919,7 @@
     logsFiltersSetup = true;
     const wrap = document.getElementById("logs-table-wrap");
     if (!wrap) return;
+    // Event delegation on the static container — filter inputs are in the HTML template.
     wrap.addEventListener("input", (e) => {
       if (!e.target.classList.contains("col-filter")) return;
       clearTimeout(logsFiltersTimer);
@@ -860,6 +936,8 @@
       resetBtn.addEventListener("click", () => {
         logsFilters = {};
         logsPage = 1;
+        // Clear all filter input values.
+        wrap.querySelectorAll(".col-filter").forEach((inp) => { inp.value = ""; });
         loadLogs();
       });
     }
@@ -881,47 +959,14 @@
     }
   }
 
-  const LOGS_FILTER_COLS = [
-    { col: "",           placeholder: "",     label: "Time" },
-    { col: "team_alias", placeholder: "filter", label: "Team" },
-    { col: "key_alias",  placeholder: "filter", label: "Key Alias" },
-    { col: "model",      placeholder: "filter", label: "Model" },
-    { col: "api_path",   placeholder: "filter", label: "Path" },
-    { col: "status_code",placeholder: "filter", label: "Status" },
-    { col: "stream",     placeholder: "filter", label: "Stream" },
-    { col: "",           placeholder: "",     label: "Input" },
-    { col: "",           placeholder: "",     label: "Output" },
-    { col: "",           placeholder: "",     label: "Duration" },
-    { col: "error",      placeholder: "filter", label: "Error" },
-  ];
-
-  function logsFilterRow() {
-    return LOGS_FILTER_COLS.map(f =>
-      f.col
-        ? `<td><input class="col-filter" data-col="${f.col}" placeholder="${f.placeholder}" value="${esc(logsFilters[f.col] || "")}"></td>`
-        : "<td></td>"
-    ).join("");
-  }
-
-  function logsHeaderRow() {
-    return LOGS_FILTER_COLS.map(f => `<th>${f.label}</th>`).join("");
-  }
-
   function renderLogsTable(logs) {
-    const wrap = document.getElementById("logs-table-wrap");
-    const filterRow = logsFilterRow();
-    const headerRow = logsHeaderRow();
+    const dataWrap = document.getElementById("logs-data-wrap");
+    if (!dataWrap) return;
     if (logs.length === 0) {
-      wrap.innerHTML = `<table>
-        <tr class="filter-row">${filterRow}</tr>
-        <tr>${headerRow}</tr>
-        <tr><td colspan="${LOGS_FILTER_COLS.length}" class="no-results">No matching logs found.</td></tr>
-      </table>`;
+      dataWrap.innerHTML = '<table><tr><td colspan="11" class="no-results">No matching logs found.</td></tr></table>';
       return;
     }
-    wrap.innerHTML = `<table>
-      <tr class="filter-row">${filterRow}</tr>
-      <tr>${headerRow}</tr>
+    dataWrap.innerHTML = `<table>
       ${logs.map((l) => `<tr>
         <td class="mono">${formatTimestamp(l.created_at)}</td>
         <td>${esc(l.team_alias || l.team_id || "-")}</td>
