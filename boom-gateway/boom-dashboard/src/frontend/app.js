@@ -911,10 +911,10 @@
   function setupLogsFilters() {
     if (logsFiltersSetup) return;
     logsFiltersSetup = true;
-    const wrap = document.getElementById("logs-table-wrap");
-    if (!wrap) return;
-    // Event delegation on the static container — filter inputs are in the HTML template.
-    wrap.addEventListener("input", (e) => {
+    const table = document.getElementById("logs-table");
+    if (!table) return;
+    // Event delegation on the static table — filter inputs are in <thead>.
+    table.addEventListener("input", (e) => {
       if (!e.target.classList.contains("col-filter")) return;
       clearTimeout(logsFiltersTimer);
       logsFiltersTimer = setTimeout(() => {
@@ -931,7 +931,7 @@
         logsFilters = {};
         logsPage = 1;
         // Clear all filter input values.
-        wrap.querySelectorAll(".col-filter").forEach((inp) => { inp.value = ""; });
+        table.querySelectorAll(".col-filter").forEach((inp) => { inp.value = ""; });
         loadLogs();
       });
     }
@@ -954,14 +954,13 @@
   }
 
   function renderLogsTable(logs) {
-    const dataWrap = document.getElementById("logs-data-wrap");
-    if (!dataWrap) return;
+    const tbody = document.getElementById("logs-tbody");
+    if (!tbody) return;
     if (logs.length === 0) {
-      dataWrap.innerHTML = '<table><tr><td colspan="11" class="no-results">No matching logs found.</td></tr></table>';
+      tbody.innerHTML = '<tr><td colspan="11" class="no-results">No matching logs found.</td></tr>';
       return;
     }
-    dataWrap.innerHTML = `<table>
-      ${logs.map((l) => `<tr>
+    tbody.innerHTML = logs.map((l) => `<tr>
         <td class="mono">${formatTimestamp(l.created_at)}</td>
         <td>${esc(l.team_alias || l.team_id || "-")}</td>
         <td>${esc(l.key_alias || l.key_name || "-")}</td>
@@ -973,8 +972,7 @@
         <td>${l.output_tokens != null ? formatNumber(l.output_tokens) : "-"}</td>
         <td>${l.duration_ms != null ? l.duration_ms + "ms" : "-"}</td>
         <td>${l.error_message ? '<span style="color:var(--danger)" title="' + esc(l.error_message) + '">' + esc((l.error_type || "").substring(0, 20)) + '</span>' : "-"}</td>
-      </tr>`).join("")}
-    </table>`;
+      </tr>`).join("");
   }
 
   function renderLogsPagination(data) {
