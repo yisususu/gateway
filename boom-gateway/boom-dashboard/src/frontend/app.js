@@ -948,8 +948,8 @@
       renderLogsTable(data.logs || []);
       renderLogsPagination(data);
     } catch (err) {
-      const wrap = document.getElementById("logs-table-wrap");
-      if (wrap) wrap.innerHTML = `<p class="error-msg">Failed to load logs: ${esc(err.message)}</p>`;
+      const tbody = document.getElementById("logs-tbody");
+      if (tbody) tbody.innerHTML = `<tr><td colspan="11" class="no-results">Failed to load logs: ${esc(err.message)}</td></tr>`;
     }
   }
 
