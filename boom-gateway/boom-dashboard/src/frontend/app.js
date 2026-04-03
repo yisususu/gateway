@@ -174,7 +174,8 @@
 
   function renderUsage(usage) {
     const el = document.getElementById("usage-info");
-    let html = `<p>Current concurrency: <strong>${usage.concurrency}</strong></p>`;
+    const concLimit = usage.concurrency_limit || "-";
+    let html = `<p>Current concurrency: <strong>${usage.concurrency}</strong> / ${concLimit}</p>`;
     if (usage.windows.length === 0) {
       html += "<p>No active rate limit windows.</p>";
     } else {
@@ -183,12 +184,15 @@
         const parts = w.cache_key.split(":");
         const model = parts[1] || "unknown";
         const windowLabel = formatDuration(w.window_secs);
-        const pct = w.count > 0 && w.window_secs > 0 ? Math.min((w.elapsed_secs / w.window_secs) * 100, 100) : 0;
+        const limit = w.limit;
+        const countLabel = limit != null ? `${w.count} / ${limit}` : `${w.count}`;
+        const pct = limit != null ? Math.min((w.count / limit) * 100, 100) : (w.count > 0 && w.window_secs > 0 ? Math.min((w.elapsed_secs / w.window_secs) * 100, 100) : 0);
+        const fillClass = limit != null && w.count >= limit ? "danger" : limit != null && pct >= 80 ? "warn" : "";
         html += `<tr>
           <td class="mono">${esc(model)}</td>
           <td>${esc(windowLabel)}</td>
-          <td>${w.count}</td>
-          <td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div></td>
+          <td>${countLabel}</td>
+          <td><div class="progress-bar"><div class="progress-fill ${fillClass}" style="width:${pct}%"></div></div></td>
         </tr>`;
       });
       html += "</table>";

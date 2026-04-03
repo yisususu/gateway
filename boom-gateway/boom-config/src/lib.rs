@@ -159,7 +159,7 @@ impl ProviderParams {
 }
 
 fn default_timeout() -> u64 {
-    120
+    1200
 }
 
 /// Auto-detect provider from model name when no explicit prefix is given.

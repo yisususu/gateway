@@ -48,14 +48,35 @@ pub async fn get_usage(
 ) -> Json<Value> {
     let key_hash = &session.claims.key_hash;
 
+    // Resolve plan limits for this key.
+    let plan = state
+        .plan_store
+        .resolve_plan(key_hash)
+        .or_else(|| state.plan_store.get_default_plan());
+    let (plan_concurrency, plan_rpm, plan_window_limits) = plan
+        .as_ref()
+        .map(|p| p.effective_limits())
+        .unwrap_or((None, None, vec![]));
+
     let windows: Vec<Value> = state
         .limiter
         .get_usage_for_key(key_hash)
         .into_iter()
         .map(|w| {
+            // cache_key format: {key_hash}:{model}:{window_secs}
+            // Find the limit for this window from plan.
+            let limit = if w.window_secs == 60 {
+                plan_rpm
+            } else {
+                plan_window_limits
+                    .iter()
+                    .find(|(_, ws)| *ws == w.window_secs)
+                    .map(|(limit, _)| *limit)
+            };
             json!({
                 "cache_key": w.cache_key,
                 "count": w.count,
+                "limit": limit,
                 "window_secs": w.window_secs,
                 "elapsed_secs": w.elapsed_secs,
             })
@@ -66,6 +87,7 @@ pub async fn get_usage(
 
     Json(json!({
         "concurrency": concurrency,
+        "concurrency_limit": plan_concurrency,
         "windows": windows,
     }))
 }
