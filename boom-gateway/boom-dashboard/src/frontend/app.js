@@ -812,7 +812,6 @@
   function setupLogsFilters() {
     if (logsFiltersSetup) return;
     logsFiltersSetup = true;
-    // Restore any previously typed values after re-render.
     const wrap = document.getElementById("logs-table-wrap");
     if (!wrap) return;
     wrap.addEventListener("input", (e) => {
@@ -826,6 +825,14 @@
         loadLogs();
       }, 400);
     });
+    const resetBtn = document.getElementById("btn-reset-logs-filters");
+    if (resetBtn) {
+      resetBtn.addEventListener("click", () => {
+        logsFilters = {};
+        logsPage = 1;
+        loadLogs();
+      });
+    }
   }
 
   async function loadLogs(page) {
@@ -858,15 +865,30 @@
     { col: "error",      placeholder: "filter", label: "Error" },
   ];
 
-  function renderLogsTable(logs) {
-    const wrap = document.getElementById("logs-table-wrap");
-    if (logs.length === 0) { wrap.innerHTML = "<p>No request logs found.</p>"; return; }
-    const filterRow = LOGS_FILTER_COLS.map(f =>
+  function logsFilterRow() {
+    return LOGS_FILTER_COLS.map(f =>
       f.col
         ? `<td><input class="col-filter" data-col="${f.col}" placeholder="${f.placeholder}" value="${esc(logsFilters[f.col] || "")}"></td>`
         : "<td></td>"
     ).join("");
-    const headerRow = LOGS_FILTER_COLS.map(f => `<th>${f.label}</th>`).join("");
+  }
+
+  function logsHeaderRow() {
+    return LOGS_FILTER_COLS.map(f => `<th>${f.label}</th>`).join("");
+  }
+
+  function renderLogsTable(logs) {
+    const wrap = document.getElementById("logs-table-wrap");
+    const filterRow = logsFilterRow();
+    const headerRow = logsHeaderRow();
+    if (logs.length === 0) {
+      wrap.innerHTML = `<table>
+        <tr class="filter-row">${filterRow}</tr>
+        <tr>${headerRow}</tr>
+        <tr><td colspan="${LOGS_FILTER_COLS.length}" class="no-results">No matching logs found.</td></tr>
+      </table>`;
+      return;
+    }
     wrap.innerHTML = `<table>
       <tr class="filter-row">${filterRow}</tr>
       <tr>${headerRow}</tr>
