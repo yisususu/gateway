@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
     let port = args.port.unwrap_or(config.server.port);
 
     // Build state (connects DB, initializes providers).
-    let state = AppState::from_config(config, args.config.clone()).await?;
+    let mut state = AppState::from_config(config, args.config.clone()).await?;
 
     // Shutdown broadcast channel: send once to cancel all background tasks.
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
@@ -56,16 +56,19 @@ async fn main() -> anyhow::Result<()> {
     spawn_request_summary(state.request_count.clone(), shutdown_tx.subscribe());
 
     // Build router.
-    let app = build_router(state);
+    let app = build_router(state.clone());
 
     // Start server.
     let addr = format!("{}:{}", host, port);
-    tracing::info!("BooMGateway listening on {}", addr);
-
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("BooMGateway listening on {}", addr);
 
     let server = axum::serve(listener, app);
+
+    // Ctrl+C: stop server → close DB → exit.
+    // tokio::select! drops the losing future, so when shutdown_signal wins,
+    // the server (and its Router / Extension<DashboardState> / admin_tx) is dropped,
+    // which causes admin_command_handler's mpsc channel to close and exit.
     tokio::select! {
         result = server => {
             if let Err(e) = result {
@@ -74,7 +77,20 @@ async fn main() -> anyhow::Result<()> {
         }
         _ = shutdown_signal() => {
             tracing::info!("Shutting down...");
-            std::process::exit(0);
+
+            // 1. Signal all background tasks to stop.
+            let _ = shutdown_tx.send(());
+
+            // 2. Close DB pool — releases all connections and table locks.
+            //    Server future was just dropped by select!, so admin_tx is dropped,
+            //    admin_command_handler exits, returns its DB connections.
+            //    Background tasks received shutdown signal and will exit promptly.
+            if let Some(pool) = state.db_pool.take() {
+                pool.close().await;
+                tracing::info!("Database pool closed");
+            }
+
+            tracing::info!("Shutdown complete");
         }
     }
 
@@ -389,10 +405,10 @@ async fn shutdown_signal() {
 
     tokio::select! {
         _ = ctrl_c => {
-            tracing::info!("Received Ctrl+C, shutting down...");
+            tracing::info!("Received Ctrl+C");
         },
         _ = terminate => {
-            tracing::info!("Received SIGTERM, shutting down...");
+            tracing::info!("Received SIGTERM");
         },
     }
 }
