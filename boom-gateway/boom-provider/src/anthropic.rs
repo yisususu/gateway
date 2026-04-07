@@ -185,7 +185,10 @@ impl Provider for AnthropicProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| GatewayError::ProviderError(format!("Anthropic request failed: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!("Anthropic request failed: {}", e);
+                GatewayError::ProviderError("Upstream provider unavailable".to_string())
+            })?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -199,7 +202,10 @@ impl Provider for AnthropicProvider {
         let body: serde_json::Value = resp
             .json()
             .await
-            .map_err(|e| GatewayError::ProviderError(format!("Failed to parse Anthropic response: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!("Failed to parse Anthropic response: {}", e);
+                GatewayError::ProviderError("Failed to process upstream response".to_string())
+            })?;
 
         Ok(self.from_anthropic_response(body, &requested_model))
     }
@@ -223,7 +229,10 @@ impl Provider for AnthropicProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| GatewayError::ProviderError(format!("Anthropic stream request failed: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!("Anthropic stream request failed: {}", e);
+                GatewayError::ProviderError("Upstream provider unavailable".to_string())
+            })?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -312,11 +321,11 @@ impl Provider for AnthropicProvider {
                         }
                     }
                     Err(e) => {
+                        tracing::error!("Anthropic stream read error: {}", e);
                         let _ = tx
-                            .send(Err(GatewayError::ProviderError(format!(
-                                "Stream error: {}",
-                                e
-                            ))))
+                            .send(Err(GatewayError::ProviderError(
+                                "Upstream stream error".to_string(),
+                            )))
                             .await;
                         return;
                     }

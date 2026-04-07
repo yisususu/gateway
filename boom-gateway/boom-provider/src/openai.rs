@@ -57,7 +57,10 @@ impl Provider for OpenAIProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| GatewayError::ProviderError(format!("OpenAI request failed: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!("OpenAI request failed: {}", e);
+                GatewayError::ProviderError("Upstream provider unavailable".to_string())
+            })?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -70,7 +73,10 @@ impl Provider for OpenAIProvider {
 
         resp.json::<ChatCompletionResponse>()
             .await
-            .map_err(|e| GatewayError::ProviderError(format!("Failed to parse OpenAI response: {}", e)))
+            .map_err(|e| {
+                tracing::error!("Failed to parse OpenAI response: {}", e);
+                GatewayError::ProviderError("Failed to process upstream response".to_string())
+            })
     }
 
     async fn chat_stream(&self, req: ChatCompletionRequest) -> Result<ChatStream, GatewayError> {
@@ -95,7 +101,10 @@ impl Provider for OpenAIProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| GatewayError::ProviderError(format!("OpenAI stream request failed: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!("OpenAI stream request failed: {}", e);
+                GatewayError::ProviderError("Upstream provider unavailable".to_string())
+            })?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -144,11 +153,11 @@ impl Provider for OpenAIProvider {
                         }
                     }
                     Err(e) => {
+                        tracing::error!("OpenAI stream read error: {}", e);
                         let _ = tx
-                            .send(Err(GatewayError::ProviderError(format!(
-                                "Stream read error: {}",
-                                e
-                            ))))
+                            .send(Err(GatewayError::ProviderError(
+                                "Upstream stream error".to_string(),
+                            )))
                             .await;
                         return;
                     }

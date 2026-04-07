@@ -1278,10 +1278,10 @@ async fn forward_pass_through(
         .send()
         .await
         .map_err(|e| {
-            GatewayErrorReply(GatewayError::ProviderError(format!(
-                "Pass-through forward failed: {}",
-                e
-            )), false)
+            tracing::error!("Pass-through forward failed: {}", e);
+            GatewayErrorReply(GatewayError::ProviderError(
+                "Upstream provider unavailable".to_string(),
+            ), false)
         })?;
 
     let status = axum::http::StatusCode::from_u16(resp.status().as_u16())
@@ -1340,10 +1340,10 @@ async fn forward_pass_through(
     } else {
         // Non-streaming: read full body and return.
         let body_bytes = resp.bytes().await.map_err(|e| {
-            GatewayErrorReply(GatewayError::ProviderError(format!(
-                "Pass-through read body failed: {}",
-                e
-            )), false)
+            tracing::error!("Pass-through read body failed: {}", e);
+            GatewayErrorReply(GatewayError::ProviderError(
+                "Failed to read upstream response".to_string(),
+            ), false)
         })?;
 
         let mut response = (status, body_bytes.to_vec()).into_response();

@@ -64,7 +64,10 @@ impl Provider for AzureProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| GatewayError::ProviderError(format!("Azure request failed: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!("Azure request failed: {}", e);
+                GatewayError::ProviderError("Upstream provider unavailable".to_string())
+            })?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -77,7 +80,10 @@ impl Provider for AzureProvider {
 
         resp.json::<ChatCompletionResponse>()
             .await
-            .map_err(|e| GatewayError::ProviderError(format!("Failed to parse Azure response: {}", e)))
+            .map_err(|e| {
+                tracing::error!("Failed to parse Azure response: {}", e);
+                GatewayError::ProviderError("Failed to process upstream response".to_string())
+            })
     }
 
     async fn chat_stream(&self, mut req: ChatCompletionRequest) -> Result<ChatStream, GatewayError> {
@@ -102,7 +108,10 @@ impl Provider for AzureProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| GatewayError::ProviderError(format!("Azure stream request failed: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!("Azure stream request failed: {}", e);
+                GatewayError::ProviderError("Upstream provider unavailable".to_string())
+            })?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -149,11 +158,11 @@ impl Provider for AzureProvider {
                         }
                     }
                     Err(e) => {
+                        tracing::error!("Azure stream read error: {}", e);
                         let _ = tx
-                            .send(Err(GatewayError::ProviderError(format!(
-                                "Stream error: {}",
-                                e
-                            ))))
+                            .send(Err(GatewayError::ProviderError(
+                                "Upstream stream error".to_string(),
+                            )))
                             .await;
                         return;
                     }

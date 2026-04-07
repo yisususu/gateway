@@ -188,7 +188,10 @@ impl Provider for GeminiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| GatewayError::ProviderError(format!("Gemini request failed: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!("Gemini request failed: {}", e);
+                GatewayError::ProviderError("Upstream provider unavailable".to_string())
+            })?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -202,7 +205,10 @@ impl Provider for GeminiProvider {
         let body: serde_json::Value = resp
             .json()
             .await
-            .map_err(|e| GatewayError::ProviderError(format!("Failed to parse Gemini response: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!("Failed to parse Gemini response: {}", e);
+                GatewayError::ProviderError("Failed to process upstream response".to_string())
+            })?;
 
         Ok(self.from_gemini_response(body, &requested_model))
     }
@@ -224,7 +230,10 @@ impl Provider for GeminiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| GatewayError::ProviderError(format!("Gemini stream request failed: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!("Gemini stream request failed: {}", e);
+                GatewayError::ProviderError("Upstream provider unavailable".to_string())
+            })?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -297,11 +306,11 @@ impl Provider for GeminiProvider {
                         }
                     }
                     Err(e) => {
+                        tracing::error!("Gemini stream read error: {}", e);
                         let _ = tx
-                            .send(Err(GatewayError::ProviderError(format!(
-                                "Stream error: {}",
-                                e
-                            ))))
+                            .send(Err(GatewayError::ProviderError(
+                                "Upstream stream error".to_string(),
+                            )))
                             .await;
                         return;
                     }
