@@ -6,6 +6,7 @@ use chrono::NaiveDateTime;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::FromRow;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::auth::{hash_token, AdminSession};
@@ -1629,4 +1630,22 @@ pub async fn get_model_stats(
             Json(json!({"error": e.to_string()})).into_response()
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════
+// In-Flight Request Stats (real-time)
+// ═══════════════════════════════════════════════════════════
+
+pub async fn get_inflight_stats(
+    _session: AdminSession,
+    Extension(state): Extension<Arc<DashboardState>>,
+) -> Response {
+    let stats = state.inflight.get_stats();
+    Json(json!({
+        "models": stats.iter().map(|s| json!({
+            "model": s.model,
+            "inflight_requests": s.inflight_requests,
+            "inflight_input_chars": s.inflight_input_chars,
+        })).collect::<Vec<_>>()
+    })).into_response()
 }

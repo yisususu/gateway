@@ -186,6 +186,7 @@ fn build_router(state: AppState) -> Router {
         state.limiter.clone(),
         state.deployment_store.clone(),
         state.alias_store.clone(),
+        state.inflight.clone(),
         admin_tx,
         master_key,
     );

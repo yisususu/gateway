@@ -118,8 +118,13 @@
       s.classList.toggle("active", s.id === sectionFromHash(hash));
     });
     const section = sectionFromHash(hash);
-    if (section === "admin-stats") loadStats();
-    else if (section === "admin-models") loadModels();
+    if (section === "admin-stats") {
+      loadStats();
+      startInflightPoll();
+    } else {
+      stopInflightPoll();
+    }
+    if (section === "admin-models") loadModels();
     else if (section === "admin-aliases") loadAliases();
     else if (section === "admin-plans") loadPlans();
     else if (section === "admin-keys") { setupKeysSearch(); loadKeys(); }
@@ -149,6 +154,55 @@
       renderStatsTable(data.models || []);
     } catch (err) {
       console.error("loadStats error:", err);
+    }
+    loadInflight();
+  }
+
+  // ── In-Flight ─────────────────────────────────────────
+  let inflightTimer = null;
+
+  async function loadInflight() {
+    try {
+      const data = await api("/admin/stats/inflight");
+      renderInflightTable(data.models || []);
+    } catch (err) {
+      console.error("loadInflight error:", err);
+    }
+  }
+
+  function renderInflightTable(models) {
+    const wrap = document.getElementById("inflight-table-wrap");
+    if (!models.length) {
+      wrap.innerHTML = "<p>No in-flight requests.</p>";
+      return;
+    }
+    wrap.innerHTML =
+      '<table class="data-table"><thead><tr>' +
+      "<th>Model</th><th>In-Flight Requests</th><th>In-Flight Input Chars</th>" +
+      "</tr></thead><tbody>" +
+      models
+        .map(function (m) {
+          return (
+            "<tr>" +
+            "<td>" + esc(m.model) + "</td>" +
+            "<td>" + m.inflight_requests + "</td>" +
+            "<td>" + m.inflight_input_chars.toLocaleString() + "</td>" +
+            "</tr>"
+          );
+        })
+        .join("") +
+      "</tbody></table>";
+  }
+
+  function startInflightPoll() {
+    stopInflightPoll();
+    inflightTimer = setInterval(loadInflight, 3000);
+  }
+
+  function stopInflightPoll() {
+    if (inflightTimer) {
+      clearInterval(inflightTimer);
+      inflightTimer = null;
     }
   }
 

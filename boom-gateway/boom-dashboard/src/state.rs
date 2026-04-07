@@ -1,5 +1,5 @@
 use boom_limiter::{PlanStore, SlidingWindowLimiter};
-use boom_routing::{AliasStore, DeploymentStore};
+use boom_routing::{AliasStore, DeploymentStore, InFlightTracker};
 use dashmap::DashMap;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -58,6 +58,8 @@ pub struct DashboardState {
     pub deployment_store: Arc<DeploymentStore>,
     /// Alias store for alias reads.
     pub alias_store: Arc<AliasStore>,
+    /// In-flight request tracker for real-time stats.
+    pub inflight: Arc<InFlightTracker>,
     /// Channel for model write operations (handled by boom-main).
     pub admin_tx: AdminTx,
     /// JWT signing key (derived from master_key at startup).
@@ -75,6 +77,7 @@ impl DashboardState {
         limiter: Arc<SlidingWindowLimiter>,
         deployment_store: Arc<DeploymentStore>,
         alias_store: Arc<AliasStore>,
+        inflight: Arc<InFlightTracker>,
         admin_tx: AdminTx,
         master_key: Option<String>,
     ) -> Self {
@@ -89,6 +92,7 @@ impl DashboardState {
             limiter,
             deployment_store,
             alias_store,
+            inflight,
             admin_tx,
             jwt_secret,
             master_key,

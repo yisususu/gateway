@@ -3,7 +3,7 @@ use boom_auth::DbAuthenticator;
 use boom_config::Config;
 use boom_core::provider::Authenticator;
 use boom_limiter::{PlanStore, RateLimitPlan, ScheduleSlot, SlidingWindowLimiter};
-use boom_routing::{AliasStore, DeploymentStore, Router, RoundRobinPolicy, SchedulePolicy};
+use boom_routing::{AliasStore, DeploymentStore, InFlightTracker, Router, RoundRobinPolicy, SchedulePolicy};
 use boom_provider;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -37,6 +37,8 @@ pub struct AppState {
     pub alias_store: Arc<AliasStore>,
     /// Router owns deployment + alias stores for routing decisions.
     pub router: Arc<Router>,
+    /// In-flight request tracker (per-model count + input chars).
+    pub inflight: Arc<InFlightTracker>,
     /// Request counter for periodic summary logging.
     pub request_count: Arc<AtomicU64>,
 }
@@ -96,6 +98,9 @@ impl AppState {
         // Router wraps stores + policy for routing decisions.
         let router = Arc::new(Router::new(deployment_store.clone(), alias_store.clone(), policy));
 
+        // In-flight tracker survives across reloads.
+        let inflight = Arc::new(InFlightTracker::new());
+
         // 5. Build from YAML first, then layer DB-only records on top.
         build_deployments_from_config(&config, &deployment_store);
         build_aliases_from_config(&config, &alias_store, &deployment_store);
@@ -142,6 +147,7 @@ impl AppState {
             deployment_store,
             alias_store,
             router,
+            inflight,
             request_count: Arc::new(AtomicU64::new(0)),
         })
     }

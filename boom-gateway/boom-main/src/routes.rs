@@ -12,7 +12,7 @@ use boom_core::provider::RateLimiter;
 use boom_core::types::*;
 use boom_core::GatewayError;
 use boom_limiter::{ConcurrencyGuard, GuardedStream, PlanStore, RateLimitPlan};
-use boom_routing::Router;
+use boom_routing::{InFlightGuard, Router};
 use futures::StreamExt;
 use sqlx::PgPool;
 use std::convert::Infallible;
@@ -23,6 +23,30 @@ use std::time::Instant;
 
 fn new_request_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+// ============================================================
+// InFlightStream — wraps a stream with an InFlightGuard so the
+// guard is released when the stream is fully consumed or dropped.
+// ============================================================
+
+struct InFlightStream<S> {
+    inner: S,
+    _guard: InFlightGuard,
+}
+
+impl<S> InFlightStream<S> {
+    fn new(inner: S, guard: InFlightGuard) -> Self {
+        Self { inner, _guard: guard }
+    }
+}
+
+impl<S: futures::Stream + Unpin> futures::Stream for InFlightStream<S> {
+    type Item = S::Item;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
 }
 
 // ============================================================
@@ -174,7 +198,9 @@ async fn chat_completions_inner(
         })?;
         let usage = UsageTracker::default();
         let sse_stream = sse_stream_from_chat_stream(stream, usage.clone());
-        let guarded = GuardedStream::new(sse_stream, guard);
+        let inflight_guard = InFlightGuard::new(state.inflight.clone(), &model, input_chars as u64);
+        let tracked = InFlightStream::new(sse_stream, inflight_guard);
+        let guarded = GuardedStream::new(tracked, guard);
 
         let api_path_owned = api_path.to_string();
         let logged = LoggedStream::new(guarded, state.db_pool.clone(), RequestLog {
@@ -198,6 +224,7 @@ async fn chat_completions_inner(
         let response = Sse::new(logged).keep_alive(KeepAlive::default());
         Ok(response.into_response())
     } else {
+        let _inflight = InFlightGuard::new(state.inflight.clone(), &model, input_chars as u64);
         let response = provider.chat(req).await.map_err(|e| {
             log_error(&state, &identity, &model, api_path, false, start, &e, Some(request_id.clone()));
             GatewayErrorReply(e, false)
@@ -1009,7 +1036,9 @@ pub async fn messages(
         })?;
         let usage = UsageTracker::default();
         let sse_stream = sse_stream_from_anthropic_chat_stream(stream, model.clone(), usage.clone());
-        let guarded = GuardedStream::new(sse_stream, guard);
+        let inflight_guard = InFlightGuard::new(state.inflight.clone(), &model, input_chars as u64);
+        let tracked = InFlightStream::new(sse_stream, inflight_guard);
+        let guarded = GuardedStream::new(tracked, guard);
 
         // Wrap with LoggedStream — log is written when stream finishes (Drop).
         let logged = LoggedStream::new(guarded, state.db_pool.clone(), RequestLog {
@@ -1033,6 +1062,7 @@ pub async fn messages(
         let response = Sse::new(logged).keep_alive(KeepAlive::default());
         Ok(response.into_response())
     } else {
+        let _inflight = InFlightGuard::new(state.inflight.clone(), &model, input_chars as u64);
         let response = provider.chat(openai_req).await.map_err(|e| {
             log_error(&state, &identity, &model, "/v1/messages", false, start, &e, Some(request_id.clone()));
             AnthropicErrorReply(e, false)
