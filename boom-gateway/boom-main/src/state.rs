@@ -383,10 +383,30 @@ async fn sync_yaml_to_db(pool: &PgPool, config: &Config) -> Result<(), sqlx::Err
     );
 
     // ── Plans ──
+    // 1. Delete all source='yaml' rows (stale YAML plans from previous run).
     sqlx::query(r#"DELETE FROM boom_rate_limit_plan WHERE source = 'yaml'"#)
         .execute(pool)
         .await?;
 
+    // 2. Delete source='db' plans that conflict with YAML names BEFORE inserting.
+    //    This prevents unique-key conflicts on the next INSERT.
+    if !config.plan_settings.plans.is_empty() {
+        let yaml_plan_names: Vec<String> = config.plan_settings.plans.keys().cloned().collect();
+        let result = sqlx::query(
+            r#"DELETE FROM boom_rate_limit_plan WHERE source = 'db' AND name = ANY($1)"#,
+        )
+        .bind(&yaml_plan_names)
+        .execute(pool)
+        .await?;
+        if result.rows_affected() > 0 {
+            tracing::info!(
+                "Removed {} conflicting source='db' plan(s)",
+                result.rows_affected()
+            );
+        }
+    }
+
+    // 3. Insert current YAML plans as source='yaml'.
     for (name, pc) in &config.plan_settings.plans {
         let window_limits_json = serde_json::to_value(&pc.window_limits).unwrap_or(serde_json::json!([]));
         let schedule_json = serde_json::to_value(
@@ -419,22 +439,6 @@ async fn sync_yaml_to_db(pool: &PgPool, config: &Config) -> Result<(), sqlx::Err
         .await?;
     }
 
-    // Delete source='db' plans that conflict with YAML plan names.
-    if !config.plan_settings.plans.is_empty() {
-        let yaml_plan_names: Vec<String> = config.plan_settings.plans.keys().cloned().collect();
-        let result = sqlx::query(
-            r#"DELETE FROM boom_rate_limit_plan WHERE source = 'db' AND name = ANY($1)"#,
-        )
-        .bind(&yaml_plan_names)
-        .execute(pool)
-        .await?;
-        if result.rows_affected() > 0 {
-            tracing::info!(
-                "Removed {} conflicting source='db' plan(s)",
-                result.rows_affected()
-            );
-        }
-    }
     tracing::info!("Synced {} plan(s) from YAML to DB", config.plan_settings.plans.len());
 
     // ── Clean up orphaned assignments ──
