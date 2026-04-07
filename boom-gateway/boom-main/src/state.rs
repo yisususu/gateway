@@ -3,7 +3,7 @@ use boom_auth::DbAuthenticator;
 use boom_config::Config;
 use boom_core::provider::Authenticator;
 use boom_limiter::{PlanStore, RateLimitPlan, ScheduleSlot, SlidingWindowLimiter};
-use boom_routing::{AliasStore, DeploymentStore, InFlightTracker, Router, RoundRobinPolicy, SchedulePolicy};
+use boom_routing::{AliasStore, DeploymentStore, InFlightTracker, KeyAffinityPolicy, Router, RoundRobinPolicy, SchedulePolicy};
 use boom_provider;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -92,14 +92,14 @@ impl AppState {
         let deployment_store = Arc::new(DeploymentStore::new());
         let alias_store = Arc::new(AliasStore::new());
 
-        // Create scheduling policy from config.
-        let policy = create_policy(&config);
+        // In-flight tracker survives across reloads — must be created before policy.
+        let inflight = Arc::new(InFlightTracker::new());
+
+        // Create scheduling policy from config (may reference inflight).
+        let policy = create_policy(&config, &inflight);
 
         // Router wraps stores + policy for routing decisions.
         let router = Arc::new(Router::new(deployment_store.clone(), alias_store.clone(), policy));
-
-        // In-flight tracker survives across reloads.
-        let inflight = Arc::new(InFlightTracker::new());
 
         // 5. Build from YAML first, then layer DB-only records on top.
         build_deployments_from_config(&config, &deployment_store);
@@ -196,7 +196,7 @@ impl AppState {
         load_plans_from_config(&self.plan_store, &new_config);
 
         // Recreate policy (fresh counters etc.) — router reuses same stores.
-        let new_policy = create_policy(&new_config);
+        let new_policy = create_policy(&new_config, &self.inflight);
         self.router.set_policy(new_policy);
 
         if let Some(ref pool) = db_pool {
@@ -805,9 +805,23 @@ fn load_plans_from_config(plan_store: &Arc<PlanStore>, config: &Config) {
 // ═══════════════════════════════════════════════════════════
 
 /// Create a scheduling policy from config.
-fn create_policy(config: &Config) -> Arc<dyn SchedulePolicy> {
+fn create_policy(config: &Config, inflight: &Arc<InFlightTracker>) -> Arc<dyn SchedulePolicy> {
     match config.router_settings.schedule_policy.as_str() {
         "round_robin" | "" => Arc::new(RoundRobinPolicy::new()),
+        "key_affinity" => {
+            let ctx_threshold = config.router_settings.key_affinity_context_threshold;
+            let rebalance_threshold = config.router_settings.key_affinity_rebalance_threshold;
+            tracing::info!(
+                "Using key_affinity policy: context_threshold={}, rebalance_threshold={}",
+                ctx_threshold,
+                rebalance_threshold,
+            );
+            Arc::new(KeyAffinityPolicy::new(
+                inflight.clone(),
+                ctx_threshold,
+                rebalance_threshold,
+            ))
+        }
         other => {
             tracing::warn!(
                 "Unknown schedule_policy '{}', falling back to round_robin",

@@ -55,9 +55,14 @@ impl Router {
     /// Core routing: exact match → alias resolution → wildcard "*".
     ///
     /// Resolves candidates then delegates to the SchedulePolicy for selection.
-    pub fn select_provider(&self, model: &str) -> Option<Arc<dyn Provider>> {
+    pub fn select_provider(
+        &self,
+        model: &str,
+        key_hash: Option<&str>,
+        input_chars: u64,
+    ) -> Option<Arc<dyn Provider>> {
         let candidates = self.resolve_candidates(model)?;
-        self.policy.load().inner.select(model, &candidates)
+        self.policy.load().inner.select(model, &candidates, key_hash, input_chars)
     }
 
     /// Resolve model name to a list of candidate providers.

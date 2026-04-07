@@ -19,7 +19,13 @@ impl RoundRobinPolicy {
 }
 
 impl SchedulePolicy for RoundRobinPolicy {
-    fn select(&self, model: &str, candidates: &[Arc<dyn Provider>]) -> Option<Arc<dyn Provider>> {
+    fn select(
+        &self,
+        model: &str,
+        candidates: &[Arc<dyn Provider>],
+        _key_hash: Option<&str>,
+        _input_chars: u64,
+    ) -> Option<Arc<dyn Provider>> {
         if candidates.is_empty() {
             return None;
         }

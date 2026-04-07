@@ -1640,10 +1640,17 @@ pub async fn get_inflight_stats(
     _session: AdminSession,
     Extension(state): Extension<Arc<DashboardState>>,
 ) -> Response {
-    let stats = state.inflight.get_stats();
+    let model_stats = state.inflight.get_stats();
+    let deployment_stats = state.inflight.get_stats_by_deployment();
     Json(json!({
-        "models": stats.iter().map(|s| json!({
+        "models": model_stats.iter().map(|s| json!({
             "model": s.model,
+            "inflight_requests": s.inflight_requests,
+            "inflight_input_chars": s.inflight_input_chars,
+        })).collect::<Vec<_>>(),
+        "deployments": deployment_stats.iter().map(|s| json!({
+            "model": s.model,
+            "deployment_id": s.deployment_id,
             "inflight_requests": s.inflight_requests,
             "inflight_input_chars": s.inflight_input_chars,
         })).collect::<Vec<_>>()

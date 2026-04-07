@@ -181,7 +181,7 @@ async fn chat_completions_inner(
     // 3. Select provider deployment.
     let provider = state
         .router
-        .select_provider(&req.model)
+        .select_provider(&req.model, Some(&identity.key_hash), input_chars as u64)
         .ok_or_else(|| {
             let e = GatewayError::ModelNotFound(req.model.clone());
             log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()));
@@ -198,7 +198,11 @@ async fn chat_completions_inner(
         })?;
         let usage = UsageTracker::default();
         let sse_stream = sse_stream_from_chat_stream(stream, usage.clone());
-        let inflight_guard = InFlightGuard::new(state.inflight.clone(), &model, input_chars as u64);
+        let inflight_guard = if let Some(ref did) = deployment_id {
+            InFlightGuard::new_for_deployment(state.inflight.clone(), &model, did, input_chars as u64)
+        } else {
+            InFlightGuard::new(state.inflight.clone(), &model, input_chars as u64)
+        };
         let tracked = InFlightStream::new(sse_stream, inflight_guard);
         let guarded = GuardedStream::new(tracked, guard);
 
@@ -224,7 +228,11 @@ async fn chat_completions_inner(
         let response = Sse::new(logged).keep_alive(KeepAlive::default());
         Ok(response.into_response())
     } else {
-        let _inflight = InFlightGuard::new(state.inflight.clone(), &model, input_chars as u64);
+        let _inflight = if let Some(ref did) = deployment_id {
+            InFlightGuard::new_for_deployment(state.inflight.clone(), &model, did, input_chars as u64)
+        } else {
+            InFlightGuard::new(state.inflight.clone(), &model, input_chars as u64)
+        };
         let response = provider.chat(req).await.map_err(|e| {
             log_error(&state, &identity, &model, api_path, false, start, &e, Some(request_id.clone()));
             GatewayErrorReply(e, false)
@@ -1019,7 +1027,7 @@ pub async fn messages(
     // 3. Select provider deployment.
     let provider = state
         .router
-        .select_provider(&openai_req.model)
+        .select_provider(&openai_req.model, Some(&identity.key_hash), input_chars as u64)
         .ok_or_else(|| {
             let e = GatewayError::ModelNotFound(openai_req.model.clone());
             log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()));
@@ -1036,7 +1044,11 @@ pub async fn messages(
         })?;
         let usage = UsageTracker::default();
         let sse_stream = sse_stream_from_anthropic_chat_stream(stream, model.clone(), usage.clone());
-        let inflight_guard = InFlightGuard::new(state.inflight.clone(), &model, input_chars as u64);
+        let inflight_guard = if let Some(ref did) = deployment_id {
+            InFlightGuard::new_for_deployment(state.inflight.clone(), &model, did, input_chars as u64)
+        } else {
+            InFlightGuard::new(state.inflight.clone(), &model, input_chars as u64)
+        };
         let tracked = InFlightStream::new(sse_stream, inflight_guard);
         let guarded = GuardedStream::new(tracked, guard);
 
@@ -1062,7 +1074,11 @@ pub async fn messages(
         let response = Sse::new(logged).keep_alive(KeepAlive::default());
         Ok(response.into_response())
     } else {
-        let _inflight = InFlightGuard::new(state.inflight.clone(), &model, input_chars as u64);
+        let _inflight = if let Some(ref did) = deployment_id {
+            InFlightGuard::new_for_deployment(state.inflight.clone(), &model, did, input_chars as u64)
+        } else {
+            InFlightGuard::new(state.inflight.clone(), &model, input_chars as u64)
+        };
         let response = provider.chat(openai_req).await.map_err(|e| {
             log_error(&state, &identity, &model, "/v1/messages", false, start, &e, Some(request_id.clone()));
             AnthropicErrorReply(e, false)

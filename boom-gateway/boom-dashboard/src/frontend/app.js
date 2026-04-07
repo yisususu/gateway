@@ -164,34 +164,60 @@
   async function loadInflight() {
     try {
       const data = await api("/admin/stats/inflight");
-      renderInflightTable(data.models || []);
+      renderInflightTable(data);
     } catch (err) {
       console.error("loadInflight error:", err);
     }
   }
 
-  function renderInflightTable(models) {
+  function renderInflightTable(data) {
     const wrap = document.getElementById("inflight-table-wrap");
-    if (!models.length) {
+    var models = data.models || [];
+    var deployments = data.deployments || [];
+
+    if (!models.length && !deployments.length) {
       wrap.innerHTML = "<p>No in-flight requests.</p>";
       return;
     }
-    wrap.innerHTML =
-      '<table class="data-table"><thead><tr>' +
-      "<th>Model</th><th>In-Flight Requests</th><th>In-Flight Input Chars</th>" +
-      "</tr></thead><tbody>" +
-      models
-        .map(function (m) {
-          return (
-            "<tr>" +
-            "<td>" + esc(m.model) + "</td>" +
-            "<td>" + m.inflight_requests + "</td>" +
-            "<td>" + m.inflight_input_chars.toLocaleString() + "</td>" +
-            "</tr>"
-          );
-        })
-        .join("") +
-      "</tbody></table>";
+
+    // Prefer deployment-level view (shows per-endpoint granularity).
+    if (deployments.length) {
+      wrap.innerHTML =
+        '<table class="data-table"><thead><tr>' +
+        "<th>Model</th><th>Deployment</th><th>In-Flight Requests</th><th>In-Flight Input Chars</th>" +
+        "</tr></thead><tbody>" +
+        deployments
+          .map(function (d) {
+            return (
+              "<tr>" +
+              "<td>" + esc(d.model) + "</td>" +
+              "<td>" + esc(d.deployment_id || "-") + "</td>" +
+              "<td>" + d.inflight_requests + "</td>" +
+              "<td>" + d.inflight_input_chars.toLocaleString() + "</td>" +
+              "</tr>"
+            );
+          })
+          .join("") +
+        "</tbody></table>";
+    } else {
+      // Fallback: model-level only (no deployment_id available).
+      wrap.innerHTML =
+        '<table class="data-table"><thead><tr>' +
+        "<th>Model</th><th>In-Flight Requests</th><th>In-Flight Input Chars</th>" +
+        "</tr></thead><tbody>" +
+        models
+          .map(function (m) {
+            return (
+              "<tr>" +
+              "<td>" + esc(m.model) + "</td>" +
+              "<td>" + m.inflight_requests + "</td>" +
+              "<td>" + m.inflight_input_chars.toLocaleString() + "</td>" +
+              "</tr>"
+            );
+          })
+          .join("") +
+        "</tbody></table>";
+    }
   }
 
   function startInflightPoll() {

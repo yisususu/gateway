@@ -284,16 +284,31 @@ impl ModelGroupAlias {
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct RouterSettings {
-    /// Scheduling policy: round_robin (default).
+    /// Scheduling policy: round_robin (default) or key_affinity.
     #[serde(default = "default_schedule_policy", alias = "routing_strategy")]
     pub schedule_policy: String,
     /// Model group aliases: alias_name → target_model_name.
     #[serde(default)]
     pub model_group_alias: HashMap<String, ModelGroupAlias>,
+    /// Key-affinity: context threshold (total input chars) below which
+    /// the policy always picks lowest-load (warm-up phase).
+    /// 0 means always use affinity (no warm-up). Default: 0.
+    #[serde(default)]
+    pub key_affinity_context_threshold: u64,
+    /// Key-affinity: rebalance threshold (absolute request count difference).
+    /// If the preferred provider's in-flight count exceeds the minimum
+    /// by more than this value, reassign to the least-loaded provider.
+    /// Default: 10.
+    #[serde(default = "default_rebalance_threshold")]
+    pub key_affinity_rebalance_threshold: u64,
 }
 
 fn default_schedule_policy() -> String {
     "round_robin".to_string()
+}
+
+fn default_rebalance_threshold() -> u64 {
+    10
 }
 
 #[derive(Debug, Deserialize, Clone)]
