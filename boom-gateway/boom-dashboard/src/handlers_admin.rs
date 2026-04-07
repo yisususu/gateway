@@ -1580,3 +1580,53 @@ pub async fn list_teams(
 
     Json(json!({ "teams": teams })).into_response()
 }
+
+// ═══════════════════════════════════════════════════════════
+// Model Statistics
+// ═══════════════════════════════════════════════════════════
+
+#[derive(Debug, serde::Serialize, sqlx::FromRow)]
+struct ModelStatsRow {
+    model: String,
+    total_requests: i64,
+    success_count: i64,
+    error_count: i64,
+    total_input_tokens: i64,
+    total_output_tokens: i64,
+    avg_duration_ms: i32,
+    last_request_at: Option<NaiveDateTime>,
+}
+
+pub async fn get_model_stats(
+    _session: AdminSession,
+    Extension(state): Extension<std::sync::Arc<DashboardState>>,
+) -> Response {
+    let pool = match &state.db_pool {
+        Some(p) => p,
+        None => return Json(json!({"error": "Database not available"})).into_response(),
+    };
+
+    let stats = sqlx::query_as::<_, ModelStatsRow>(
+        r#"SELECT model,
+                  COUNT(*) as total_requests,
+                  COUNT(*) FILTER (WHERE status_code = 200) as success_count,
+                  COUNT(*) FILTER (WHERE status_code != 200) as error_count,
+                  COALESCE(SUM(input_tokens), 0) as total_input_tokens,
+                  COALESCE(SUM(output_tokens), 0) as total_output_tokens,
+                  COALESCE(AVG(duration_ms), 0)::int as avg_duration_ms,
+                  MAX(created_at) as last_request_at
+           FROM boom_request_log
+           GROUP BY model
+           ORDER BY total_requests DESC"#,
+    )
+    .fetch_all(pool)
+    .await;
+
+    match stats {
+        Ok(rows) => Json(json!({"models": rows})).into_response(),
+        Err(e) => {
+            tracing::error!("Failed to query model stats: {}", e);
+            Json(json!({"error": e.to_string()})).into_response()
+        }
+    }
+}

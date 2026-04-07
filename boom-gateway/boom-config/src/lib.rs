@@ -284,15 +284,15 @@ impl ModelGroupAlias {
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct RouterSettings {
-    /// Routing strategy: round_robin, least_latency, least_busy, fallback.
-    #[serde(default = "default_routing_strategy")]
-    pub routing_strategy: String,
+    /// Scheduling policy: round_robin (default).
+    #[serde(default = "default_schedule_policy", alias = "routing_strategy")]
+    pub schedule_policy: String,
     /// Model group aliases: alias_name → target_model_name.
     #[serde(default)]
     pub model_group_alias: HashMap<String, ModelGroupAlias>,
 }
 
-fn default_routing_strategy() -> String {
+fn default_schedule_policy() -> String {
     "round_robin".to_string()
 }
 
@@ -405,9 +405,9 @@ pub fn load_config(path: &str) -> Result<Config, GatewayError> {
     }
 
     tracing::info!(
-        "Config loaded: {} model(s), strategy={}",
+        "Config loaded: {} model(s), policy={}",
         config.model_list.len(),
-        config.router_settings.routing_strategy,
+        config.router_settings.schedule_policy,
     );
 
     Ok(config)

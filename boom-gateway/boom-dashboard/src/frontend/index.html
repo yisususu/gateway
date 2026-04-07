@@ -80,6 +80,7 @@
         <aside class="sidebar">
           <h2>Admin Panel</h2>
           <nav>
+            <a href="#/admin/stats" class="nav-link" data-section="admin-stats">Stats</a>
             <a href="#/admin/models" class="nav-link" data-section="admin-models">Models</a>
             <a href="#/admin/aliases" class="nav-link" data-section="admin-aliases">Aliases</a>
             <a href="#/admin/plans" class="nav-link" data-section="admin-plans">Plans</a>
@@ -94,6 +95,14 @@
           </div>
         </aside>
         <main class="main-content">
+          <!-- Stats Section -->
+          <section id="admin-stats" class="section">
+            <div class="section-header">
+              <h2>Model Statistics</h2>
+            </div>
+            <div id="stats-table-wrap"><p class="loading">Loading...</p></div>
+          </section>
+
           <!-- Models Section -->
           <section id="admin-models" class="section">
             <div class="section-header">

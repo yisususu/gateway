@@ -5,4 +5,5 @@ edition.workspace = true
 
 [dependencies]
 boom-core = { path = "../boom-core" }
+arc-swap = { workspace = true }
 dashmap = { workspace = true }

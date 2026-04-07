@@ -66,6 +66,11 @@ impl DeploymentStore {
         Some(providers[idx % providers.len()].clone())
     }
 
+    /// Get all providers for a model (for custom scheduling).
+    pub fn get_providers(&self, model_name: &str) -> Option<Vec<Arc<dyn Provider>>> {
+        self.deployments.get(model_name).map(|r| r.value().clone())
+    }
+
     /// Get all model names (deployment keys).
     pub fn model_names(&self) -> Vec<String> {
         self.deployments.iter().map(|r| r.key().clone()).collect()

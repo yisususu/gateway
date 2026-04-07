@@ -378,6 +378,7 @@ dependencies = [
 name = "boom-routing"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "boom-core",
  "dashmap",
 ]

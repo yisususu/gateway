@@ -1,9 +1,9 @@
 use arc_swap::ArcSwap;
 use boom_auth::DbAuthenticator;
 use boom_config::Config;
-use boom_core::provider::{Authenticator, Provider};
+use boom_core::provider::Authenticator;
 use boom_limiter::{PlanStore, RateLimitPlan, ScheduleSlot, SlidingWindowLimiter};
-use boom_routing::{AliasStore, DeploymentStore};
+use boom_routing::{AliasStore, DeploymentStore, Router, RoundRobinPolicy, SchedulePolicy};
 use boom_provider;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -35,6 +35,8 @@ pub struct AppState {
     pub deployment_store: Arc<DeploymentStore>,
     /// Alias store survives reloads (preserves model aliases).
     pub alias_store: Arc<AliasStore>,
+    /// Router owns deployment + alias stores for routing decisions.
+    pub router: Arc<Router>,
     /// Request counter for periodic summary logging.
     pub request_count: Arc<AtomicU64>,
 }
@@ -45,32 +47,6 @@ pub struct AppStateInner {
     pub config: Config,
     pub auth: Arc<dyn Authenticator>,
     pub health: HealthStatus,
-}
-
-impl AppStateInner {
-    /// Return all model names that should be visible in the model list.
-    /// Includes deployment keys (except "*") plus non-hidden aliases.
-    /// Delegates to the stores passed in.
-    #[allow(dead_code)]
-    pub fn visible_model_names(
-        &self,
-        deployment_store: &DeploymentStore,
-        alias_store: &AliasStore,
-    ) -> Vec<String> {
-        let mut names: Vec<String> = deployment_store
-            .model_names()
-            .into_iter()
-            .filter(|k| k != "*")
-            .collect();
-
-        for alias_name in alias_store.visible_names() {
-            if !names.contains(&alias_name) {
-                names.push(alias_name);
-            }
-        }
-
-        names
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -113,6 +89,12 @@ impl AppState {
         // 4. Deployment store & alias store survive across reloads.
         let deployment_store = Arc::new(DeploymentStore::new());
         let alias_store = Arc::new(AliasStore::new());
+
+        // Create scheduling policy from config.
+        let policy = create_policy(&config);
+
+        // Router wraps stores + policy for routing decisions.
+        let router = Arc::new(Router::new(deployment_store.clone(), alias_store.clone(), policy));
 
         // 5. Build from YAML first, then layer DB-only records on top.
         build_deployments_from_config(&config, &deployment_store);
@@ -159,6 +141,7 @@ impl AppState {
             plan_store,
             deployment_store,
             alias_store,
+            router,
             request_count: Arc::new(AtomicU64::new(0)),
         })
     }
@@ -205,6 +188,10 @@ impl AppState {
 
         self.plan_store.clear_plans();
         load_plans_from_config(&self.plan_store, &new_config);
+
+        // Recreate policy (fresh counters etc.) — router reuses same stores.
+        let new_policy = create_policy(&new_config);
+        self.router.set_policy(new_policy);
 
         if let Some(ref pool) = db_pool {
             // Sync YAML config to DB (upsert source='yaml', handle conflicts).
@@ -262,29 +249,6 @@ impl AppState {
             auth,
             health,
         })
-    }
-
-    /// Select a provider deployment for the given model.
-    ///
-    /// 1. Try exact match on model name in deployment store.
-    /// 2. If not found, try resolving via alias store.
-    /// 3. If still not found, fall back to the "*" catch-all deployment.
-    ///    Round-robin within the selected deployment group.
-    pub fn select_deployment(&self, model: &str) -> Option<Arc<dyn Provider>> {
-        // Exact match first.
-        if let Some(provider) = self.deployment_store.select(model) {
-            return Some(provider);
-        }
-
-        // Alias resolution.
-        if let Some(target) = self.alias_store.resolve(model) {
-            if let Some(provider) = self.deployment_store.select(&target) {
-                return Some(provider);
-            }
-        }
-
-        // Fallback to catch-all "*".
-        self.deployment_store.select("*")
     }
 
     /// Dump current runtime config (models, aliases, plans) to a timestamped YAML snapshot.
@@ -833,6 +797,20 @@ fn load_plans_from_config(plan_store: &Arc<PlanStore>, config: &Config) {
 // ═══════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════
+
+/// Create a scheduling policy from config.
+fn create_policy(config: &Config) -> Arc<dyn SchedulePolicy> {
+    match config.router_settings.schedule_policy.as_str() {
+        "round_robin" | "" => Arc::new(RoundRobinPolicy::new()),
+        other => {
+            tracing::warn!(
+                "Unknown schedule_policy '{}', falling back to round_robin",
+                other
+            );
+            Arc::new(RoundRobinPolicy::new())
+        }
+    }
+}
 
 /// Convert config schedule slots into limiter schedule slots.
 fn convert_schedule(slots: &[boom_config::ScheduleSlotConfig]) -> Vec<ScheduleSlot> {

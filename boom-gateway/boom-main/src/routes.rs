@@ -12,7 +12,7 @@ use boom_core::provider::RateLimiter;
 use boom_core::types::*;
 use boom_core::GatewayError;
 use boom_limiter::{ConcurrencyGuard, GuardedStream, PlanStore, RateLimitPlan};
-use boom_routing::{AliasStore, DeploymentStore};
+use boom_routing::Router;
 use futures::StreamExt;
 use sqlx::PgPool;
 use std::convert::Infallible;
@@ -106,7 +106,7 @@ async fn chat_completions_inner(
     tracing::info!(request_id = %request_id, model = %model, stream = is_stream, path = api_path, "chat_completions request started");
 
     // 1. Model access check (deployment-aware, alias-aware).
-    check_model_access(identity, &req.model, &state.deployment_store, &state.alias_store)
+    check_model_access(identity, &req.model, &state.router)
         .map_err(|e| {
             log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()));
             GatewayErrorReply(e, false)
@@ -156,7 +156,8 @@ async fn chat_completions_inner(
 
     // 3. Select provider deployment.
     let provider = state
-        .select_deployment(&req.model)
+        .router
+        .select_provider(&req.model)
         .ok_or_else(|| {
             let e = GatewayError::ModelNotFound(req.model.clone());
             log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()));
@@ -256,11 +257,7 @@ pub async fn list_models(
     let _inner = state.inner.load();
 
     // Collect all visible model names (deployments + non-hidden aliases, excluding "*").
-    let all_names: Vec<String> = state.deployment_store.model_names()
-        .into_iter()
-        .filter(|k| k != "*")
-        .chain(state.alias_store.visible_names())
-        .collect();
+    let all_names = state.router.visible_model_names();
 
     let visible: Vec<ModelInfo> = if identity.models.is_empty() {
         // Unrestricted key — show all visible models.
@@ -283,7 +280,7 @@ pub async fn list_models(
                     return true;
                 }
                 // If name is an alias, check if key has access to target model.
-                if let Some(target) = state.alias_store.resolve(name) {
+                if let Some(target) = state.router.resolve_model(name) {
                     if identity.models.iter().any(|m| m == &target && m != "*") {
                         return true;
                     }
@@ -293,7 +290,7 @@ pub async fn list_models(
                     if allowed == "*" {
                         continue;
                     }
-                    if let Some(target) = state.alias_store.resolve(allowed) {
+                    if let Some(target) = state.router.resolve_model(allowed) {
                         if target == **name {
                             return true;
                         }
@@ -328,11 +325,7 @@ pub async fn get_model(
     let identity = auth.identity();
 
     // Collect all visible model names (same logic as list_models).
-    let all_names: Vec<String> = state.deployment_store.model_names()
-        .into_iter()
-        .filter(|k| k != "*")
-        .chain(state.alias_store.visible_names())
-        .collect();
+    let all_names = state.router.visible_model_names();
 
     let is_accessible = if identity.models.is_empty() {
         true // Unrestricted key — check existence only.
@@ -340,11 +333,11 @@ pub async fn get_model(
         // Restricted key — check if model_id is in the accessible set.
         let accessible: Vec<&String> = all_names.iter().filter(|name| {
             identity.models.iter().any(|m| *m == **name && m != "*")
-                || state.alias_store.resolve(name)
+                || state.router.resolve_model(name)
                     .map(|target| identity.models.iter().any(|m| *m == target && m != "*"))
                     .unwrap_or(false)
                 || identity.models.iter().any(|allowed| {
-                    state.alias_store.resolve(allowed)
+                    state.router.resolve_model(allowed)
                         .map(|target| target == **name)
                         .unwrap_or(false)
                 })
@@ -675,8 +668,7 @@ impl From<GatewayError> for GatewayErrorReply {
 fn check_model_access(
     identity: &AuthIdentity,
     model: &str,
-    deployment_store: &Arc<DeploymentStore>,
-    alias_store: &Arc<AliasStore>,
+    router: &Router,
 ) -> Result<(), GatewayError> {
     // Unrestricted key
     if identity.models.is_empty() {
@@ -697,7 +689,7 @@ fn check_model_access(
     }
 
     // Alias match: requested model is an alias -> check if target is in key_models
-    if let Some(target) = alias_store.resolve(model) {
+    if let Some(target) = router.resolve_model(model) {
         if identity.models.iter().any(|m| m == &target) {
             tracing::debug!(
                 "check_model_access: key={:?}, model={}, result=allow (alias -> target={})",
@@ -709,7 +701,7 @@ fn check_model_access(
 
     // Reverse alias: key_models has an alias that targets the requested model
     for allowed in &identity.models {
-        if let Some(target) = alias_store.resolve(allowed) {
+        if let Some(target) = router.resolve_model(allowed) {
             if target == model {
                 tracing::debug!(
                     "check_model_access: key={:?}, model={}, result=allow (key has alias '{}' -> this model)",
@@ -722,7 +714,7 @@ fn check_model_access(
 
     // Not in key_models — check if it's a configured model or a wildcard case
     let has_wildcard = identity.models.iter().any(|m| m == "*");
-    let model_configured = deployment_store.contains(model);
+    let model_configured = router.is_model_configured(model);
 
     if model_configured {
         tracing::warn!(
@@ -950,7 +942,7 @@ pub async fn messages(
     tracing::info!(request_id = %request_id, model = %model, stream = is_stream, "messages request started");
 
     // 1. Model access check (deployment-aware, alias-aware).
-    check_model_access(identity, &openai_req.model, &state.deployment_store, &state.alias_store)
+    check_model_access(identity, &openai_req.model, &state.router)
         .map_err(|e| {
             log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()));
             AnthropicErrorReply(e, is_stream)
@@ -999,7 +991,8 @@ pub async fn messages(
 
     // 3. Select provider deployment.
     let provider = state
-        .select_deployment(&openai_req.model)
+        .router
+        .select_provider(&openai_req.model)
         .ok_or_else(|| {
             let e = GatewayError::ModelNotFound(openai_req.model.clone());
             log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()));
@@ -1396,8 +1389,7 @@ pub async fn pt_chat_completions(
     check_model_access(
         identity,
         &chat_req.model,
-        &state.deployment_store,
-        &state.alias_store,
+        &state.router,
     )
     .map_err(|e| {
         log_error(&state, &identity, &model, "/v1/chat/completions", is_stream, start, &e, Some(request_id.clone()));
@@ -1542,8 +1534,7 @@ pub async fn pt_messages(
     check_model_access(
         identity,
         &model,
-        &state.deployment_store,
-        &state.alias_store,
+        &state.router,
     )
     .map_err(|e| {
         log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()));
@@ -1689,7 +1680,7 @@ pub async fn pt_completions(
     tracing::info!(request_id = %request_id, model = %model, stream = is_stream, "pt_completions request started");
 
     // 1. Model access check.
-    check_model_access(identity, &model, &state.deployment_store, &state.alias_store)
+    check_model_access(identity, &model, &state.router)
         .map_err(|e| {
             log_error(&state, &identity, &model, "/v1/completions", is_stream, start, &e, Some(request_id.clone()));
             GatewayErrorReply(e, false)

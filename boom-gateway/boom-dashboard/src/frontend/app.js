@@ -110,7 +110,7 @@
 
   // ── Routing (admin) ───────────────────────────────────
   function onRoute() {
-    const hash = location.hash || "#/admin/models";
+    const hash = location.hash || "#/admin/stats";
     document.querySelectorAll("#page-admin .nav-link").forEach((a) => {
       a.classList.toggle("active", a.getAttribute("href") === hash);
     });
@@ -118,7 +118,8 @@
       s.classList.toggle("active", s.id === sectionFromHash(hash));
     });
     const section = sectionFromHash(hash);
-    if (section === "admin-models") loadModels();
+    if (section === "admin-stats") loadStats();
+    else if (section === "admin-models") loadModels();
     else if (section === "admin-aliases") loadAliases();
     else if (section === "admin-plans") loadPlans();
     else if (section === "admin-keys") { setupKeysSearch(); loadKeys(); }
@@ -129,6 +130,7 @@
   }
 
   function sectionFromHash(hash) {
+    if (hash.includes("/admin/stats")) return "admin-stats";
     if (hash.includes("/admin/models")) return "admin-models";
     if (hash.includes("/admin/aliases")) return "admin-aliases";
     if (hash.includes("/admin/plans")) return "admin-plans";
@@ -138,6 +140,47 @@
     if (hash.includes("/admin/logs")) return "admin-logs";
     if (hash.includes("/admin/config")) return "admin-config";
     return "admin-models";
+  }
+
+  // ── Stats ─────────────────────────────────────────────
+  async function loadStats() {
+    try {
+      const data = await api("/admin/stats/models");
+      renderStatsTable(data.models || []);
+    } catch (err) {
+      console.error("loadStats error:", err);
+    }
+  }
+
+  function renderStatsTable(models) {
+    const wrap = document.getElementById("stats-table-wrap");
+    if (!models.length) {
+      wrap.innerHTML = "<p>No data yet.</p>";
+      return;
+    }
+    wrap.innerHTML =
+      '<table class="data-table"><thead><tr>' +
+      "<th>Model</th><th>Requests</th><th>Success</th><th>Errors</th>" +
+      "<th>Input Tokens</th><th>Output Tokens</th><th>Avg Duration (ms)</th>" +
+      "<th>Last Request</th>" +
+      "</tr></thead><tbody>" +
+      models
+        .map(function (m) {
+          return (
+            "<tr>" +
+            "<td>" + esc(m.model) + "</td>" +
+            "<td>" + m.total_requests + "</td>" +
+            "<td>" + m.success_count + "</td>" +
+            "<td>" + m.error_count + "</td>" +
+            "<td>" + m.total_input_tokens.toLocaleString() + "</td>" +
+            "<td>" + m.total_output_tokens.toLocaleString() + "</td>" +
+            "<td>" + m.avg_duration_ms + "</td>" +
+            "<td>" + (m.last_request_at || "-") + "</td>" +
+            "</tr>"
+          );
+        })
+        .join("") +
+      "</tbody></table>";
   }
 
   // ── User Dashboard ────────────────────────────────────
