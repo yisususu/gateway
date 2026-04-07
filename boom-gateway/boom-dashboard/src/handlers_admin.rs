@@ -1594,7 +1594,7 @@ struct ModelStatsRow {
     total_input_tokens: i64,
     total_output_tokens: i64,
     avg_duration_ms: i32,
-    last_request_at: Option<NaiveDateTime>,
+    last_request_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub async fn get_model_stats(
