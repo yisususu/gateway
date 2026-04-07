@@ -307,7 +307,7 @@ pub async fn login(
         return sign_and_respond(&state, "admin".to_string(), "admin".to_string(), String::new());
     }
 
-    // 4. User login: hash the key (matching boom-auth's logic), then lookup in DB.
+    // 4. User login: hash the key, then lookup in DB.
     let db_pool = match &state.db_pool {
         Some(pool) => pool,
         None => {
@@ -319,12 +319,8 @@ pub async fn login(
         }
     };
 
-    // Only hash sk- prefixed keys, same as boom-auth/key_auth.rs.
-    let token_hash = if api_key.starts_with("sk-") {
-        hash_token(&api_key)
-    } else {
-        api_key.clone()
-    };
+    // All keys are stored as SHA-256 hash in DB.
+    let token_hash = hash_token(&api_key);
 
     let row_result: Result<Option<(Option<String>, Option<String>, Option<bool>)>, _> = sqlx::query_as(
         r#"SELECT user_id, key_alias, blocked FROM "boom_verification_token" WHERE token = $1"#,

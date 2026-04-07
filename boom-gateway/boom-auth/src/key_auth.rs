@@ -170,12 +170,8 @@ impl Authenticator for DbAuthenticator {
             });
         }
 
-        // 2. Hash the key (litellm hashes all sk- prefixed keys)
-        let hashed = if raw_key.starts_with("sk-") {
-            Self::hash_token(raw_key)
-        } else {
-            raw_key.to_string()
-        };
+        // 2. Hash the key — all keys are stored as SHA-256 hash in DB.
+        let hashed = Self::hash_token(raw_key);
 
         // 3. Look up in cache / DB
         let token = self
