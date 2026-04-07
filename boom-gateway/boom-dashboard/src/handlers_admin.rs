@@ -1656,3 +1656,36 @@ pub async fn get_inflight_stats(
         })).collect::<Vec<_>>()
     })).into_response()
 }
+
+// ═══════════════════════════════════════════════════════════
+// Rate Limit Window Reset
+// ═══════════════════════════════════════════════════════════
+
+/// POST /admin/limits/reset/{key_hash} — clear all rate limit windows for one key.
+pub async fn reset_limits_for_key(
+    _session: AdminSession,
+    Extension(state): Extension<Arc<DashboardState>>,
+    Path(key_hash): Path<String>,
+) -> Json<Value> {
+    tracing::info!(key_hash = %key_hash, "Admin resetting rate limit windows for key");
+    let removed = state.limiter.clear_for_key(&key_hash);
+    Json(json!({
+        "ok": true,
+        "cleared": removed,
+        "message": format!("Cleared {} window counter(s) for key '{}'", removed, key_hash)
+    }))
+}
+
+/// POST /admin/limits/reset — clear all rate limit windows for all keys.
+pub async fn reset_limits_all(
+    _session: AdminSession,
+    Extension(state): Extension<Arc<DashboardState>>,
+) -> Json<Value> {
+    tracing::info!("Admin resetting ALL rate limit windows");
+    let removed = state.limiter.clear_all();
+    Json(json!({
+        "ok": true,
+        "cleared": removed,
+        "message": format!("Cleared all {} window counter(s)", removed)
+    }))
+}

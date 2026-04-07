@@ -540,6 +540,7 @@
         <td>${k.blocked ? '<span style="color:var(--danger)">Blocked</span>' : "Active"}</td>
         <td>
           <button class="btn-small" onclick="window._editKey('${esc(k.token_hash)}')">Edit</button>
+          <button class="btn-small" onclick="window._resetKeyLimits('${esc(k.token_hash)}')">Reset Limits</button>
           ${k.blocked
             ? `<button class="btn-small" onclick="window._unblockKey('${esc(k.token_hash)}')">Unblock</button>`
             : `<button class="btn-danger" onclick="window._blockKey('${esc(k.token_hash)}')">Block</button>`}
@@ -571,6 +572,11 @@
   window._unblockKey = async (hash) => {
     await api(`/admin/keys/${encodeURIComponent(hash)}/unblock`, { method: "POST" });
     loadKeys();
+  };
+  window._resetKeyLimits = async (hash) => {
+    if (!confirm("Reset all rate limit windows for this key?")) return;
+    const r = await api(`/admin/limits/reset/${encodeURIComponent(hash)}`, { method: "POST" });
+    alert(r.message || "Done");
   };
 
   // ── Admin: Assignments ────────────────────────────────
@@ -828,6 +834,12 @@
   // ── Admin: Modals ─────────────────────────────────────
   function setupAdminButtons() {
     document.getElementById("btn-new-plan").addEventListener("click", showNewPlanModal);
+    const btnResetAll = document.getElementById("btn-reset-all-limits");
+    if (btnResetAll) btnResetAll.addEventListener("click", async () => {
+      if (!confirm("Reset ALL rate limit windows for ALL keys?")) return;
+      const r = await api("/admin/limits/reset", { method: "POST" });
+      alert(r.message || "Done");
+    });
     document.getElementById("btn-new-key").addEventListener("click", showNewKeyModal);
     document.getElementById("btn-new-assignment").addEventListener("click", showNewAssignmentModal);
     const btnModel = document.getElementById("btn-new-model");

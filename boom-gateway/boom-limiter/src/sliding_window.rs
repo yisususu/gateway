@@ -199,6 +199,23 @@ impl SlidingWindowLimiter {
         });
         before - self.windows.len()
     }
+
+    /// Clear all window counters for a specific key_hash.
+    /// Returns the number of counters removed.
+    pub fn clear_for_key(&self, key_hash: &str) -> usize {
+        let prefix = format!("{}:", key_hash);
+        let before = self.windows.len();
+        self.windows.retain(|k, _| !k.starts_with(&prefix));
+        before - self.windows.len()
+    }
+
+    /// Clear all window counters (reset everything).
+    /// Returns the number of counters removed.
+    pub fn clear_all(&self) -> usize {
+        let count = self.windows.len();
+        self.windows.clear();
+        count
+    }
 }
 
 impl Default for SlidingWindowLimiter {

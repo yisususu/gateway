@@ -124,6 +124,15 @@ pub fn build_router<S: Clone + Send + Sync + 'static>(state: DashboardState) -> 
             "/dashboard/api/admin/stats/inflight",
             get(handlers_admin::get_inflight_stats),
         )
+        // Admin — Rate Limit Window Reset.
+        .route(
+            "/dashboard/api/admin/limits/reset/{key_hash}",
+            post(handlers_admin::reset_limits_for_key),
+        )
+        .route(
+            "/dashboard/api/admin/limits/reset",
+            post(handlers_admin::reset_limits_all),
+        )
         // Admin — Teams.
         .route(
             "/dashboard/api/admin/teams",
