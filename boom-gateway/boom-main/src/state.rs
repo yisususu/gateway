@@ -72,7 +72,13 @@ impl AppState {
         let db_pool = match &config.general_settings.database_url {
             Some(url) => {
                 tracing::info!("Connecting to database...");
-                let pool = PgPool::connect(url).await?;
+                let pool = sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(30)
+                    .acquire_timeout(std::time::Duration::from_secs(10))
+                    .idle_timeout(std::time::Duration::from_secs(600))
+                    .max_lifetime(std::time::Duration::from_secs(1800))
+                    .connect(url)
+                    .await?;
                 tracing::info!("Database connected");
                 Some(pool)
             }
@@ -176,7 +182,15 @@ impl AppState {
         let db_pool = if old_db_url != new_config.general_settings.database_url {
             tracing::info!("Database URL changed, reconnecting...");
             match &new_config.general_settings.database_url {
-                Some(url) => Some(PgPool::connect(url).await?),
+                Some(url) => Some(
+                    sqlx::postgres::PgPoolOptions::new()
+                        .max_connections(30)
+                        .acquire_timeout(std::time::Duration::from_secs(10))
+                        .idle_timeout(std::time::Duration::from_secs(600))
+                        .max_lifetime(std::time::Duration::from_secs(1800))
+                        .connect(url)
+                        .await?,
+                ),
                 None => None,
             }
         } else {
