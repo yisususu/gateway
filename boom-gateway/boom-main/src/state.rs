@@ -344,12 +344,13 @@ async fn sync_yaml_to_db(pool: &PgPool, config: &Config) -> Result<(), sqlx::Err
     for entry in &config.model_list {
         let p = &entry.litellm_params;
         let headers_json = serde_json::to_value(&p.headers).unwrap_or(serde_json::json!({}));
+        let deployment_id = entry.model_info.as_ref().and_then(|mi| mi.id.clone());
         sqlx::query(
             r#"INSERT INTO boom_model_deployment
                (model_name, litellm_model, api_key, api_key_env, api_base, api_version,
                 aws_region_name, aws_access_key_id, aws_secret_access_key,
-                rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, true, 'yaml')"#,
+                rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source, deployment_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, true, 'yaml', $16)"#,
         )
         .bind(&entry.model_name)
         .bind(&p.model)
@@ -366,6 +367,7 @@ async fn sync_yaml_to_db(pool: &PgPool, config: &Config) -> Result<(), sqlx::Err
         .bind(&headers_json)
         .bind(p.temperature)
         .bind(p.max_tokens.map(|v| v as i32))
+        .bind(&deployment_id)
         .execute(pool)
         .await?;
     }
@@ -503,6 +505,7 @@ struct DeploymentRow {
     max_tokens: Option<i32>,
     enabled: Option<bool>,
     source: Option<String>,
+    deployment_id: Option<String>,
 }
 
 /// Load source='db' model deployments from DB and add providers to DeploymentStore.
@@ -511,7 +514,7 @@ async fn load_db_only_deployments(pool: &PgPool, deployment_store: &Arc<Deployme
     let rows: Vec<DeploymentRow> = match sqlx::query_as::<_, DeploymentRow>(
         r#"SELECT id, model_name, litellm_model, api_key, api_key_env, api_base, api_version,
                   aws_region_name, aws_access_key_id, aws_secret_access_key,
-                  rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source
+                  rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source, deployment_id
            FROM boom_model_deployment
            WHERE source = 'db' AND enabled IS NOT FALSE
            ORDER BY model_name, created_at"#,
@@ -558,6 +561,7 @@ async fn load_db_only_deployments(pool: &PgPool, deployment_store: &Arc<Deployme
             row.api_base.clone(),
             row.timeout as u64,
             &extra,
+            row.deployment_id.clone(),
         ) {
             Ok(provider) => {
                 deployment_store.add_deployment(&row.model_name, provider);
@@ -720,12 +724,15 @@ fn build_deployments_from_config(config: &Config, deployment_store: &Arc<Deploym
             extra.insert("aws_region_name".to_string(), r.clone());
         }
 
+        let deployment_id = entry.model_info.as_ref().and_then(|mi| mi.id.clone());
+
         match boom_provider::create_provider(
             &p.model,
             p.api_key.clone(),
             p.api_base.clone(),
             p.timeout,
             &extra,
+            deployment_id,
         ) {
             Ok(provider) => {
                 deployment_store.add_deployment(&entry.model_name, provider);
@@ -913,6 +920,7 @@ struct SnapshotDeploymentRow {
     headers: serde_json::Value,
     temperature: Option<f64>,
     max_tokens: Option<i32>,
+    deployment_id: Option<String>,
 }
 
 /// Row for snapshot: alias.
@@ -940,7 +948,7 @@ async fn build_config_snapshot_value(pool: &PgPool) -> Result<serde_json::Value,
     let model_rows: Vec<SnapshotDeploymentRow> = sqlx::query_as::<_, SnapshotDeploymentRow>(
         r#"SELECT model_name, litellm_model, api_key, api_base, api_version,
                   aws_region_name, aws_access_key_id, aws_secret_access_key,
-                  rpm, tpm, timeout, headers, temperature, max_tokens
+                  rpm, tpm, timeout, headers, temperature, max_tokens, deployment_id
            FROM boom_model_deployment
            WHERE enabled IS NOT FALSE
            ORDER BY model_name, created_at"#,
@@ -996,10 +1004,22 @@ async fn build_config_snapshot_value(pool: &PgPool) -> Result<serde_json::Value,
                 }
             }
 
-            serde_json::json!({
+            let mut entry = serde_json::json!({
                 "model_name": r.model_name,
                 "litellm_params": litellm_params,
-            })
+            });
+
+            // Include model_info if deployment_id is set.
+            if let Some(ref did) = r.deployment_id {
+                if !did.is_empty() {
+                    entry.as_object_mut().unwrap().insert(
+                        "model_info".into(),
+                        serde_json::json!({ "id": did }),
+                    );
+                }
+            }
+
+            entry
         })
         .collect();
 

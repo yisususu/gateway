@@ -42,5 +42,11 @@ pub async fn run_request_log_migration(pool: &sqlx::PgPool) -> Result<(), sqlx::
     )
     .execute(pool)
     .await;
+    // Add deployment_id column to existing tables (no-op if already present).
+    let _ = sqlx::query(
+        r#"ALTER TABLE boom_request_log ADD COLUMN IF NOT EXISTS deployment_id TEXT"#,
+    )
+    .execute(pool)
+    .await;
     Ok(())
 }

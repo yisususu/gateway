@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS boom_model_deployment (
     max_tokens        INTEGER,
     enabled           BOOLEAN NOT NULL DEFAULT true,
     source            TEXT    NOT NULL DEFAULT 'yaml',
+    deployment_id     TEXT,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

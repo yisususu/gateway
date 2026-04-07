@@ -818,6 +818,8 @@ pub struct CreateDeploymentRequest {
     pub max_tokens: Option<i32>,
     #[serde(default = "default_true_val")]
     pub enabled: bool,
+    #[serde(default)]
+    pub deployment_id: Option<String>,
 }
 
 fn default_timeout() -> i64 {
@@ -849,6 +851,7 @@ struct DeploymentRow {
     max_tokens: Option<i32>,
     enabled: Option<bool>,
     source: Option<String>,
+    deployment_id: Option<String>,
     created_at: Option<chrono::DateTime<chrono::Utc>>,
     updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -868,7 +871,7 @@ pub async fn list_models(
         r#"SELECT id, model_name, litellm_model, api_key, api_key_env, api_base, api_version,
                   aws_region_name, aws_access_key_id, aws_secret_access_key,
                   rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source,
-                  created_at, updated_at
+                  deployment_id, created_at, updated_at
            FROM boom_model_deployment
            ORDER BY model_name, created_at"#,
     )
@@ -900,6 +903,7 @@ pub async fn list_models(
                 "max_tokens": r.max_tokens,
                 "enabled": r.enabled.unwrap_or(true),
                 "source": r.source,
+                "deployment_id": r.deployment_id,
                 "created_at": r.created_at.map(|d| d.to_string()),
                 "updated_at": r.updated_at.map(|d| d.to_string()),
             })
@@ -1294,6 +1298,7 @@ struct LogRow {
     output_tokens: Option<i32>,
     duration_ms: Option<i32>,
     created_at: Option<chrono::DateTime<chrono::Utc>>,
+    deployment_id: Option<String>,
 }
 
 pub async fn list_logs(
@@ -1383,7 +1388,8 @@ pub async fn list_logs(
                   bt.team_alias,
                   rl.model, rl.api_path,
                   rl.is_stream, rl.status_code, rl.error_type, rl.error_message,
-                  rl.input_tokens, rl.output_tokens, rl.duration_ms, rl.created_at
+                  rl.input_tokens, rl.output_tokens, rl.duration_ms, rl.created_at,
+                  rl.deployment_id
            FROM boom_request_log rl
            LEFT JOIN boom_team_table bt ON rl.team_id = bt.team_id
            {where_sql}
@@ -1466,6 +1472,10 @@ pub async fn list_logs(
     let logs: Vec<Value> = rows
         .into_iter()
         .map(|r| {
+            let display_model = match &r.deployment_id {
+                Some(did) if !did.is_empty() => format!("{}:{}", r.model, did),
+                _ => r.model.clone(),
+            };
             json!({
                 "request_id": r.request_id,
                 "key_hash": r.key_hash,
@@ -1473,7 +1483,7 @@ pub async fn list_logs(
                 "key_alias": r.key_alias,
                 "team_id": r.team_id,
                 "team_alias": r.team_alias,
-                "model": r.model,
+                "model": display_model,
                 "api_path": r.api_path,
                 "is_stream": r.is_stream,
                 "status_code": r.status_code,

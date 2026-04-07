@@ -50,8 +50,8 @@ async fn handle_create_model(
         r#"INSERT INTO boom_model_deployment
            (model_name, litellm_model, api_key, api_key_env, api_base, api_version,
             aws_region_name, aws_access_key_id, aws_secret_access_key,
-            rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'db')
+            rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source, deployment_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'db', $17)
            RETURNING id"#,
     )
     .bind(&req.model_name)
@@ -70,6 +70,7 @@ async fn handle_create_model(
     .bind(req.temperature)
     .bind(req.max_tokens)
     .bind(req.enabled)
+    .bind(&req.deployment_id)
     .fetch_one(db_pool)
     .await
     .map_err(|e| format!("DB insert failed: {}", e))?;
@@ -101,7 +102,8 @@ async fn handle_update_model(
                api_base = $6, api_version = $7, aws_region_name = $8,
                aws_access_key_id = $9, aws_secret_access_key = $10,
                rpm = $11, tpm = $12, timeout = $13, headers = $14,
-               temperature = $15, max_tokens = $16, enabled = $17, updated_at = NOW()
+               temperature = $15, max_tokens = $16, enabled = $17,
+               deployment_id = $18, updated_at = NOW()
            WHERE id = $1"#,
     )
     .bind(id)
@@ -121,6 +123,7 @@ async fn handle_update_model(
     .bind(req.temperature)
     .bind(req.max_tokens)
     .bind(req.enabled)
+    .bind(&req.deployment_id)
     .execute(db_pool)
     .await
     .map_err(|e| format!("DB update failed: {}", e))?;
@@ -185,7 +188,7 @@ async fn reload_model_deployments(
 ) {
     let rows: Vec<DeploymentRow> = match sqlx::query_as::<_, DeploymentRow>(
         r#"SELECT model_name, litellm_model, api_key, api_key_env, api_base, api_version,
-                  aws_region_name, timeout, headers
+                  aws_region_name, timeout, headers, deployment_id
            FROM boom_model_deployment
            WHERE model_name = $1 AND enabled IS NOT FALSE
            ORDER BY created_at"#,
@@ -226,6 +229,7 @@ struct DeploymentRow {
     aws_region_name: Option<String>,
     timeout: i64,
     headers: serde_json::Value,
+    deployment_id: Option<String>,
 }
 
 /// Build a Provider from a DB deployment row.
@@ -259,6 +263,7 @@ fn build_provider_from_row(row: &DeploymentRow) -> Option<Arc<dyn Provider>> {
         row.api_base.clone(),
         row.timeout as u64,
         &extra,
+        row.deployment_id.clone(),
     ) {
         Ok(provider) => Some(provider),
         Err(e) => {
@@ -293,6 +298,7 @@ fn build_provider(req: &boom_dashboard::handlers_admin::CreateDeploymentRequest)
         req.api_base.clone(),
         req.timeout as u64,
         &extra,
+        req.deployment_id.clone(),
     ) {
         Ok(provider) => Some(provider),
         Err(e) => {

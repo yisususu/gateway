@@ -15,14 +15,16 @@ pub struct GeminiProvider {
     client: Client,
     api_key: Option<String>,
     model: String,
+    deployment_id: Option<String>,
 }
 
 impl GeminiProvider {
-    pub fn new(client: Client, api_key: Option<String>, model: &str) -> Self {
+    pub fn new(client: Client, api_key: Option<String>, model: &str, deployment_id: Option<String>) -> Self {
         Self {
             client,
             api_key,
             model: model.to_string(),
+            deployment_id,
         }
     }
 
@@ -336,5 +338,9 @@ impl Provider for GeminiProvider {
 
     fn models(&self) -> &[String] {
         std::slice::from_ref(&self.model)
+    }
+
+    fn deployment_id(&self) -> Option<&str> {
+        self.deployment_id.as_deref()
     }
 }

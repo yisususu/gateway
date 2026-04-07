@@ -163,6 +163,8 @@ async fn chat_completions_inner(
             GatewayErrorReply(e, false)
         })?;
 
+    let deployment_id = provider.deployment_id().map(|s| s.to_string());
+
     // 4. Route to provider (streaming or non-streaming).
     if is_stream {
         let stream = provider.chat_stream(req).await.map_err(|e| {
@@ -189,6 +191,7 @@ async fn chat_completions_inner(
             input_tokens: None,
             output_tokens: None,
             duration_ms: None,
+            deployment_id,
         }, start, usage);
 
         let response = Sse::new(logged).keep_alive(KeepAlive::default());
@@ -220,6 +223,7 @@ async fn chat_completions_inner(
                 input_tokens: Some(input_tokens),
                 output_tokens: Some(output_tokens),
                 duration_ms: Some(duration_ms),
+                deployment_id,
             },
         );
 
@@ -1002,6 +1006,8 @@ pub async fn messages(
             AnthropicErrorReply(e, is_stream)
         })?;
 
+    let deployment_id = provider.deployment_id().map(|s| s.to_string());
+
     // 4. Route to provider.
     if is_stream {
         let stream = provider.chat_stream(openai_req).await.map_err(|e| {
@@ -1028,6 +1034,7 @@ pub async fn messages(
             input_tokens: None,
             output_tokens: None,
             duration_ms: None, // filled by LoggedStream::drop
+            deployment_id,
         }, start, usage);
 
         let response = Sse::new(logged).keep_alive(KeepAlive::default());
@@ -1059,6 +1066,7 @@ pub async fn messages(
                 input_tokens: Some(input_tokens),
                 output_tokens: Some(output_tokens),
                 duration_ms: Some(duration_ms),
+                deployment_id,
             },
         );
 
@@ -1462,6 +1470,7 @@ pub async fn pt_chat_completions(
                 input_tokens: None,
                 output_tokens: None,
                 duration_ms: None,
+                deployment_id: None,
             },
             start,
         })
@@ -1490,6 +1499,7 @@ pub async fn pt_chat_completions(
                 input_tokens: None,
                 output_tokens: None,
                 duration_ms: Some(start.elapsed().as_millis() as i32),
+                deployment_id: None,
             },
         );
     }
@@ -1601,6 +1611,7 @@ pub async fn pt_messages(
                 input_tokens: None,
                 output_tokens: None,
                 duration_ms: None,
+                deployment_id: None,
             },
             start,
         })
@@ -1629,6 +1640,7 @@ pub async fn pt_messages(
                 input_tokens: None,
                 output_tokens: None,
                 duration_ms: Some(start.elapsed().as_millis() as i32),
+                deployment_id: None,
             },
         );
     }
@@ -1740,6 +1752,7 @@ pub async fn pt_completions(
                 input_tokens: None,
                 output_tokens: None,
                 duration_ms: None,
+                deployment_id: None,
             },
             start,
         })
@@ -1767,6 +1780,7 @@ pub async fn pt_completions(
                 input_tokens: None,
                 output_tokens: None,
                 duration_ms: Some(start.elapsed().as_millis() as i32),
+                deployment_id: None,
             },
         );
     }

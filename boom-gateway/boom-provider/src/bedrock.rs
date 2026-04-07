@@ -13,14 +13,16 @@ pub struct BedrockProvider {
     client: Client,
     model: String,
     region: String,
+    deployment_id: Option<String>,
 }
 
 impl BedrockProvider {
-    pub fn new(client: Client, model: &str, region: &str) -> Self {
+    pub fn new(client: Client, model: &str, region: &str, deployment_id: Option<String>) -> Self {
         Self {
             client,
             model: model.to_string(),
             region: region.to_string(),
+            deployment_id,
         }
     }
 
@@ -56,5 +58,9 @@ impl Provider for BedrockProvider {
 
     fn models(&self) -> &[String] {
         std::slice::from_ref(&self.model)
+    }
+
+    fn deployment_id(&self) -> Option<&str> {
+        self.deployment_id.as_deref()
     }
 }

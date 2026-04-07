@@ -94,10 +94,27 @@ pub struct PlanSettings {
     pub plans: HashMap<String, PlanConfig>,
 }
 
+/// Model metadata — compatible with litellm's `model_info` field.
+///
+/// ```yaml
+/// model_info:
+///   id: node-a
+///   input_cost_per_token: 0.000005
+///   output_cost_per_token: 0.000015
+/// ```
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ModelInfo {
+    pub id: Option<String>,
+    pub input_cost_per_token: Option<f64>,
+    pub output_cost_per_token: Option<f64>,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ModelEntry {
     pub model_name: String,
     pub litellm_params: ProviderParams,
+    #[serde(default)]
+    pub model_info: Option<ModelInfo>,
 }
 
 /// Provider params — compatible with litellm's `litellm_params` format.

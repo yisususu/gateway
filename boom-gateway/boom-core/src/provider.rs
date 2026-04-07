@@ -23,6 +23,12 @@ pub trait Provider: Send + Sync + 'static {
 
     /// List models supported by this provider deployment.
     fn models(&self) -> &[String];
+
+    /// Optional deployment ID (from model_info.id), used to distinguish
+    /// same-name deployments in logs and scheduling.
+    fn deployment_id(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Rate limiter trait — supports per-key and per-model sliding window limits.

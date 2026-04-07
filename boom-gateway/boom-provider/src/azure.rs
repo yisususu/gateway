@@ -14,6 +14,7 @@ pub struct AzureProvider {
     deployment: String,
     api_version: String,
     base_url: String,
+    deployment_id: Option<String>,
 }
 
 impl AzureProvider {
@@ -23,6 +24,7 @@ impl AzureProvider {
         api_base: Option<String>,
         deployment: &str,
         api_version: &str,
+        deployment_id: Option<String>,
     ) -> Self {
         let base = api_base.unwrap_or_default();
         Self {
@@ -35,6 +37,7 @@ impl AzureProvider {
                 api_version.to_string()
             },
             base_url: base,
+            deployment_id,
         }
     }
 
@@ -187,5 +190,9 @@ impl Provider for AzureProvider {
 
     fn models(&self) -> &[String] {
         std::slice::from_ref(&self.deployment)
+    }
+
+    fn deployment_id(&self) -> Option<&str> {
+        self.deployment_id.as_deref()
     }
 }

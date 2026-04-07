@@ -18,6 +18,7 @@ pub struct AnthropicProvider {
     api_key: Option<String>,
     base_url: String,
     model: String,
+    deployment_id: Option<String>,
 }
 
 impl AnthropicProvider {
@@ -26,6 +27,7 @@ impl AnthropicProvider {
         api_key: Option<String>,
         api_base: Option<String>,
         model: &str,
+        deployment_id: Option<String>,
     ) -> Self {
         Self {
             client,
@@ -33,6 +35,7 @@ impl AnthropicProvider {
             base_url: api_base
                 .unwrap_or_else(|| "https://api.anthropic.com/v1".to_string()),
             model: model.to_string(),
+            deployment_id,
         }
     }
 
@@ -350,5 +353,9 @@ impl Provider for AnthropicProvider {
 
     fn models(&self) -> &[String] {
         std::slice::from_ref(&self.model)
+    }
+
+    fn deployment_id(&self) -> Option<&str> {
+        self.deployment_id.as_deref()
     }
 }
