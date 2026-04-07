@@ -12,8 +12,12 @@ use std::time::{Duration, Instant};
 
 // ── Login rate-limit constants ─────────────────────────────
 
+/// Failures before the first lockout.
 const MAX_LOGIN_FAILURES: u32 = 5;
-const LOCKOUT_DURATION: Duration = Duration::from_secs(15 * 60); // 15 minutes
+/// Lockout duration on the first lockout trigger (6th failure).
+const INITIAL_LOCKOUT: Duration = Duration::from_secs(10);
+/// Additional lockout per subsequent failure after initial lockout.
+const PER_FAILURE_LOCKOUT: Duration = Duration::from_secs(30);
 
 // ── JWT Claims ──────────────────────────────────────────────
 
@@ -191,17 +195,28 @@ fn check_login_lockout(state: &DashboardState, client_ip: &str) -> Option<Durati
     None
 }
 
-/// Record a failed login attempt. Returns true if this triggers a lockout.
+/// Record a failed login attempt.
+///
+/// Lockout strategy:
+///   - Failures 1..5: no lockout.
+///   - 6th failure: lock for INITIAL_LOCKOUT (10s).
+///   - Each subsequent failure extends lockout by PER_FAILURE_LOCKOUT (30s).
 fn record_login_failure(state: &DashboardState, client_ip: &str) -> bool {
     let map = &state.login_attempts;
     let now = Instant::now();
 
     map.entry(client_ip.to_string())
         .and_modify(|attempt| {
-            // If past the failure window, reset counter.
             attempt.fail_count += 1;
             if attempt.fail_count >= MAX_LOGIN_FAILURES {
-                attempt.locked_until = Some(now + LOCKOUT_DURATION);
+                let extra = if attempt.fail_count == MAX_LOGIN_FAILURES {
+                    INITIAL_LOCKOUT
+                } else {
+                    PER_FAILURE_LOCKOUT
+                };
+                attempt.locked_until = Some(
+                    attempt.locked_until.map_or(now, |t| t.max(now)) + extra,
+                );
             }
         })
         .or_insert(crate::state::LoginAttempt {
@@ -209,7 +224,6 @@ fn record_login_failure(state: &DashboardState, client_ip: &str) -> bool {
             locked_until: None,
         });
 
-    // Check if locked.
     map.get(client_ip)
         .map(|e| e.locked_until.is_some())
         .unwrap_or(false)
