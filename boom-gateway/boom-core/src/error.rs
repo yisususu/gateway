@@ -74,6 +74,18 @@ impl GatewayError {
         }
     }
 
+    /// Whether this error should be persisted to the request log DB.
+    /// Expected rejections (rate limit, concurrency, budget) are too frequent
+    /// to audit individually — they're tracked by the in-memory limiter instead.
+    pub fn should_log_to_db(&self) -> bool {
+        !matches!(
+            self,
+            Self::RateLimitExceeded { .. }
+                | Self::ConcurrencyExceeded { .. }
+                | Self::BudgetExceeded
+        )
+    }
+
     /// OpenAI-style error type string.
     pub fn error_type(&self) -> &str {
         match self {

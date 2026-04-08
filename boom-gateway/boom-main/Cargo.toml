@@ -36,3 +36,4 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 arc-swap = { workspace = true }
 reqwest = { workspace = true }
+moka = { workspace = true, features = ["sync"] }

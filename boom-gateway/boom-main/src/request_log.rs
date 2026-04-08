@@ -1,8 +1,19 @@
 use sqlx::PgPool;
-use std::time::Instant;
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 use boom_core::types::AuthIdentity;
 use boom_core::GatewayError;
 use crate::state::AppState;
+
+/// Dedup cache for expected rejections (rate-limit, concurrency, budget).
+/// Key: "{error_type}:{key_hash}:{model}", auto-expires after 60 s.
+/// Within the window, only the first rejection per (type, key, model) is written to DB.
+static REJECTION_DEDUP: LazyLock<moka::sync::Cache<String, ()>> = LazyLock::new(|| {
+    moka::sync::Cache::builder()
+        .time_to_live(Duration::from_secs(60))
+        .max_capacity(10_000)
+        .build()
+});
 
 /// A single request log record.
 pub struct RequestLog {
@@ -77,6 +88,20 @@ pub fn log_error(
     error: &GatewayError,
     request_id: Option<String>,
 ) {
+    if !error.should_log_to_db() {
+        let dedup_key = format!("{}:{}:{}", error.error_type(), identity.key_hash, model);
+        if REJECTION_DEDUP.get(&dedup_key).is_some() {
+            tracing::warn!(
+                status_code = error.status_code(),
+                error_type = error.error_type(),
+                "Request rejected (log deduplicated)"
+            );
+            return;
+        }
+        REJECTION_DEDUP.insert(dedup_key, ());
+        // First rejection in this window — fall through to write DB log
+    }
+
     log_request(
         state.db_pool.clone(),
         RequestLog {
