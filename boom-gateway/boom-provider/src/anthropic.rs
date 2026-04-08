@@ -184,7 +184,9 @@ impl Provider for AnthropicProvider {
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json");
 
+        // Non-streaming: upstream sends no data until the entire response is ready.
         let resp = builder
+            .timeout(std::time::Duration::from_secs(600))
             .json(&body)
             .send()
             .await

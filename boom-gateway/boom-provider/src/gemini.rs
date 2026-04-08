@@ -185,6 +185,7 @@ impl Provider for GeminiProvider {
         if let Some(ref key) = self.api_key {
             builder = builder.query(&[("key", key)]);
         }
+        builder = builder.timeout(std::time::Duration::from_secs(600));
 
         let resp = builder
             .json(&body)
