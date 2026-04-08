@@ -4,6 +4,7 @@ use boom_core::GatewayError;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Read-only snapshot of a single window counter.
@@ -147,6 +148,24 @@ impl SlidingWindowLimiter {
                 }
             })
             .collect()
+    }
+
+    /// Single-pass aggregation of usage for ALL keys.
+    /// Returns `HashMap<key_hash, (total_count, max_remaining_secs)>`.
+    /// Much cheaper than calling `get_usage_for_key` per key when you need all keys.
+    pub fn get_all_key_usage(&self) -> HashMap<String, (u64, u64)> {
+        let now = now_epoch_secs();
+        let mut result: HashMap<String, (u64, u64)> = HashMap::new();
+        for entry in self.windows.iter() {
+            // cache_key format: "{key_hash}:{model}:{window_secs}"
+            let key_hash = entry.key().split(':').next().unwrap_or("");
+            let counter = entry.value();
+            let remaining = counter.window_secs.saturating_sub(now.saturating_sub(counter.window_start));
+            let slot = result.entry(key_hash.to_string()).or_insert((0, 0));
+            slot.0 += counter.count;
+            slot.1 = slot.1.max(remaining);
+        }
+        result
     }
 
     // ── Persistence methods ─────────────────────────────────

@@ -534,7 +534,6 @@
   function renderKeysTable(keys) {
     const wrap = document.getElementById("keys-table-wrap");
     if (keys.length === 0) { wrap.innerHTML = "<p>No keys found.</p>"; return; }
-    keys.sort((a, b) => (b.usage_count || 0) - (a.usage_count || 0));
     wrap.innerHTML = `<table>
       <tr><th>Token</th><th>Alias</th><th>User</th><th>Usage</th><th>Reset</th><th>Spend</th><th>Budget</th><th>Status</th><th>Actions</th></tr>
       ${keys.map((k) => `<tr>

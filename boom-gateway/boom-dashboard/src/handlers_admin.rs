@@ -179,26 +179,21 @@ pub async fn list_keys(
         }
     };
 
-    let offset = (query.page - 1).max(0) * query.per_page;
-
     let search_pattern = query
         .search
         .as_deref()
         .map(|s| format!("%{}%", s.replace('%', "\\%").replace('_', "\\_")));
 
-    let (rows, total): (Vec<KeyRow>, i64) = if let Some(ref pattern) = search_pattern {
-        let rows = match sqlx::query_as(
+    // Fetch ALL keys from DB (no LIMIT/OFFSET) for global usage sorting.
+    let rows: Vec<KeyRow> = if let Some(ref pattern) = search_pattern {
+        match sqlx::query_as(
             r#"SELECT token, key_name, key_alias, user_id, team_id, models,
                       spend, blocked, rpm_limit, tpm_limit, max_budget,
                       budget_duration, expires, metadata, created_at
                FROM "boom_verification_token"
-               WHERE (key_name ILIKE $1 OR key_alias ILIKE $1 OR user_id ILIKE $1 OR token ILIKE $1)
-               ORDER BY created_at DESC NULLS LAST
-               LIMIT $2 OFFSET $3"#,
+               WHERE (key_name ILIKE $1 OR key_alias ILIKE $1 OR user_id ILIKE $1 OR token ILIKE $1)"#,
         )
         .bind(pattern)
-        .bind(query.per_page)
-        .bind(offset)
         .fetch_all(db_pool)
         .await
         {
@@ -211,27 +206,14 @@ pub async fn list_keys(
                 )
                     .into_response();
             }
-        };
-
-        let total: (i64,) =
-            sqlx::query_as(r#"SELECT COUNT(*) FROM "boom_verification_token" WHERE (key_name ILIKE $1 OR key_alias ILIKE $1 OR user_id ILIKE $1 OR token ILIKE $1)"#)
-                .bind(pattern)
-                .fetch_one(db_pool)
-                .await
-                .unwrap_or((0,));
-
-        (rows, total.0)
+        }
     } else {
-        let rows = match sqlx::query_as(
+        match sqlx::query_as(
             r#"SELECT token, key_name, key_alias, user_id, team_id, models,
                       spend, blocked, rpm_limit, tpm_limit, max_budget,
                       budget_duration, expires, metadata, created_at
-               FROM "boom_verification_token"
-               ORDER BY created_at DESC NULLS LAST
-               LIMIT $1 OFFSET $2"#,
+               FROM "boom_verification_token""#,
         )
-        .bind(query.per_page)
-        .bind(offset)
         .fetch_all(db_pool)
         .await
         {
@@ -244,30 +226,19 @@ pub async fn list_keys(
                 )
                     .into_response();
             }
-        };
-
-        let total: (i64,) =
-            sqlx::query_as(r#"SELECT COUNT(*) FROM "boom_verification_token""#)
-                .fetch_one(db_pool)
-                .await
-                .unwrap_or((0,));
-
-        (rows, total.0)
+        }
     };
 
-    let keys: Vec<Value> = rows
+    let total = rows.len() as i64;
+
+    // Single-pass limiter scan: aggregate usage for all keys at once.
+    let all_usage = state.limiter.get_all_key_usage();
+
+    let mut keys: Vec<Value> = rows
         .into_iter()
         .map(|r| {
             let token_prefix = format!("{}...", &r.token[..8.min(r.token.len())]);
-
-            // Real-time usage from limiter
-            let windows = state.limiter.get_usage_for_key(&r.token);
-            let total_count: u64 = windows.iter().map(|w| w.count).sum();
-            let max_remaining_secs: u64 = windows
-                .iter()
-                .map(|w| w.window_secs.saturating_sub(w.elapsed_secs))
-                .max()
-                .unwrap_or(0);
+            let (usage_count, usage_reset_secs) = all_usage.get(&r.token).copied().unwrap_or((0, 0));
 
             json!({
                 "token_prefix": token_prefix,
@@ -286,14 +257,26 @@ pub async fn list_keys(
                 "expires": r.expires.map(|d| d.to_string()),
                 "metadata": r.metadata,
                 "created_at": r.created_at.map(|d| d.to_string()),
-                "usage_count": total_count,
-                "usage_reset_secs": max_remaining_secs,
+                "usage_count": usage_count,
+                "usage_reset_secs": usage_reset_secs,
             })
         })
         .collect();
 
+    // Sort globally by usage_count descending.
+    keys.sort_by(|a, b| {
+        let ca = a.get("usage_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        let cb = b.get("usage_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        cb.cmp(&ca)
+    });
+
+    // In-memory pagination.
+    let offset = ((query.page - 1).max(0) * query.per_page) as usize;
+    let per_page = query.per_page as usize;
+    let page_keys: Vec<Value> = keys.into_iter().skip(offset).take(per_page).collect();
+
     Json(json!({
-        "keys": keys,
+        "keys": page_keys,
         "page": query.page,
         "per_page": query.per_page,
         "total": total,
