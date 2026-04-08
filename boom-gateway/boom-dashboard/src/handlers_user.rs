@@ -89,6 +89,7 @@ pub async fn get_usage(
     let concurrency = state.plan_store.get_concurrency(key_hash);
 
     Json(json!({
+        "plan_name": plan.as_ref().map(|p| p.name.as_str()),
         "concurrency": concurrency,
         "concurrency_limit": plan_concurrency,
         "windows": windows,

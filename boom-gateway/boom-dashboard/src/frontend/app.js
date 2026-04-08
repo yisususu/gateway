@@ -373,17 +373,23 @@
     if (usage.windows.length === 0) {
       html += "<p>No active rate limit windows.</p>";
     } else {
-      html += '<table><tr><th>Model</th><th>Window</th><th>Count</th><th>Progress</th></tr>';
+      html += '<table><tr><th>Plan</th><th>Window</th><th>Count</th><th>Progress</th></tr>';
+      const planName = usage.plan_name || "-";
       usage.windows.forEach((w) => {
-        const parts = w.cache_key.split(":");
-        const model = parts[1] || "unknown";
         const windowLabel = formatDuration(w.window_secs);
         const limit = w.limit;
         const countLabel = limit != null ? `${w.count} / ${limit}` : `${w.count}`;
         const pct = w.count > 0 && w.window_secs > 0 ? Math.min((w.elapsed_secs / w.window_secs) * 100, 100) : 0;
         const fillClass = limit != null && w.count >= limit ? "danger" : limit != null && w.count / limit >= 0.8 ? "warn" : "";
+        const isRpm = w.window_secs === 60;
+        const label = isRpm ? "rpm" : planName;
+        let planCell = esc(label);
+        if (limit != null && w.count >= limit) {
+          const remaining = Math.max(0, w.window_secs - w.elapsed_secs);
+          planCell += `<br><span style="color:var(--text3);font-size:0.85em">配额已用完，${formatHMS(remaining)}后重置</span>`;
+        }
         html += `<tr>
-          <td class="mono">${esc(model)}</td>
+          <td>${planCell}</td>
           <td>${esc(windowLabel)}</td>
           <td>${countLabel}</td>
           <td><div class="progress-bar"><div class="progress-fill ${fillClass}" style="width:${pct}%"></div></div></td>
@@ -1135,6 +1141,16 @@
     if (secs < 3600) return (secs / 60) + "min";
     if (secs < 86400) return (secs / 3600) + "h";
     return (secs / 86400) + "d";
+  }
+
+  function formatHMS(secs) {
+    secs = Math.round(secs);
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    if (h > 0) return h + "时" + m + "分" + s + "秒";
+    if (m > 0) return m + "分" + s + "秒";
+    return s + "秒";
   }
 
   function formatNumber(n) {
