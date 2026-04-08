@@ -36,11 +36,13 @@ pub trait Provider: Send + Sync + 'static {
 pub trait RateLimiter: Send + Sync + 'static {
     /// Check if the request is within rate limits and record a counter.
     /// Returns a decision with remaining quota info.
+    /// `weight` is the quota consumption multiplier (default 1).
     async fn check_and_record(
         &self,
         key: &RateLimitKey,
         rpm_limit: Option<u64>,
         window_limits: &[(u64, u64)], // (limit, window_secs) pairs
+        weight: u64,
     ) -> Result<RateLimitDecision, GatewayError>;
 }
 

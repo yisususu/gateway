@@ -10,6 +10,8 @@ pub struct DeploymentStore {
     deployments: DashMap<String, Vec<Arc<dyn Provider>>>,
     /// model_name → round-robin counter.
     rr_counters: DashMap<String, AtomicUsize>,
+    /// model_name → quota count ratio (default 1).
+    quota_ratios: DashMap<String, u64>,
 }
 
 impl DeploymentStore {
@@ -17,6 +19,7 @@ impl DeploymentStore {
         Self {
             deployments: DashMap::new(),
             rr_counters: DashMap::new(),
+            quota_ratios: DashMap::new(),
         }
     }
 
@@ -45,6 +48,17 @@ impl DeploymentStore {
     pub fn clear(&self) {
         self.rr_counters.clear();
         self.deployments.clear();
+        self.quota_ratios.clear();
+    }
+
+    /// Set the quota count ratio for a model.
+    pub fn set_quota_ratio(&self, model_name: &str, ratio: u64) {
+        self.quota_ratios.insert(model_name.to_string(), ratio);
+    }
+
+    /// Get the quota count ratio for a model. Returns 1 if not set.
+    pub fn get_quota_ratio(&self, model_name: &str) -> u64 {
+        self.quota_ratios.get(model_name).map(|r| *r).unwrap_or(1)
     }
 
     /// Select a provider via round-robin for the given model.

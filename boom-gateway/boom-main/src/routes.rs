@@ -150,6 +150,7 @@ async fn chat_completions_inner(
             }
         })
         .collect();
+    let weight = resolve_quota_weight(&req.model, &state);
 
     let (guard, rl_info) = check_plan_or_default_limits(
         &state.plan_store,
@@ -158,6 +159,7 @@ async fn chat_completions_inner(
         &req.model,
         identity.rpm_limit,
         &window_limits,
+        weight,
     )
     .await
     .map_err(|e| {
@@ -792,8 +794,18 @@ struct RateLimitInfo {
     concurrency_limit: Option<u32>,
 }
 
+/// Resolve the quota weight for a model, handling alias resolution.
+/// If the model is an alias, resolves to the target model first.
+/// Returns the `quota_count_ratio` for the resolved model, defaulting to 1.
+fn resolve_quota_weight(model: &str, state: &AppState) -> u64 {
+    let resolved = state.router.resolve_model(model)
+        .unwrap_or_else(|| model.to_string());
+    state.deployment_store.get_quota_ratio(&resolved)
+}
+
 /// Check plan-based limits if a plan is assigned, otherwise fall back to
 /// default per-model rate limits.
+/// `weight` is the quota consumption multiplier for this request.
 async fn check_plan_or_default_limits(
     plan_store: &Arc<PlanStore>,
     limiter: &Arc<boom_limiter::SlidingWindowLimiter>,
@@ -801,6 +813,7 @@ async fn check_plan_or_default_limits(
     model: &str,
     rpm_limit: Option<u64>,
     window_limits: &[(u64, u64)],
+    weight: u64,
 ) -> Result<(Option<ConcurrencyGuard>, RateLimitInfo), GatewayError> {
     let plan = plan_store
         .resolve_plan(key_hash)
@@ -835,7 +848,7 @@ async fn check_plan_or_default_limits(
             };
 
             let decision = limiter
-                .check_and_record(&rl_key, rpm_limit, &window_limits)
+                .check_and_record(&rl_key, rpm_limit, &window_limits, weight)
                 .await?;
 
             if !decision.allowed {
@@ -867,7 +880,7 @@ async fn check_plan_or_default_limits(
             };
 
             let decision = limiter
-                .check_and_record(&rl_key, rpm_limit, window_limits)
+                .check_and_record(&rl_key, rpm_limit, window_limits, weight)
                 .await?;
 
             if !decision.allowed {
@@ -997,6 +1010,7 @@ pub async fn messages(
             }
         })
         .collect();
+    let weight = resolve_quota_weight(&openai_req.model, &state);
 
     let (guard, rl_info) = check_plan_or_default_limits(
         &state.plan_store,
@@ -1005,6 +1019,7 @@ pub async fn messages(
         &openai_req.model,
         identity.rpm_limit,
         &window_limits,
+        weight,
     )
     .await
     .map_err(|e| {
@@ -1456,6 +1471,7 @@ pub async fn pt_chat_completions(
             }
         })
         .collect();
+    let weight = resolve_quota_weight(&chat_req.model, &state);
 
     let (guard, rl_info) = check_plan_or_default_limits(
         &state.plan_store,
@@ -1464,6 +1480,7 @@ pub async fn pt_chat_completions(
         &chat_req.model,
         identity.rpm_limit,
         &window_limits,
+        weight,
     )
     .await
     .map_err(|e| {
@@ -1601,6 +1618,7 @@ pub async fn pt_messages(
             }
         })
         .collect();
+    let weight = resolve_quota_weight(&model, &state);
 
     let (_guard, rl_info) = check_plan_or_default_limits(
         &state.plan_store,
@@ -1609,6 +1627,7 @@ pub async fn pt_messages(
         &model,
         identity.rpm_limit,
         &window_limits,
+        weight,
     )
     .await
     .map_err(|e| {
@@ -1746,6 +1765,7 @@ pub async fn pt_completions(
             }
         })
         .collect();
+    let weight = resolve_quota_weight(&model, &state);
 
     let (_guard, rl_info) = check_plan_or_default_limits(
         &state.plan_store,
@@ -1754,6 +1774,7 @@ pub async fn pt_completions(
         &model,
         identity.rpm_limit,
         &window_limits,
+        weight,
     )
     .await
     .map_err(|e| {

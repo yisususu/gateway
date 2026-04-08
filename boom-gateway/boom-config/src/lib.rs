@@ -107,6 +107,10 @@ pub struct ModelInfo {
     pub id: Option<String>,
     pub input_cost_per_token: Option<f64>,
     pub output_cost_per_token: Option<f64>,
+    /// Quota count multiplier for this model.
+    /// Each request consumes `quota_count_ratio` units instead of 1.
+    /// Defaults to 1 when not set.
+    pub quota_count_ratio: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

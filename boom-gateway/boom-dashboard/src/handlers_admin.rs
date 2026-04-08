@@ -816,6 +816,9 @@ pub struct CreateDeploymentRequest {
     pub enabled: bool,
     #[serde(default)]
     pub deployment_id: Option<String>,
+    /// Quota count multiplier (default 1).
+    #[serde(default)]
+    pub quota_count_ratio: Option<i64>,
 }
 
 fn default_timeout() -> i64 {
@@ -848,6 +851,7 @@ struct DeploymentRow {
     enabled: Option<bool>,
     source: Option<String>,
     deployment_id: Option<String>,
+    quota_count_ratio: Option<i64>,
     created_at: Option<chrono::DateTime<chrono::Utc>>,
     updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -867,7 +871,7 @@ pub async fn list_models(
         r#"SELECT id, model_name, litellm_model, api_key, api_key_env, api_base, api_version,
                   aws_region_name, aws_access_key_id, aws_secret_access_key,
                   rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source,
-                  deployment_id, created_at, updated_at
+                  deployment_id, quota_count_ratio, created_at, updated_at
            FROM boom_model_deployment
            ORDER BY model_name, created_at"#,
     )
@@ -900,6 +904,7 @@ pub async fn list_models(
                 "enabled": r.enabled.unwrap_or(true),
                 "source": r.source,
                 "deployment_id": r.deployment_id,
+                "quota_count_ratio": r.quota_count_ratio.unwrap_or(1),
                 "created_at": r.created_at.map(|d| d.to_string()),
                 "updated_at": r.updated_at.map(|d| d.to_string()),
             })

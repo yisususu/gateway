@@ -61,11 +61,13 @@ impl SlidingWindowLimiter {
 
     /// Read-only check of a single window limit.
     /// Returns (allowed, current_count, limit, reset_at) WITHOUT incrementing.
+    /// `weight` is the quota consumption multiplier to check against.
     fn peek_window(
         &self,
         cache_key: &str,
         limit: u64,
         window_secs: u64,
+        weight: u64,
     ) -> (bool, u64, u64, chrono::DateTime<chrono::Utc>) {
         let now = now_epoch_secs();
 
@@ -76,7 +78,8 @@ impl SlidingWindowLimiter {
                     // Window expired — would reset, so allowed with count 0.
                     (true, 0)
                 } else {
-                    (counter.count < limit, counter.count)
+                    // Check: current + weight <= limit
+                    (counter.count + weight <= limit, counter.count)
                 }
             }
             None => (true, 0),
@@ -94,23 +97,23 @@ impl SlidingWindowLimiter {
         (allowed, current_count, limit, reset_at)
     }
 
-    /// Increment a single window counter by 1.
+    /// Increment a single window counter by `weight`.
     /// If the window expired, it resets and starts fresh.
-    fn record_window(&self, cache_key: &str, window_secs: u64) {
+    fn record_window(&self, cache_key: &str, window_secs: u64, weight: u64) {
         let now = now_epoch_secs();
         self.windows
             .entry(cache_key.to_string())
             .and_modify(|c| {
                 let elapsed = now_epoch_secs().saturating_sub(c.window_start);
                 if elapsed >= c.window_secs {
-                    c.count = 1;
+                    c.count = weight;
                     c.window_start = now_epoch_secs();
                 } else {
-                    c.count += 1;
+                    c.count += weight;
                 }
             })
             .or_insert(WindowCounter {
-                count: 1,
+                count: weight,
                 window_start: now,
                 window_secs,
             });
@@ -250,12 +253,13 @@ impl RateLimiter for SlidingWindowLimiter {
         key: &RateLimitKey,
         rpm_limit: Option<u64>,
         window_limits: &[(u64, u64)],
+        weight: u64,
     ) -> Result<RateLimitDecision, GatewayError> {
         // Phase 1: Read-only check ALL windows. No counters incremented yet.
         // If any window rejects, we return immediately without recording anything.
         if let Some(rpm) = rpm_limit {
             let rpm_key = Self::cache_key(key, 60);
-            let (allowed, _count, limit, reset_at) = self.peek_window(&rpm_key, rpm, 60);
+            let (allowed, _count, limit, reset_at) = self.peek_window(&rpm_key, rpm, 60, weight);
 
             if !allowed {
                 let elapsed = self
@@ -278,7 +282,7 @@ impl RateLimiter for SlidingWindowLimiter {
 
         for &(limit, window_secs) in window_limits {
             let win_key = Self::cache_key(key, window_secs);
-            let (allowed, _count, _, reset_at) = self.peek_window(&win_key, limit, window_secs);
+            let (allowed, _count, _, reset_at) = self.peek_window(&win_key, limit, window_secs, weight);
 
             if !allowed {
                 let elapsed = self
@@ -302,12 +306,12 @@ impl RateLimiter for SlidingWindowLimiter {
         // Phase 2: All checks passed — increment all counters atomically.
         if let Some(_) = rpm_limit {
             let rpm_key = Self::cache_key(key, 60);
-            self.record_window(&rpm_key, 60);
+            self.record_window(&rpm_key, 60, weight);
         }
 
         for &(_, window_secs) in window_limits {
             let win_key = Self::cache_key(key, window_secs);
-            self.record_window(&win_key, window_secs);
+            self.record_window(&win_key, window_secs, weight);
         }
 
         // Calculate remaining for response.
@@ -346,12 +350,12 @@ mod tests {
 
         // Should allow up to 3 RPM.
         for _ in 0..3 {
-            let decision = limiter.check_and_record(&key, Some(3), &[]).await.unwrap();
+            let decision = limiter.check_and_record(&key, Some(3), &[], 1).await.unwrap();
             assert!(decision.allowed);
         }
 
         // 4th request should be rejected.
-        let decision = limiter.check_and_record(&key, Some(3), &[]).await.unwrap();
+        let decision = limiter.check_and_record(&key, Some(3), &[], 1).await.unwrap();
         assert!(!decision.allowed);
         assert!(decision.retry_after_secs.is_some());
     }
@@ -368,19 +372,19 @@ mod tests {
         let windows = vec![(2u64, 18000u64)];
 
         let decision = limiter
-            .check_and_record(&key, None, &windows)
+            .check_and_record(&key, None, &windows, 1)
             .await
             .unwrap();
         assert!(decision.allowed);
 
         let decision = limiter
-            .check_and_record(&key, None, &windows)
+            .check_and_record(&key, None, &windows, 1)
             .await
             .unwrap();
         assert!(decision.allowed);
 
         let decision = limiter
-            .check_and_record(&key, None, &windows)
+            .check_and_record(&key, None, &windows, 1)
             .await
             .unwrap();
         assert!(!decision.allowed);
@@ -395,8 +399,8 @@ mod tests {
         };
 
         // Record some requests.
-        limiter.check_and_record(&key, Some(10), &[]).await.unwrap();
-        limiter.check_and_record(&key, Some(10), &[]).await.unwrap();
+        limiter.check_and_record(&key, Some(10), &[], 1).await.unwrap();
+        limiter.check_and_record(&key, Some(10), &[], 1).await.unwrap();
 
         let snap = limiter.snapshot();
         assert!(!snap.is_empty());
@@ -427,7 +431,7 @@ mod tests {
 
         // First request: both pass, both counters = 1.
         let d = limiter
-            .check_and_record(&key, Some(10), &windows)
+            .check_and_record(&key, Some(10), &windows, 1)
             .await
             .unwrap();
         assert!(d.allowed);
@@ -435,7 +439,7 @@ mod tests {
         // Second request: custom window (1/18000s) should reject.
         // RPM has plenty of room (2/10), so only custom window blocks.
         let d = limiter
-            .check_and_record(&key, Some(10), &windows)
+            .check_and_record(&key, Some(10), &windows, 1)
             .await
             .unwrap();
         assert!(!d.allowed);
@@ -484,7 +488,7 @@ mod tests {
             key_hash: "valid_key".to_string(),
             model: "gpt-4".to_string(),
         };
-        limiter.check_and_record(&key, Some(10), &[]).await.unwrap();
+        limiter.check_and_record(&key, Some(10), &[], 1).await.unwrap();
 
         let removed = limiter.cleanup_expired();
         assert_eq!(removed, 1);

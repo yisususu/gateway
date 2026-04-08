@@ -50,8 +50,8 @@ async fn handle_create_model(
         r#"INSERT INTO boom_model_deployment
            (model_name, litellm_model, api_key, api_key_env, api_base, api_version,
             aws_region_name, aws_access_key_id, aws_secret_access_key,
-            rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source, deployment_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'db', $17)
+            rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source, deployment_id, quota_count_ratio)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'db', $17, $18)
            RETURNING id"#,
     )
     .bind(&req.model_name)
@@ -71,6 +71,7 @@ async fn handle_create_model(
     .bind(req.max_tokens)
     .bind(req.enabled)
     .bind(&req.deployment_id)
+    .bind(req.quota_count_ratio.unwrap_or(1))
     .fetch_one(db_pool)
     .await
     .map_err(|e| format!("DB insert failed: {}", e))?;
@@ -81,6 +82,8 @@ async fn handle_create_model(
     if req.enabled {
         if let Some(provider) = build_provider(&req) {
             state.deployment_store.add_deployment(&req.model_name, provider);
+            let ratio = req.quota_count_ratio.unwrap_or(1) as u64;
+            state.deployment_store.set_quota_ratio(&req.model_name, ratio);
             tracing::info!(model = %req.model_name, "Model deployment created and loaded");
         }
     }
@@ -103,7 +106,7 @@ async fn handle_update_model(
                aws_access_key_id = $9, aws_secret_access_key = $10,
                rpm = $11, tpm = $12, timeout = $13, headers = $14,
                temperature = $15, max_tokens = $16, enabled = $17,
-               deployment_id = $18, updated_at = NOW()
+               deployment_id = $18, quota_count_ratio = $19, updated_at = NOW()
            WHERE id = $1"#,
     )
     .bind(id)
@@ -124,6 +127,7 @@ async fn handle_update_model(
     .bind(req.max_tokens)
     .bind(req.enabled)
     .bind(&req.deployment_id)
+    .bind(req.quota_count_ratio.unwrap_or(1))
     .execute(db_pool)
     .await
     .map_err(|e| format!("DB update failed: {}", e))?;
@@ -136,6 +140,8 @@ async fn handle_update_model(
     if req.enabled {
         if let Some(provider) = build_provider(&req) {
             state.deployment_store.add_deployment(&req.model_name, provider);
+            let ratio = req.quota_count_ratio.unwrap_or(1) as u64;
+            state.deployment_store.set_quota_ratio(&req.model_name, ratio);
         }
     }
 

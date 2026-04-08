@@ -6,6 +6,41 @@
   let currentUser = null;
   let usageRefreshTimer = null;
 
+  // ── Tooltip helper ────────────────────────────────────
+  // Usage: tip("description text") → returns HTML string with ? icon
+  function tip(text) {
+    const safe = esc(text).replace(/"/g, "&quot;");
+    return `<span class="field-tip" data-tip="${safe}">?</span>`;
+  }
+
+  // ── Cached data for dropdowns ──────────────────────────
+  // Populated lazily when modals need them.
+  let cachedModelNames = null;
+  let cachedPlanNames = null;
+
+  async function getModelNames() {
+    if (cachedModelNames) return cachedModelNames;
+    try {
+      const data = await api("/admin/models");
+      cachedModelNames = (data.models || []).map((m) => m.model_name);
+      // deduplicate
+      cachedModelNames = [...new Set(cachedModelNames)];
+    } catch { cachedModelNames = []; }
+    return cachedModelNames;
+  }
+
+  async function getPlanNames() {
+    if (cachedPlanNames) return cachedPlanNames;
+    try {
+      const data = await api("/admin/plans");
+      cachedPlanNames = (data.plans || []).map((p) => p.name);
+    } catch { cachedPlanNames = []; }
+    return cachedPlanNames;
+  }
+
+  // Invalidate caches after mutations
+  function invalidateCaches() { cachedModelNames = null; cachedPlanNames = null; }
+
   // ── Init ──────────────────────────────────────────────
   document.addEventListener("DOMContentLoaded", () => {
     setupLogin();
@@ -627,11 +662,12 @@
     const wrap = document.getElementById("models-table-wrap");
     if (models.length === 0) { wrap.innerHTML = "<p>No model deployments.</p>"; return; }
     wrap.innerHTML = `<table>
-      <tr><th>Model Name</th><th>LiteLLM Model</th><th>Base URL</th><th>RPM</th><th>Timeout</th><th>Enabled</th><th>Source</th><th>Actions</th></tr>
+      <tr><th>Model Name</th><th>LiteLLM Model</th><th>Base URL</th><th>Quota Ratio</th><th>RPM</th><th>Timeout</th><th>Enabled</th><th>Source</th><th>Actions</th></tr>
       ${models.map((m) => `<tr>
         <td><strong>${esc(m.model_name)}</strong></td>
         <td class="mono">${esc(m.litellm_model)}</td>
         <td class="mono">${esc(m.api_base || "-")}</td>
+        <td>${m.quota_count_ratio && m.quota_count_ratio !== 1 ? '<span class="badge badge-plan">x' + m.quota_count_ratio + '</span>' : 'x1'}</td>
         <td>${m.rpm || "-"}</td>
         <td>${m.timeout}s</td>
         <td>${m.enabled ? '<span class="badge badge-active">Yes</span>' : '<span class="badge badge-blocked">No</span>'}</td>
@@ -648,31 +684,43 @@
     const p = prefill || {};
     showModal(`
       <h3>${p.id ? "Edit" : "Create"} Model Deployment</h3>
-      <div class="form-group"><label>Model Name *</label><input id="m-model-name" value="${esc(p.model_name || "")}" required></div>
-      <div class="form-group"><label>LiteLLM Model *</label><input id="m-litellm-model" value="${esc(p.litellm_model || "")}" required></div>
-      <div class="form-group"><label>API Key</label><input id="m-model-key" type="password" placeholder="sk-... or os.environ/VAR"></div>
-      <div class="form-group"><label>API Key is env reference</label><select id="m-model-key-env"><option value="false">No</option><option value="true">Yes</option></select></div>
-      <div class="form-group"><label>API Base URL</label><input id="m-model-base" value="${esc(p.api_base || "")}" placeholder="https://api.openai.com/v1"></div>
-      <div class="form-group"><label>API Version (Azure)</label><input id="m-model-version" value="${esc(p.api_version || "")}"></div>
-      <div class="form-group"><label>RPM Limit</label><input id="m-model-rpm" type="number" value="${p.rpm || ""}"></div>
-      <div class="form-group"><label>Timeout (seconds)</label><input id="m-model-timeout" type="number" value="${p.timeout || 120}"></div>
-      <div class="form-group"><label>Temperature</label><input id="m-model-temp" type="number" step="0.1" value="${p.temperature || ""}"></div>
-      <div class="form-group"><label>Max Tokens</label><input id="m-model-maxtok" type="number" value="${p.max_tokens || ""}"></div>
-      <div class="form-group"><label>Enabled</label><select id="m-model-enabled"><option value="true" ${p.enabled !== false ? "selected" : ""}>Yes</option><option value="false" ${p.enabled === false ? "selected" : ""}>No</option></select></div>
+      <div class="form-group"><label>Model Name * ${tip("Client-visible model name. Multiple deployments can share the same name for load balancing.")}</label><input id="m-model-name" value="${esc(p.model_name || "")}" required></div>
+      <div class="form-group"><label>Provider * ${tip("Upstream provider type. Determines API format and authentication.")}</label><select id="m-model-provider"><option value="">-- select --</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="azure">Azure OpenAI</option><option value="gemini">Google Gemini</option><option value="bedrock">AWS Bedrock</option></select></div>
+      <div class="form-group"><label>Model ID * ${tip("Actual model ID at the provider, e.g. gpt-4o, claude-sonnet-4-20250514. Auto-combined with Provider as provider/model-id.")}</label><input id="m-model-id" value="${esc((p.litellm_model || "").includes("/") ? p.litellm_model.split("/").slice(1).join("/") : p.litellm_model || "")}" required></div>
+      <div class="form-group"><label>API Key ${tip("Provider API key. Use os.environ/VAR_NAME for env reference.")}</label><input id="m-model-key" type="password" placeholder="sk-... or os.environ/VAR"></div>
+      <div class="form-group"><label>API Key is env reference ${tip("Enable if the API Key field contains an environment variable reference like os.environ/VAR_NAME.")}</label><select id="m-model-key-env"><option value="false">No</option><option value="true" ${(p.api_key_env) ? "selected" : ""}>Yes</option></select></div>
+      <div class="form-group"><label>API Base URL ${tip("Override the default provider endpoint, e.g. https://api.openai.com/v1")}</label><input id="m-model-base" value="${esc(p.api_base || "")}" placeholder="https://api.openai.com/v1"></div>
+      <div class="form-group"><label>API Version (Azure) ${tip("Required for Azure OpenAI deployments, e.g. 2024-02-01")}</label><input id="m-model-version" value="${esc(p.api_version || "")}"></div>
+      <div class="form-group"><label>Quota Ratio ${tip("Quota consumption multiplier. Each request counts as this many units against rate limits. E.g. 3 means one request consumes 3 quota. Default: 1.")}</label><input id="m-model-ratio" type="number" min="1" step="1" value="${p.quota_count_ratio || 1}"></div>
+      <div class="form-group"><label>RPM Limit ${tip("Per-deployment RPM limit. Leave empty for unlimited.")}</label><input id="m-model-rpm" type="number" value="${p.rpm || ""}"></div>
+      <div class="form-group"><label>Timeout (seconds) ${tip("Request timeout. Default: 120s.")}</label><input id="m-model-timeout" type="number" value="${p.timeout || 120}"></div>
+      <div class="form-group"><label>Temperature ${tip("Sampling temperature override (0.0-2.0). Leave empty to use provider default.")}</label><input id="m-model-temp" type="number" step="0.1" value="${p.temperature || ""}"></div>
+      <div class="form-group"><label>Max Tokens ${tip("Maximum output tokens. Leave empty for provider default.")}</label><input id="m-model-maxtok" type="number" value="${p.max_tokens || ""}"></div>
+      <div class="form-group"><label>Enabled ${tip("Disabled deployments are ignored in routing.")}</label><select id="m-model-enabled"><option value="true" ${p.enabled !== false ? "selected" : ""}>Yes</option><option value="false" ${p.enabled === false ? "selected" : ""}>No</option></select></div>
       <div class="modal-actions">
         <button class="btn-secondary" onclick="hideModal()" style="width:auto">Cancel</button>
         <button class="btn-primary" id="m-model-submit">${p.id ? "Update" : "Create"}</button>
       </div>
     `);
+    // Pre-select provider dropdown from litellm_model
+    if (p.litellm_model && p.litellm_model.includes("/")) {
+      const prov = p.litellm_model.split("/")[0];
+      const sel = document.getElementById("m-model-provider");
+      if (sel.querySelector(`option[value="${prov}"]`)) sel.value = prov;
+    }
     document.getElementById("m-model-submit").addEventListener("click", async () => {
       try {
+        const providerVal = document.getElementById("m-model-provider").value;
+        const modelIdVal = document.getElementById("m-model-id").value.trim();
+        const litellmModel = providerVal ? providerVal + "/" + modelIdVal : modelIdVal;
         const body = {
           model_name: document.getElementById("m-model-name").value,
-          litellm_model: document.getElementById("m-litellm-model").value,
+          litellm_model: litellmModel,
           api_key: document.getElementById("m-model-key").value || null,
           api_key_env: document.getElementById("m-model-key-env").value === "true",
           api_base: document.getElementById("m-model-base").value || null,
           api_version: document.getElementById("m-model-version").value || null,
+          quota_count_ratio: Number(document.getElementById("m-model-ratio").value) || 1,
           rpm: document.getElementById("m-model-rpm").value ? Number(document.getElementById("m-model-rpm").value) : null,
           timeout: Number(document.getElementById("m-model-timeout").value) || 120,
           temperature: document.getElementById("m-model-temp").value ? Number(document.getElementById("m-model-temp").value) : null,
@@ -684,6 +732,7 @@
         const method = p.id ? "PUT" : "POST";
         await api(url, { method, body: JSON.stringify(body) });
         hideModal();
+        invalidateCaches();
         loadModels();
       } catch (err) { alert("Error: " + err.message); }
     });
@@ -737,14 +786,19 @@
     const p = prefill || {};
     showModal(`
       <h3>${p.alias_name ? "Edit" : "Create"} Alias</h3>
-      <div class="form-group"><label>Alias Name *</label><input id="m-alias-name" value="${esc(p.alias_name || "")}" ${p.alias_name ? "readonly" : ""}></div>
-      <div class="form-group"><label>Target Model *</label><input id="m-alias-target" value="${esc(p.target_model || "")}" required></div>
-      <div class="form-group"><label>Hidden</label><select id="m-alias-hidden"><option value="false" ${!p.hidden ? "selected" : ""}>No</option><option value="true" ${p.hidden ? "selected" : ""}>Yes</option></select></div>
+      <div class="form-group"><label>Alias Name * ${tip("The name clients will use in their request. E.g. 'gpt-4' → routes to 'gpt-4o'.")}</label><input id="m-alias-name" value="${esc(p.alias_name || "")}" ${p.alias_name ? "readonly" : ""}></div>
+      <div class="form-group"><label>Target Model * ${tip("The actual model name to route to. Must match an existing model deployment name.")}</label><input id="m-alias-target" value="${esc(p.target_model || "")}" required list="alias-target-list"><datalist id="alias-target-list"></datalist></div>
+      <div class="form-group"><label>Hidden ${tip("Hidden aliases work for routing but are not listed to users in model discovery endpoints.")}</label><select id="m-alias-hidden"><option value="false" ${!p.hidden ? "selected" : ""}>No</option><option value="true" ${p.hidden ? "selected" : ""}>Yes</option></select></div>
       <div class="modal-actions">
         <button class="btn-secondary" onclick="hideModal()" style="width:auto">Cancel</button>
         <button class="btn-primary" id="m-alias-submit">${p.alias_name ? "Update" : "Create"}</button>
       </div>
     `);
+    // Populate datalist with existing model names
+    getModelNames().then((names) => {
+      const dl = document.getElementById("alias-target-list");
+      if (dl) names.forEach((n) => { const o = document.createElement("option"); o.value = n; dl.appendChild(o); });
+    });
     document.getElementById("m-alias-submit").addEventListener("click", async () => {
       try {
         const body = {
@@ -756,6 +810,7 @@
         const method = p.alias_name ? "PUT" : "POST";
         await api(url, { method, body: JSON.stringify(body) });
         hideModal();
+        invalidateCaches();
         loadAliases();
       } catch (err) { alert("Error: " + err.message); }
     });
@@ -805,8 +860,8 @@
     const p = prefill || {};
     showModal(`
       <h3>${p.key ? "Edit" : "Set"} Configuration</h3>
-      <div class="form-group"><label>Key *</label><input id="m-config-key" value="${esc(p.key || "")}" ${p.key ? "readonly" : ""}></div>
-      <div class="form-group"><label>Value (JSON) *</label><textarea id="m-config-value" rows="6">${esc(p.value ? JSON.stringify(p.value, null, 2) : "")}</textarea></div>
+      <div class="form-group"><label>Key * ${tip("Configuration key name, e.g. 'general_settings' or a custom key.")}</label><input id="m-config-key" value="${esc(p.key || "")}" ${p.key ? "readonly" : ""}></div>
+      <div class="form-group"><label>Value (JSON) * ${tip("Configuration value as valid JSON. E.g. {\"store_model_in_db\": true}")}</label><textarea id="m-config-value" rows="6">${esc(p.value ? JSON.stringify(p.value, null, 2) : "")}</textarea></div>
       <div class="modal-actions">
         <button class="btn-secondary" onclick="hideModal()" style="width:auto">Cancel</button>
         <button class="btn-primary" id="m-config-submit">Save</button>
@@ -875,10 +930,10 @@
     const p = prefill || {};
     showModal(`
       <h3>${p.name ? "Edit" : "Create"} Plan</h3>
-      <div class="form-group"><label>Name</label><input id="m-plan-name" value="${esc(p.name || "")}" ${p.name ? "readonly" : ""} required></div>
-      <div class="form-group"><label>Concurrency Limit</label><input id="m-plan-concurrency" type="number" value="${p.concurrency_limit || ""}"></div>
-      <div class="form-group"><label>RPM Limit</label><input id="m-plan-rpm" type="number" value="${p.rpm_limit || ""}"></div>
-      <div class="form-group"><label>Window Limits (JSON e.g. [[100,18000]])</label><textarea id="m-plan-windows" rows="2">${JSON.stringify(p.window_limits || [])}</textarea></div>
+      <div class="form-group"><label>Name ${tip("Unique plan name. Used when assigning keys to plans.")}</label><input id="m-plan-name" value="${esc(p.name || "")}" ${p.name ? "readonly" : ""} required></div>
+      <div class="form-group"><label>Concurrency Limit ${tip("Maximum simultaneous requests per key in this plan. Leave empty for unlimited.")}</label><input id="m-plan-concurrency" type="number" value="${p.concurrency_limit || ""}"></div>
+      <div class="form-group"><label>RPM Limit ${tip("Maximum requests per minute per key. Leave empty for unlimited.")}</label><input id="m-plan-rpm" type="number" value="${p.rpm_limit || ""}"></div>
+      <div class="form-group"><label>Window Limits ${tip("Custom time windows as JSON array: [[count, seconds], ...]. E.g. [[100,18000]] = 100 requests per 5 hours. Each request's quota consumption is multiplied by the model's Quota Ratio.")}</label><textarea id="m-plan-windows" rows="2">${JSON.stringify(p.window_limits || [])}</textarea></div>
       <div class="modal-actions">
         <button class="btn-secondary" onclick="hideModal()" style="width:auto">Cancel</button>
         <button class="btn-primary" id="m-plan-submit">${p.name ? "Update" : "Create"}</button>
@@ -897,6 +952,7 @@
           }),
         });
         hideModal();
+        invalidateCaches();
         loadPlans();
       } catch (err) { alert("Error: " + err.message); }
     });
@@ -914,18 +970,27 @@
   function showNewKeyModal() {
     showModal(`
       <h3>Create API Key</h3>
-      <div class="form-group"><label>Key Name</label><input id="m-key-name"></div>
-      <div class="form-group"><label>User ID</label><input id="m-key-user"></div>
-      <div class="form-group"><label>Team ID</label><input id="m-key-team"></div>
-      <div class="form-group"><label>Models (comma-separated)</label><input id="m-key-models"></div>
-      <div class="form-group"><label>Max Budget</label><input id="m-key-budget" type="number" step="0.01"></div>
-      <div class="form-group"><label>RPM Limit</label><input id="m-key-rpm" type="number"></div>
-      <div class="form-group"><label>Plan Name (optional)</label><input id="m-key-plan"></div>
+      <div class="form-group"><label>Key Name ${tip("Human-readable name for this key.")}</label><input id="m-key-name"></div>
+      <div class="form-group"><label>User ID ${tip("Optional user identifier for tracking.")}</label><input id="m-key-user"></div>
+      <div class="form-group"><label>Team ID ${tip("Optional team identifier.")}</label><input id="m-key-team"></div>
+      <div class="form-group"><label>Models ${tip("Allowed models for this key. Leave empty for all models. Supports model names and aliases.")}</label><input id="m-key-models" list="key-models-list"><datalist id="key-models-list"></datalist></div>
+      <div class="form-group"><label>Max Budget ${tip("Maximum budget in USD. Leave empty for unlimited.")}</label><input id="m-key-budget" type="number" step="0.01"></div>
+      <div class="form-group"><label>RPM Limit ${tip("Per-key RPM override. Leave empty to use plan or default limits.")}</label><input id="m-key-rpm" type="number"></div>
+      <div class="form-group"><label>Plan ${tip("Assign this key to a rate limit plan. Leave empty for default plan.")}</label><input id="m-key-plan" list="key-plan-list"><datalist id="key-plan-list"></datalist></div>
       <div class="modal-actions">
         <button class="btn-secondary" onclick="hideModal()" style="width:auto">Cancel</button>
         <button class="btn-primary" id="m-key-submit">Create</button>
       </div>
     `);
+    // Populate datalists
+    getModelNames().then((names) => {
+      const dl = document.getElementById("key-models-list");
+      if (dl) names.forEach((n) => { const o = document.createElement("option"); o.value = n; dl.appendChild(o); });
+    });
+    getPlanNames().then((names) => {
+      const dl = document.getElementById("key-plan-list");
+      if (dl) names.forEach((n) => { const o = document.createElement("option"); o.value = n; dl.appendChild(o); });
+    });
     document.getElementById("m-key-submit").addEventListener("click", async () => {
       try {
         const modelsVal = document.getElementById("m-key-models").value.trim();
@@ -959,16 +1024,21 @@
     const modelsStr = Array.isArray(key.models) ? key.models.join(", ") : "";
     showModal(`
       <h3>Edit Key</h3>
-      <div class="form-group"><label>Alias</label><input id="m-edit-alias" value="${esc(key.key_alias || "")}"></div>
-      <div class="form-group"><label>User ID</label><input id="m-edit-user" value="${esc(key.user_id || "")}"></div>
-      <div class="form-group"><label>Models (comma-separated)</label><input id="m-edit-models" value="${esc(modelsStr)}"></div>
-      <div class="form-group"><label>Max Budget</label><input id="m-edit-budget" type="number" step="0.01" value="${key.max_budget != null ? key.max_budget : ""}"></div>
-      <div class="form-group"><label>RPM Limit</label><input id="m-edit-rpm" type="number" value="${key.rpm_limit || ""}"></div>
+      <div class="form-group"><label>Alias ${tip("Human-readable name for this key.")}</label><input id="m-edit-alias" value="${esc(key.key_alias || "")}"></div>
+      <div class="form-group"><label>User ID ${tip("Optional user identifier.")}</label><input id="m-edit-user" value="${esc(key.user_id || "")}"></div>
+      <div class="form-group"><label>Models ${tip("Allowed models, comma-separated. Leave empty for all models.")}</label><input id="m-edit-models" value="${esc(modelsStr)}" list="edit-models-list"><datalist id="edit-models-list"></datalist></div>
+      <div class="form-group"><label>Max Budget ${tip("Maximum budget in USD. Leave empty for unlimited.")}</label><input id="m-edit-budget" type="number" step="0.01" value="${key.max_budget != null ? key.max_budget : ""}"></div>
+      <div class="form-group"><label>RPM Limit ${tip("Per-key RPM override. Leave empty to use plan limits.")}</label><input id="m-edit-rpm" type="number" value="${key.rpm_limit || ""}"></div>
       <div class="modal-actions">
         <button class="btn-secondary" onclick="hideModal()" style="width:auto">Cancel</button>
         <button class="btn-primary" id="m-edit-submit">Save</button>
       </div>
     `);
+    // Populate datalist
+    getModelNames().then((names) => {
+      const dl = document.getElementById("edit-models-list");
+      if (dl) names.forEach((n) => { const o = document.createElement("option"); o.value = n; dl.appendChild(o); });
+    });
     document.getElementById("m-edit-submit").addEventListener("click", async () => {
       try {
         const aliasVal = document.getElementById("m-edit-alias").value.trim();
@@ -994,13 +1064,31 @@
   function showNewAssignmentModal() {
     showModal(`
       <h3>Assign Key to Plan</h3>
-      <div class="form-group"><label>Key Hash (full)</label><input id="m-asgn-hash" required></div>
-      <div class="form-group"><label>Plan Name</label><input id="m-asgn-plan" required></div>
+      <div class="form-group"><label>Key Hash ${tip("The full key hash of the API key to assign.")}</label><input id="m-asgn-hash" required list="asgn-hash-list"><datalist id="asgn-hash-list"></datalist></div>
+      <div class="form-group"><label>Plan ${tip("Select an existing plan to assign this key to.")}</label><input id="m-asgn-plan" required list="asgn-plan-list"><datalist id="asgn-plan-list"></datalist></div>
       <div class="modal-actions">
         <button class="btn-secondary" onclick="hideModal()" style="width:auto">Cancel</button>
         <button class="btn-primary" id="m-asgn-submit">Assign</button>
       </div>
     `);
+    // Populate plan datalist
+    getPlanNames().then((names) => {
+      const dl = document.getElementById("asgn-plan-list");
+      if (dl) names.forEach((n) => { const o = document.createElement("option"); o.value = n; dl.appendChild(o); });
+    });
+    // Populate key hash datalist from existing keys
+    (async () => {
+      try {
+        const data = await api("/admin/keys");
+        const dl = document.getElementById("asgn-hash-list");
+        if (dl) (data.keys || []).forEach((k) => {
+          const o = document.createElement("option");
+          o.value = k.token_hash;
+          o.label = k.key_alias || k.token_hash.substring(0, 12) + "...";
+          dl.appendChild(o);
+        });
+      } catch {}
+    })();
     document.getElementById("m-asgn-submit").addEventListener("click", async () => {
       try {
         await api("/admin/assignments", {

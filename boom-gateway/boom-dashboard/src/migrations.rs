@@ -49,6 +49,12 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
     )
     .execute(&mut *conn)
     .await;
+    // Add quota_count_ratio column (no-op if already present).
+    let _ = sqlx::query(
+        r#"ALTER TABLE boom_model_deployment ADD COLUMN IF NOT EXISTS quota_count_ratio BIGINT DEFAULT 1"#,
+    )
+    .execute(&mut *conn)
+    .await;
     tracing::info!("Migration 2/7: done");
     tracing::info!("Migration 3/7: alias...");
     run_ddl_on_conn(&mut conn, boom_routing::migrations::alias_ddl()).await?;

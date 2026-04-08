@@ -285,3 +285,55 @@ tr.filter-row td { padding: 2px 4px; background: var(--surface2); border-bottom:
   table { font-size: 11px; }
   th, td { padding: 8px 10px; }
 }
+
+/* ── Field tooltip (?) ────────────────────────────────── */
+.field-tip {
+  display: inline-block;
+  width: 16px; height: 16px;
+  line-height: 16px; text-align: center;
+  font-size: 10px; font-weight: 700;
+  color: var(--text3);
+  background: var(--surface3);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  cursor: help;
+  margin-left: 4px;
+  vertical-align: middle;
+  position: relative;
+  transition: all var(--transition);
+}
+.field-tip:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+  background: var(--primary-bg);
+}
+.field-tip::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%; bottom: calc(100% + 8px);
+  transform: translateX(-50%);
+  background: var(--text);
+  color: var(--surface);
+  font-size: 12px; font-weight: 400;
+  line-height: 1.5; letter-spacing: 0;
+  text-transform: none;
+  padding: 8px 12px;
+  border-radius: 6px;
+  white-space: normal;
+  width: max-content;
+  max-width: 320px;
+  z-index: 200;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .15s ease;
+  box-shadow: 0 4px 12px rgba(0,0,0,.15);
+}
+.field-tip:hover::after { opacity: 1; }
+
+/* ── Datalist styling ─────────────────────────────────── */
+input[list] {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238a877e'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 28px;
+}

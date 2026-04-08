@@ -321,12 +321,16 @@ async fn sync_yaml_to_db(pool: &PgPool, config: &Config) -> Result<(), sqlx::Err
         let p = &entry.litellm_params;
         let headers_json = serde_json::to_value(&p.headers).unwrap_or(serde_json::json!({}));
         let deployment_id = entry.model_info.as_ref().and_then(|mi| mi.id.clone());
+        let quota_ratio = entry.model_info.as_ref()
+            .and_then(|mi| mi.quota_count_ratio)
+            .map(|v| v as i64)
+            .unwrap_or(1);
         sqlx::query(
             r#"INSERT INTO boom_model_deployment
                (model_name, litellm_model, api_key, api_key_env, api_base, api_version,
                 aws_region_name, aws_access_key_id, aws_secret_access_key,
-                rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source, deployment_id)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, true, 'yaml', $16)"#,
+                rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source, deployment_id, quota_count_ratio)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, true, 'yaml', $16, $17)"#,
         )
         .bind(&entry.model_name)
         .bind(&p.model)
@@ -344,6 +348,7 @@ async fn sync_yaml_to_db(pool: &PgPool, config: &Config) -> Result<(), sqlx::Err
         .bind(p.temperature)
         .bind(p.max_tokens.map(|v| v as i32))
         .bind(&deployment_id)
+        .bind(quota_ratio)
         .execute(pool)
         .await?;
     }
@@ -706,6 +711,11 @@ fn build_deployments_from_config(config: &Config, deployment_store: &Arc<Deploym
 
         let deployment_id = entry.model_info.as_ref().and_then(|mi| mi.id.clone());
 
+        // Extract quota_count_ratio from model_info (default 1).
+        let ratio = entry.model_info.as_ref()
+            .and_then(|mi| mi.quota_count_ratio)
+            .unwrap_or(1);
+
         match boom_provider::create_provider(
             &p.model,
             p.api_key.clone(),
@@ -716,6 +726,14 @@ fn build_deployments_from_config(config: &Config, deployment_store: &Arc<Deploym
         ) {
             Ok(provider) => {
                 deployment_store.add_deployment(&entry.model_name, provider);
+                if ratio != 1 {
+                    tracing::info!(
+                        model = %entry.model_name,
+                        ratio = ratio,
+                        "Setting quota count ratio"
+                    );
+                }
+                deployment_store.set_quota_ratio(&entry.model_name, ratio);
             }
             Err(e) => {
                 tracing::error!(
