@@ -71,13 +71,7 @@ impl SchedulePolicy for KeyAffinityPolicy {
 
         // Check if total in-flight is below context_threshold (warm-up).
         if self.context_threshold > 0 {
-            let total_input: u64 = self
-                .tracker
-                .get_stats()
-                .iter()
-                .filter(|s| s.model.starts_with(model))
-                .map(|s| s.inflight_input_chars)
-                .sum();
+            let total_input = self.tracker.get_model_input_chars(model);
 
             if total_input < self.context_threshold {
                 // Warm-up: pick lowest-load and record affinity.
@@ -142,42 +136,19 @@ fn select_lowest_load(
     Some(provider)
 }
 
-/// Find the candidate with the lowest in-flight request count.
+/// Find the candidate with the lowest in-flight request count (O(1) per candidate).
 fn min_load_candidate(
     tracker: &InFlightTracker,
     model: &str,
     candidates: &[Arc<dyn Provider>],
 ) -> (u64, Arc<dyn Provider>) {
-    let stats = tracker.get_stats();
-    let model_stats: std::collections::HashMap<&str, u64> = stats
-        .iter()
-        .filter(|s| s.model == model)
-        .map(|s| (s.model.as_str(), s.inflight_requests))
-        .collect();
-
-    // Since InFlightTracker tracks by model name, not by deployment_id,
-    // we need a different approach. We use a per-model load counter
-    // indexed by deployment_id. For now, since the tracker aggregates
-    // by model name, we distribute evenly as a tiebreaker.
-    let _ = model_stats;
-
-    // Use deployment_id to look up per-deployment stats if available,
-    // otherwise fall back to even distribution.
-    let stats_by_deployment = tracker.get_stats_by_deployment();
-    let model_loads: std::collections::HashMap<&str, u64> = stats_by_deployment
-        .iter()
-        .filter(|s| s.model == model)
-        .map(|s| (s.deployment_id.as_str(), s.inflight_requests))
-        .collect();
-
     let mut best = candidates[0].clone();
     let mut best_load = u64::MAX;
 
     for candidate in candidates {
         let load = candidate
             .deployment_id()
-            .and_then(|id| model_loads.get(id))
-            .copied()
+            .map(|id| tracker.get_deployment_count(model, id))
             .unwrap_or(0);
 
         if load < best_load {
@@ -189,21 +160,14 @@ fn min_load_candidate(
     (best_load, best)
 }
 
-/// Get the in-flight request count for a specific deployment.
+/// Get the in-flight request count for a specific deployment (O(1) lookup).
 fn load_for_deployment(
     tracker: &InFlightTracker,
     model: &str,
     provider: &dyn Provider,
 ) -> u64 {
-    let deployment_id = match provider.deployment_id() {
-        Some(id) => id,
-        None => return 0,
-    };
-
-    tracker
-        .get_stats_by_deployment()
-        .iter()
-        .filter(|s| s.model == model && s.deployment_id == deployment_id)
-        .map(|s| s.inflight_requests)
-        .sum()
+    match provider.deployment_id() {
+        Some(id) => tracker.get_deployment_count(model, id),
+        None => 0,
+    }
 }

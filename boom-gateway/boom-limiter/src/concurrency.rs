@@ -119,8 +119,13 @@ impl PlanStore {
     }
 
     /// Get the default plan (if configured and the plan actually exists).
+    /// Mutex is released before reading the plans DashMap to prevent ABBA
+    /// with `clear_plans` (which writes plans then takes Mutex).
     pub fn get_default_plan(&self) -> Option<RateLimitPlan> {
-        let name = self.default_plan_name.lock().unwrap().clone()?;
+        let name = {
+            let guard = self.default_plan_name.lock().unwrap();
+            guard.clone()
+        }?;
         self.plans.get(&name).map(|r| r.value().clone())
     }
 

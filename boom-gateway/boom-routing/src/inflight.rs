@@ -80,6 +80,23 @@ impl InFlightTracker {
             .collect()
     }
 
+    /// Get the total in-flight input chars for a specific model (O(1) lookup).
+    pub fn get_model_input_chars(&self, model: &str) -> u64 {
+        self.metrics
+            .get(model)
+            .map(|m| m.input_chars.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// Get the in-flight request count for a specific deployment (O(1) lookup).
+    pub fn get_deployment_count(&self, model: &str, deployment_id: &str) -> u64 {
+        let key = format!("{}\0{}", model, deployment_id);
+        self.deployment_metrics
+            .get(&key)
+            .map(|m| m.request_count.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
     /// Current in-flight stats for all deployments with active requests.
     pub fn get_stats_by_deployment(&self) -> Vec<DeploymentInFlightStat> {
         self.deployment_metrics

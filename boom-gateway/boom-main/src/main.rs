@@ -26,11 +26,11 @@ struct Args {
     port: Option<u16>,
 }
 
-#[tokio::main]
+#[tokio::main(worker_threads = 32)]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    init_tracing();
+    let _tracing_guard = init_tracing();
     tracing::info!("BooMGateway starting...");
 
     // Load config.
@@ -314,49 +314,70 @@ fn spawn_sync_task(state: AppState, mut shutdown: tokio::sync::broadcast::Receiv
                 }
             }
 
-            // 1. Snapshot rate limit counters → upsert into DB.
+            // 1. Snapshot rate limit counters → upsert into DB (with timeout).
             let entries = limiter.snapshot();
             if !entries.is_empty() {
-                for (cache_key, count, window_start, window_secs) in &entries {
-                    if let Err(e) = sqlx::query(
-                        r#"INSERT INTO boom_rate_limit_state (cache_key, count, window_start, window_secs, updated_at)
-                           VALUES ($1, $2, $3, $4, NOW())
-                           ON CONFLICT (cache_key) DO UPDATE
-                           SET count = EXCLUDED.count,
-                               window_start = EXCLUDED.window_start,
-                               window_secs = EXCLUDED.window_secs,
-                               updated_at = NOW()"#,
-                    )
-                    .bind(cache_key)
-                    .bind(*count as i64)
-                    .bind(*window_start as i64)
-                    .bind(*window_secs as i64)
-                    .execute(&pool)
-                    .await
-                    {
-                        tracing::error!("Failed to upsert rate limit state: {}", e);
-                    }
+                let count = entries.len();
+                let batch_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    async {
+                        for (cache_key, count, window_start, window_secs) in &entries {
+                            if let Err(e) = sqlx::query(
+                                r#"INSERT INTO boom_rate_limit_state (cache_key, count, window_start, window_secs, updated_at)
+                                   VALUES ($1, $2, $3, $4, NOW())
+                                   ON CONFLICT (cache_key) DO UPDATE
+                                   SET count = EXCLUDED.count,
+                                       window_start = EXCLUDED.window_start,
+                                       window_secs = EXCLUDED.window_secs,
+                                       updated_at = NOW()"#,
+                            )
+                            .bind(cache_key)
+                            .bind(*count as i64)
+                            .bind(*window_start as i64)
+                            .bind(*window_secs as i64)
+                            .execute(&pool)
+                            .await
+                            {
+                                tracing::error!("Failed to upsert rate limit state: {}", e);
+                            }
+                        }
+                    },
+                )
+                .await;
+                if batch_result.is_err() {
+                    tracing::warn!("Rate limit state sync timed out after 30s, {} entries skipped", count);
+                } else {
+                    tracing::debug!("Synced {} rate limit counter(s) to DB", count);
                 }
-                tracing::debug!("Synced {} rate limit counter(s) to DB", entries.len());
             }
 
-            // 2. Snapshot assignments → upsert into DB.
+            // 2. Snapshot assignments → upsert into DB (with timeout).
             let assignments = plan_store.snapshot_assignments();
             if !assignments.is_empty() {
-                for (key_hash, plan_name) in &assignments {
-                    if let Err(e) = sqlx::query(
-                        r#"INSERT INTO boom_key_plan_assignment (key_hash, plan_name, assigned_at)
-                           VALUES ($1, $2, NOW())
-                           ON CONFLICT (key_hash) DO UPDATE
-                           SET plan_name = EXCLUDED.plan_name"#,
-                    )
-                    .bind(key_hash)
-                    .bind(plan_name)
-                    .execute(&pool)
-                    .await
-                    {
-                        tracing::error!("Failed to upsert assignment: {}", e);
-                    }
+                let assign_count = assignments.len();
+                let batch_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    async {
+                        for (key_hash, plan_name) in &assignments {
+                            if let Err(e) = sqlx::query(
+                                r#"INSERT INTO boom_key_plan_assignment (key_hash, plan_name, assigned_at)
+                                   VALUES ($1, $2, NOW())
+                                   ON CONFLICT (key_hash) DO UPDATE
+                                   SET plan_name = EXCLUDED.plan_name"#,
+                            )
+                            .bind(key_hash)
+                            .bind(plan_name)
+                            .execute(&pool)
+                            .await
+                            {
+                                tracing::error!("Failed to upsert assignment: {}", e);
+                            }
+                        }
+                    },
+                )
+                .await;
+                if batch_result.is_err() {
+                    tracing::warn!("Assignment sync timed out after 30s, {} entries skipped", assign_count);
                 }
             }
 
@@ -375,15 +396,26 @@ fn spawn_sync_task(state: AppState, mut shutdown: tokio::sync::broadcast::Receiv
     tracing::info!("Background sync task spawned (every 10 min)");
 }
 
-fn init_tracing() {
+/// Initialize tracing with a non-blocking writer.
+///
+/// `tracing_appender::non_blocking` offloads log I/O to a dedicated thread,
+/// so stdout writes never block the tokio runtime (critical for Docker where
+/// the log driver may introduce back-pressure).
+fn init_tracing() -> tracing_appender::non_blocking::WorkerGuard {
     use tracing_subscriber::EnvFilter;
+
+    let (non_blocking, guard) = tracing_appender::non_blocking(std::io::stdout());
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .json()
         .with_target(false)
+        .with_writer(non_blocking)
         .init();
+
+    guard
 }
 
 async fn shutdown_signal() {
