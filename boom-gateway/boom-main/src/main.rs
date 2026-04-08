@@ -109,54 +109,23 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn build_router(state: AppState) -> Router {
-    // Choose API routes based on pass-through mode.
-    let pass_through_enabled = state
-        .inner
-        .load()
-        .config
-        .pass_through
-        .as_ref()
-        .map(|pt| pt.enabled)
-        .unwrap_or(false);
-
-    let api_routes = if pass_through_enabled {
-        tracing::info!("Pass-through mode enabled — forwarding to upstream gateway");
-        Router::new()
-            // Primary routes (with /v1 prefix)
-            .route("/v1/chat/completions", post(routes::pt_chat_completions))
-            .route("/v1/messages", post(routes::pt_messages))
-            .route("/v1/models", get(routes::list_models))
-            .route("/v1/models/{id}", get(routes::get_model))
-            .route("/v1/completions", post(routes::pt_completions))
-            // Alias routes (without /v1 prefix — OpenAI client compatibility)
-            .route("/chat/completions", post(routes::pt_chat_completions))
-            .route("/completions", post(routes::pt_completions))
-            .route("/models", get(routes::list_models))
-            .route("/models/{id}", get(routes::get_model))
-            // Unsupported endpoints (return proper errors)
-            .route("/v1/embeddings", post(routes::embeddings))
-            .route("/v1/audio/speech", post(routes::audio_speech))
-            .route("/v1/audio/transcriptions", post(routes::audio_transcriptions))
-            .route("/v1/moderations", post(routes::moderations))
-    } else {
-        Router::new()
-            // Primary routes (with /v1 prefix)
-            .route("/v1/chat/completions", post(routes::chat_completions))
-            .route("/v1/messages", post(routes::messages))
-            .route("/v1/models", get(routes::list_models))
-            .route("/v1/models/{id}", get(routes::get_model))
-            .route("/v1/completions", post(routes::completions))
-            // Alias routes (without /v1 prefix — OpenAI client compatibility)
-            .route("/chat/completions", post(routes::chat_completions))
-            .route("/completions", post(routes::completions))
-            .route("/models", get(routes::list_models))
-            .route("/models/{id}", get(routes::get_model))
-            // Unsupported endpoints (return proper errors)
-            .route("/v1/embeddings", post(routes::embeddings))
-            .route("/v1/audio/speech", post(routes::audio_speech))
-            .route("/v1/audio/transcriptions", post(routes::audio_transcriptions))
-            .route("/v1/moderations", post(routes::moderations))
-    };
+    let api_routes = Router::new()
+        // Primary routes (with /v1 prefix)
+        .route("/v1/chat/completions", post(routes::chat_completions))
+        .route("/v1/messages", post(routes::messages))
+        .route("/v1/models", get(routes::list_models))
+        .route("/v1/models/{id}", get(routes::get_model))
+        .route("/v1/completions", post(routes::completions))
+        // Alias routes (without /v1 prefix — OpenAI client compatibility)
+        .route("/chat/completions", post(routes::chat_completions))
+        .route("/completions", post(routes::completions))
+        .route("/models", get(routes::list_models))
+        .route("/models/{id}", get(routes::get_model))
+        // Unsupported endpoints (return proper errors)
+        .route("/v1/embeddings", post(routes::embeddings))
+        .route("/v1/audio/speech", post(routes::audio_speech))
+        .route("/v1/audio/transcriptions", post(routes::audio_transcriptions))
+        .route("/v1/moderations", post(routes::moderations));
 
     // Health check routes (no auth required).
     let health_routes = Router::new()
