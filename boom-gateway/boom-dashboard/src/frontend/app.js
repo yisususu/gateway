@@ -534,13 +534,15 @@
   function renderKeysTable(keys) {
     const wrap = document.getElementById("keys-table-wrap");
     if (keys.length === 0) { wrap.innerHTML = "<p>No keys found.</p>"; return; }
+    keys.sort((a, b) => (b.usage_count || 0) - (a.usage_count || 0));
     wrap.innerHTML = `<table>
-      <tr><th>Token</th><th>Alias</th><th>Name</th><th>User</th><th>Spend</th><th>Budget</th><th>Status</th><th>Actions</th></tr>
+      <tr><th>Token</th><th>Alias</th><th>User</th><th>Usage</th><th>Reset</th><th>Spend</th><th>Budget</th><th>Status</th><th>Actions</th></tr>
       ${keys.map((k) => `<tr>
         <td class="mono">${esc(k.token_prefix)}</td>
         <td>${esc(k.key_alias || "-")}</td>
-        <td>${esc(k.key_name || "-")}</td>
         <td>${esc(k.user_id || "-")}</td>
+        <td>${k.usage_count || 0}</td>
+        <td>${formatCountdown(k.usage_reset_secs || 0)}</td>
         <td>$${(k.spend || 0).toFixed(4)}</td>
         <td>${k.max_budget != null ? "$" + k.max_budget : "-"}</td>
         <td>${k.blocked ? '<span style="color:var(--danger)">Blocked</span>' : "Active"}</td>
@@ -1151,6 +1153,15 @@
     if (h > 0) return h + "时" + m + "分" + s + "秒";
     if (m > 0) return m + "分" + s + "秒";
     return s + "秒";
+  }
+
+  function formatCountdown(secs) {
+    if (secs <= 0) return "-";
+    secs = Math.round(secs);
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    return h + ":" + String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
   }
 
   function formatNumber(n) {

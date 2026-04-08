@@ -259,6 +259,16 @@ pub async fn list_keys(
         .into_iter()
         .map(|r| {
             let token_prefix = format!("{}...", &r.token[..8.min(r.token.len())]);
+
+            // Real-time usage from limiter
+            let windows = state.limiter.get_usage_for_key(&r.token);
+            let total_count: u64 = windows.iter().map(|w| w.count).sum();
+            let max_remaining_secs: u64 = windows
+                .iter()
+                .map(|w| w.window_secs.saturating_sub(w.elapsed_secs))
+                .max()
+                .unwrap_or(0);
+
             json!({
                 "token_prefix": token_prefix,
                 "token_hash": r.token,
@@ -276,6 +286,8 @@ pub async fn list_keys(
                 "expires": r.expires.map(|d| d.to_string()),
                 "metadata": r.metadata,
                 "created_at": r.created_at.map(|d| d.to_string()),
+                "usage_count": total_count,
+                "usage_reset_secs": max_remaining_secs,
             })
         })
         .collect();
