@@ -822,7 +822,7 @@ pub struct CreateDeploymentRequest {
 }
 
 fn default_timeout() -> i64 {
-    120
+    1200
 }
 fn default_true_val() -> bool {
     true

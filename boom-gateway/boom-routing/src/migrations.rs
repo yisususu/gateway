@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS boom_model_deployment (
     aws_secret_access_key TEXT,
     rpm               BIGINT,
     tpm               BIGINT,
-    timeout           BIGINT  NOT NULL DEFAULT 120,
+    timeout           BIGINT  NOT NULL DEFAULT 1200,
     headers           JSONB   NOT NULL DEFAULT '{}',
     temperature       DOUBLE PRECISION,
     max_tokens        INTEGER,
