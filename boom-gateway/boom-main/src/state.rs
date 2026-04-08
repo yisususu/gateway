@@ -114,31 +114,23 @@ impl AppState {
 
         if let Some(ref pool) = db_pool {
             // Run migrations (all tables).
-            tracing::info!("Running migrations...");
             if let Err(e) = boom_dashboard::migrations::run_migrations(pool).await {
                 tracing::error!("Failed to run migrations: {}", e);
             }
-            tracing::info!("Migrations done");
 
             // Sync YAML config to DB (upsert source='yaml', handle conflicts).
-            tracing::info!("Syncing YAML to DB...");
             if let Err(e) = sync_yaml_to_db(pool, &config).await {
                 tracing::error!("Failed to sync YAML to DB: {}", e);
             }
-            tracing::info!("YAML sync done");
 
             // Load source='db' records on top of YAML-built stores.
-            tracing::info!("Loading DB-only records...");
             load_db_only_deployments(pool, &deployment_store).await;
             load_db_only_aliases(pool, &alias_store).await;
             load_db_only_plans(pool, &plan_store).await;
-            tracing::info!("DB-only records loaded");
 
             // Restore runtime state.
-            tracing::info!("Restoring runtime state...");
             restore_assignments_from_db(pool, &plan_store).await;
             restore_counters_from_db(pool, &limiter).await;
-            tracing::info!("Runtime state restored");
         }
 
         // 6. Build inner state (config + auth + health).
@@ -794,7 +786,6 @@ fn load_plans_from_config(plan_store: &Arc<PlanStore>, config: &Config) {
             schedule: convert_schedule(&pc.schedule),
         };
         plan_store.upsert_plan(plan);
-        tracing::info!(plan = %name, "Loaded plan from config");
     }
 
     match &config.plan_settings.default_plan {

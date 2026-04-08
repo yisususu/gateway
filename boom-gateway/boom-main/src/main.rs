@@ -24,6 +24,12 @@ struct Args {
     /// Bind port (overrides config file).
     #[arg(long)]
     port: Option<u16>,
+
+    /// Gracefully stop any running boom-gateway instance before starting.
+    /// Probes /health endpoint: if the old process is frozen (no response),
+    /// force-kills it immediately instead of waiting for a fixed timeout.
+    #[arg(long)]
+    reboot: bool,
 }
 
 #[tokio::main(worker_threads = 32)]
@@ -32,6 +38,11 @@ async fn main() -> anyhow::Result<()> {
 
     let _tracing_guard = init_tracing();
     tracing::info!("BooMGateway starting...");
+
+    // Handle --reboot: gracefully stop any existing instance.
+    if args.reboot {
+        graceful_restart(args.port)?;
+    }
 
     // Load config.
     let config = boom_config::load_config(&args.config)?;
@@ -443,5 +454,181 @@ async fn shutdown_signal() {
         _ = terminate => {
             tracing::info!("Received SIGTERM");
         },
+    }
+}
+
+/// Find running boom-gateway processes, send SIGTERM, then use HTTP health probing
+/// to determine if the old process is still responsive:
+///   - /health responds   → runtime alive, graceful shutdown in progress, keep waiting
+///   - Connection refused → listener closed, shutting down, keep waiting
+///   - Timeout (no response) → runtime frozen, SIGKILL immediately
+fn graceful_restart(port_hint: Option<u16>) -> anyhow::Result<()> {
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    let self_pid = std::process::id();
+
+    // Find boom-gateway processes via pgrep (exact name match).
+    let output = match Command::new("pgrep").args(["-x", "boom-gateway"]).output() {
+        Ok(o) => o,
+        Err(_) => {
+            tracing::warn!("pgrep not available, skipping graceful restart");
+            return Ok(());
+        }
+    };
+
+    let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .filter(|&pid| pid != self_pid)
+        .collect();
+
+    if pids.is_empty() {
+        tracing::info!("No existing boom-gateway process found");
+        return Ok(());
+    }
+
+    tracing::info!(
+        "Found {} running boom-gateway process(es): {:?}",
+        pids.len(),
+        pids
+    );
+
+    // Determine port for health probing: --port arg → old process cmdline.
+    let port = port_hint
+        .or_else(|| pids.first().and_then(|&pid| parse_port_from_pid(pid)));
+
+    // Send SIGTERM for graceful shutdown.
+    for &pid in &pids {
+        let _ = Command::new("kill")
+            .args(["-s", "TERM", &pid.to_string()])
+            .output();
+    }
+    tracing::info!("Sent SIGTERM, waiting for graceful shutdown...");
+
+    // Hard limit: 30 seconds maximum (should never hit this in practice).
+    let deadline = Instant::now() + Duration::from_secs(30);
+
+    loop {
+        if Instant::now() > deadline {
+            tracing::warn!("Hard timeout (30s), force killing remaining process(es)");
+            force_kill_alive(&pids);
+            return Ok(());
+        }
+
+        let alive: Vec<u32> = pids
+            .iter()
+            .filter(|&&pid| is_process_alive(pid))
+            .copied()
+            .collect();
+
+        if alive.is_empty() {
+            tracing::info!("Old process(es) exited gracefully");
+            return Ok(());
+        }
+
+        // Probe health endpoint to detect frozen process.
+        if let Some(p) = port {
+            match probe_health(p) {
+                HealthProbe::Responsive | HealthProbe::ConnectionRefused => {
+                    // Process is alive — either still serving or closing listener.
+                    // Normal graceful shutdown in progress, keep waiting.
+                }
+                HealthProbe::Timeout => {
+                    // Process alive but not responding → frozen.
+                    tracing::warn!(
+                        "Health check timed out — old process frozen, force killing: {:?}",
+                        alive
+                    );
+                    force_kill_alive(&alive);
+                    return Ok(());
+                }
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// Check if a process is still alive (signal 0 = existence check, no signal delivered).
+fn is_process_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Force kill (SIGKILL) all alive processes in the list.
+fn force_kill_alive(pids: &[u32]) {
+    for &pid in pids {
+        if is_process_alive(pid) {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .output();
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
+}
+
+/// Parse --port from a running process's command line via /proc.
+fn parse_port_from_pid(pid: u32) -> Option<u16> {
+    let cmdline = std::fs::read_to_string(format!("/proc/{}/cmdline", pid)).ok()?;
+    let args: Vec<&str> = cmdline.split('\0').filter(|s| !s.is_empty()).collect();
+    for i in 0..args.len() {
+        if args[i] == "--port" && i + 1 < args.len() {
+            return args[i + 1].parse().ok();
+        }
+    }
+    None
+}
+
+/// Result of an HTTP health probe against the gateway.
+enum HealthProbe {
+    /// Gateway returned an HTTP response — runtime is functional.
+    Responsive,
+    /// TCP connection refused — listener closed (shutting down or exited).
+    ConnectionRefused,
+    /// Connection or response timed out — gateway is frozen.
+    Timeout,
+}
+
+/// Probe the gateway's /health endpoint to determine if it's responsive.
+/// Uses raw TCP + HTTP to avoid pulling in an HTTP client dependency.
+fn probe_health(port: u16) -> HealthProbe {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let addr = format!("127.0.0.1:{}", port);
+    let addr: std::net::SocketAddr = match addr.parse() {
+        Ok(a) => a,
+        Err(_) => return HealthProbe::ConnectionRefused,
+    };
+
+    let mut stream = match TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2)) {
+        Ok(s) => s,
+        Err(e) => {
+            return if e.kind() == std::io::ErrorKind::TimedOut {
+                HealthProbe::Timeout
+            } else {
+                HealthProbe::ConnectionRefused
+            };
+        }
+    };
+
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
+
+    if stream
+        .write_all(b"GET /health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+        .is_err()
+    {
+        return HealthProbe::ConnectionRefused;
+    }
+
+    let mut buf = [0u8; 128];
+    match stream.read(&mut buf) {
+        Ok(n) if n > 0 => HealthProbe::Responsive,
+        _ => HealthProbe::Timeout,
     }
 }
