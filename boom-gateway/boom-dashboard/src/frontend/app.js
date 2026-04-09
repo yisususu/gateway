@@ -973,7 +973,7 @@
       <div class="form-group"><label>Key Name ${tip("Human-readable name for this key.")}</label><input id="m-key-name"></div>
       <div class="form-group"><label>User ID ${tip("Optional user identifier for tracking.")}</label><input id="m-key-user"></div>
       <div class="form-group"><label>Team ID ${tip("Optional team identifier.")}</label><input id="m-key-team"></div>
-      <div class="form-group"><label>Models ${tip("Select model access for this key. 'all-team-models' grants full access to all models.")}</label><select id="m-key-models"></select></div>
+      <div class="form-group"><label>Models ${tip("Select model access. Check 'all-team-models' for full access, or pick specific models.")}</label><div class="model-check-combo" id="m-key-models-combo"></div></div>
       <div class="form-group"><label>Max Budget ${tip("Maximum budget in USD. Leave empty for unlimited.")}</label><input id="m-key-budget" type="number" step="0.01"></div>
       <div class="form-group"><label>RPM Limit ${tip("Per-key RPM override. Leave empty to use plan or default limits.")}</label><input id="m-key-rpm" type="number"></div>
       <div class="form-group"><label>Plan ${tip("Assign this key to a rate limit plan. Leave empty for default plan.")}</label><input id="m-key-plan" list="key-plan-list"><datalist id="key-plan-list"></datalist></div>
@@ -982,20 +982,10 @@
         <button class="btn-primary" id="m-key-submit">Create</button>
       </div>
     `);
-    // Populate model select: all-team-models (full access) + each model
+    // Populate model checkbox combo
     getModelNames().then((names) => {
-      const sel = document.getElementById("m-key-models");
-      if (!sel) return;
-      const allOpt = document.createElement("option");
-      allOpt.value = "all-team-models";
-      allOpt.textContent = "all-team-models (Full Access)";
-      sel.appendChild(allOpt);
-      names.forEach((n) => {
-        const o = document.createElement("option");
-        o.value = n;
-        o.textContent = n;
-        sel.appendChild(o);
-      });
+      const container = document.getElementById("m-key-models-combo");
+      if (container) initModelCombo(container, [], names);
     });
     getPlanNames().then((names) => {
       const dl = document.getElementById("key-plan-list");
@@ -1003,14 +993,14 @@
     });
     document.getElementById("m-key-submit").addEventListener("click", async () => {
       try {
-        const modelVal = document.getElementById("m-key-models").value;
+        const modelsVal = getComboModels("m-key-models-combo");
         const data = await api("/admin/keys", {
           method: "POST",
           body: JSON.stringify({
             key_name: document.getElementById("m-key-name").value || null,
             user_id: document.getElementById("m-key-user").value || null,
             team_id: document.getElementById("m-key-team").value || null,
-            models: modelVal && modelVal !== "all-team-models" ? [modelVal] : null,
+            models: modelsVal,
             max_budget: document.getElementById("m-key-budget").value ? Number(document.getElementById("m-key-budget").value) : null,
             rpm_limit: document.getElementById("m-key-rpm").value ? Number(document.getElementById("m-key-rpm").value) : null,
             plan_name: document.getElementById("m-key-plan").value || null,
@@ -1032,13 +1022,11 @@
 
   function showEditKeyModal(key) {
     const existingModels = Array.isArray(key.models) ? key.models : [];
-    const hasFullAccess = existingModels.length === 0 || existingModels.includes("all-team-models") || existingModels.includes("*");
-    const currentModel = hasFullAccess ? "all-team-models" : (existingModels[0] || "all-team-models");
     showModal(`
       <h3>Edit Key</h3>
       <div class="form-group"><label>Alias ${tip("Human-readable name for this key.")}</label><input id="m-edit-alias" value="${esc(key.key_alias || "")}"></div>
       <div class="form-group"><label>User ID ${tip("Optional user identifier.")}</label><input id="m-edit-user" value="${esc(key.user_id || "")}"></div>
-      <div class="form-group"><label>Models ${tip("Select model access for this key. 'all-team-models' grants full access to all models.")}</label><select id="m-edit-models"></select></div>
+      <div class="form-group"><label>Models ${tip("Select model access. Check 'all-team-models' for full access, or pick specific models.")}</label><div class="model-check-combo" id="m-edit-models-combo"></div></div>
       <div class="form-group"><label>Max Budget ${tip("Maximum budget in USD. Leave empty for unlimited.")}</label><input id="m-edit-budget" type="number" step="0.01" value="${key.max_budget != null ? key.max_budget : ""}"></div>
       <div class="form-group"><label>RPM Limit ${tip("Per-key RPM override. Leave empty to use plan limits.")}</label><input id="m-edit-rpm" type="number" value="${key.rpm_limit || ""}"></div>
       <div class="modal-actions">
@@ -1046,32 +1034,20 @@
         <button class="btn-primary" id="m-edit-submit">Save</button>
       </div>
     `);
-    // Populate select: all-team-models + each model, pre-select current
+    // Populate model checkbox combo with existing models pre-checked
     getModelNames().then((names) => {
-      const sel = document.getElementById("m-edit-models");
-      if (!sel) return;
-      const allOpt = document.createElement("option");
-      allOpt.value = "all-team-models";
-      allOpt.textContent = "all-team-models (Full Access)";
-      if (currentModel === "all-team-models") allOpt.selected = true;
-      sel.appendChild(allOpt);
-      names.forEach((n) => {
-        const o = document.createElement("option");
-        o.value = n;
-        o.textContent = n;
-        if (n === currentModel) o.selected = true;
-        sel.appendChild(o);
-      });
+      const container = document.getElementById("m-edit-models-combo");
+      if (container) initModelCombo(container, existingModels, names);
     });
     document.getElementById("m-edit-submit").addEventListener("click", async () => {
       try {
         const aliasVal = document.getElementById("m-edit-alias").value.trim();
         const userVal = document.getElementById("m-edit-user").value.trim();
-        const modelVal = document.getElementById("m-edit-models").value;
+        const modelsVal = getComboModels("m-edit-models-combo");
         const body = {
           key_alias: aliasVal || null,
           user_id: userVal || null,
-          models: modelVal && modelVal !== "all-team-models" ? [modelVal] : null,
+          models: modelsVal,
           max_budget: document.getElementById("m-edit-budget").value ? Number(document.getElementById("m-edit-budget").value) : null,
           rpm_limit: document.getElementById("m-edit-rpm").value ? Number(document.getElementById("m-edit-rpm").value) : null,
         };
@@ -1241,6 +1217,99 @@
   }
 
   window._loadLogsPage = (p) => loadLogs(p);
+
+  // ── Model Checkbox Combo ──────────────────────────────
+  // Renders a custom multi-select dropdown with checkboxes.
+  // - "all-team-models" option: when checked, overrides to full access
+  // - Individual model checkboxes for fine-grained control
+  // - Shows currently selected models in a display area
+
+  function initModelCombo(container, existingModels, allNames) {
+    const checked = new Set(existingModels || []);
+    const isFullAccess = checked.size === 0 || checked.has("all-team-models") || checked.has("*");
+
+    // Build HTML
+    container.innerHTML = `
+      <div class="mcc-display">${isFullAccess ? "all-team-models (Full Access)" : (existingModels || []).map((m) => esc(m)).join(", ") || "No models"}</div>
+      <div class="mcc-dropdown hidden">
+        <label class="mcc-item mcc-item-all"><input type="checkbox" value="all-team-models" ${isFullAccess ? "checked" : ""}> all-team-models (Full Access)</label>
+        <div class="mcc-divider"></div>
+        ${allNames.map((n) => `<label class="mcc-item"><input type="checkbox" value="${esc(n)}" ${!isFullAccess && checked.has(n) ? "checked" : ""}> ${esc(n)}</label>`).join("")}
+      </div>
+    `;
+
+    const display = container.querySelector(".mcc-display");
+    const dropdown = container.querySelector(".mcc-dropdown");
+    const allCb = container.querySelector('.mcc-item-all input[type="checkbox"]');
+    const modelCbs = container.querySelectorAll('.mcc-item:not(.mcc-item-all) input[type="checkbox"]');
+
+    // Toggle dropdown
+    display.addEventListener("click", (e) => {
+      e.stopPropagation();
+      // Close other combos
+      document.querySelectorAll(".mcc-dropdown").forEach((d) => {
+        if (d !== dropdown) d.classList.add("hidden");
+      });
+      dropdown.classList.toggle("hidden");
+    });
+
+    // Close on outside click
+    const closeHandler = (e) => {
+      if (!container.contains(e.target)) dropdown.classList.add("hidden");
+    };
+    document.addEventListener("click", closeHandler);
+
+    // all-team-models checkbox: toggles full access
+    allCb.addEventListener("change", () => {
+      if (allCb.checked) {
+        modelCbs.forEach((cb) => { cb.checked = false; cb.disabled = true; });
+      } else {
+        modelCbs.forEach((cb) => { cb.disabled = false; });
+      }
+      refreshDisplay();
+    });
+
+    // Individual model checkbox
+    modelCbs.forEach((cb) => {
+      cb.addEventListener("change", () => {
+        // If any individual model is checked, uncheck all-team-models
+        const anyChecked = Array.from(modelCbs).some((c) => c.checked);
+        if (anyChecked) {
+          allCb.checked = false;
+          modelCbs.forEach((c) => { c.disabled = false; });
+        }
+        refreshDisplay();
+      });
+    });
+
+    // If full access initially, disable individual checkboxes
+    if (isFullAccess) {
+      modelCbs.forEach((cb) => { cb.disabled = true; });
+    }
+
+    function refreshDisplay() {
+      if (allCb.checked) {
+        display.textContent = "all-team-models (Full Access)";
+      } else {
+        const selected = Array.from(modelCbs).filter((c) => c.checked).map((c) => c.value);
+        display.textContent = selected.length > 0 ? selected.join(", ") : "No models selected";
+      }
+    }
+  }
+
+  // Read the final models selection from a combo container.
+  // Returns null (unrestricted) if all-team-models is checked,
+  // array of model names if specific models are checked,
+  // null if nothing is checked.
+  function getComboModels(containerId) {
+    const container = document.getElementById(containerId);
+    if (!container) return null;
+    const allCb = container.querySelector('.mcc-item-all input[type="checkbox"]');
+    const modelCbs = container.querySelectorAll('.mcc-item:not(.mcc-item-all) input[type="checkbox"]');
+    if (allCb && allCb.checked) return null; // full access = null/unrestricted
+    const selected = Array.from(modelCbs).filter((c) => c.checked).map((c) => c.value);
+    return selected.length > 0 ? selected : null;
+  }
 
   // ── Helpers ───────────────────────────────────────────
   function esc(s) {
