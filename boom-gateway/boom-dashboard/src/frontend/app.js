@@ -222,7 +222,7 @@
         .map(function (d) {
           return (
             "<tr>" +
-            "<td>" + esc(d.model) + ":" + esc(d.deployment_id || "-") + "</td>" +
+            "<td>" + esc(d.deployment_id ? d.model + ":" + d.deployment_id : d.model) + "</td>" +
             "<td>" + d.fc_reqs + "</td>" +
             "<td>" + d.fc_context.toLocaleString() + "</td>" +
             "<td>" + d.in_reqs + "</td>" +

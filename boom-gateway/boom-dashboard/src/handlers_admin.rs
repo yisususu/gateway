@@ -1657,14 +1657,20 @@ pub async fn get_inflight_stats(
 ) -> Response {
     use std::collections::HashMap;
 
+    let inflight_models = state.inflight.get_stats();
     let inflight_deployments = state.inflight.get_stats_by_deployment();
     let flowcontrol_stats = state.flow_controller.get_stats();
+
+    // Collect model names that already appear in deployment-level stats
+    // to avoid double-counting in the model-level fallback.
+    let mut models_covered: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Merge by deployment_id (full outer join).
     let mut rows: HashMap<String, serde_json::Value> = HashMap::new();
 
-    // 1. Inflight data — has model + deployment_id + inflight metrics.
+    // 1. Inflight deployment data — has model + deployment_id + inflight metrics.
     for d in &inflight_deployments {
+        models_covered.insert(d.model.clone());
         rows.insert(d.deployment_id.clone(), json!({
             "model": d.model,
             "deployment_id": d.deployment_id,
@@ -1679,12 +1685,9 @@ pub async fn get_inflight_stats(
     for fc in &flowcontrol_stats {
         let did = &fc.deployment_id;
         if let Some(row) = rows.get_mut(did) {
-            // Deployment already in inflight — merge fc data.
             row["fc_reqs"] = json!(fc.current_inflight);
             row["fc_context"] = json!(fc.current_context);
         } else {
-            // FlowControl-only deployment (no active inflight requests).
-            // Need to find model_name from deployment_store.
             let model = state.deployment_store.find_model_by_deployment_id(did)
                 .unwrap_or_else(|| "-".to_string());
             rows.insert(did.clone(), json!({
@@ -1696,6 +1699,21 @@ pub async fn get_inflight_stats(
                 "in_context": 0,
             }));
         }
+    }
+
+    // 3. Model-level fallback — deployments without deployment_id.
+    for m in &inflight_models {
+        if models_covered.contains(&m.model) {
+            continue; // Already covered by deployment-level data.
+        }
+        rows.insert(format!("__model__{}", m.model), json!({
+            "model": m.model,
+            "deployment_id": "",
+            "fc_reqs": 0,
+            "fc_context": 0,
+            "in_reqs": m.inflight_requests,
+            "in_context": m.inflight_input_chars,
+        }));
     }
 
     // Sort by model then deployment_id for stable display.
