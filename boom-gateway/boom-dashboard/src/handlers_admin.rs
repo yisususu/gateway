@@ -849,6 +849,7 @@ struct DeploymentRow {
     temperature: Option<f64>,
     max_tokens: Option<i32>,
     enabled: Option<bool>,
+    auto_disabled: Option<bool>,
     source: Option<String>,
     deployment_id: Option<String>,
     quota_count_ratio: Option<i64>,
@@ -870,8 +871,8 @@ pub async fn list_models(
     let rows: Vec<DeploymentRow> = match sqlx::query_as(
         r#"SELECT id, model_name, litellm_model, api_key, api_key_env, api_base, api_version,
                   aws_region_name, aws_access_key_id, aws_secret_access_key,
-                  rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source,
-                  deployment_id, quota_count_ratio, created_at, updated_at
+                  rpm, tpm, timeout, headers, temperature, max_tokens, enabled, auto_disabled,
+                  source, deployment_id, quota_count_ratio, created_at, updated_at
            FROM boom_model_deployment
            ORDER BY model_name, created_at"#,
     )
@@ -903,6 +904,7 @@ pub async fn list_models(
                 "temperature": r.temperature,
                 "max_tokens": r.max_tokens,
                 "enabled": r.enabled.unwrap_or(true),
+                "auto_disabled": r.auto_disabled.unwrap_or(false),
                 "source": r.source,
                 "deployment_id": r.deployment_id,
                 "quota_count_ratio": r.quota_count_ratio.unwrap_or(1),

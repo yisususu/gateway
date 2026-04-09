@@ -110,6 +110,7 @@ async fn handle_update_model(
                aws_secret_access_key = COALESCE($10, aws_secret_access_key),
                rpm = $11, tpm = $12, timeout = $13, headers = $14,
                temperature = $15, max_tokens = $16, enabled = $17,
+               auto_disabled = CASE WHEN $17 = true THEN false ELSE auto_disabled END,
                deployment_id = $18, quota_count_ratio = $19, updated_at = NOW()
            WHERE id = $1"#,
     )
@@ -190,7 +191,7 @@ async fn handle_delete_model(
 }
 
 /// Reload all deployments for a specific model_name from DB into the deployment store.
-async fn reload_model_deployments(
+pub async fn reload_model_deployments(
     pool: &sqlx::PgPool,
     deployment_store: &Arc<DeploymentStore>,
     model_name: &str,
@@ -225,6 +226,59 @@ async fn reload_model_deployments(
     } else {
         deployment_store.set_deployments(model_name.to_string(), providers);
     }
+}
+
+/// Auto-disable a faulty deployment: mark `enabled = false, auto_disabled = true` in DB,
+/// then reload the deployment store so the node is immediately excluded from routing.
+pub async fn auto_disable_deployment(
+    pool: &sqlx::PgPool,
+    deployment_store: &Arc<DeploymentStore>,
+    deployment_id: &str,
+    model_name: &str,
+) {
+    tracing::warn!(
+        deployment_id = %deployment_id,
+        model = %model_name,
+        "Auto-disabling deployment due to consecutive failures"
+    );
+
+    // 1. UPDATE DB: set enabled = false, auto_disabled = true.
+    let result = sqlx::query(
+        r#"UPDATE boom_model_deployment
+           SET enabled = false, auto_disabled = true, updated_at = NOW()
+           WHERE deployment_id = $1"#,
+    )
+    .bind(deployment_id)
+    .execute(pool)
+    .await;
+
+    match result {
+        Ok(r) => {
+            if r.rows_affected() == 0 {
+                tracing::warn!(
+                    deployment_id = %deployment_id,
+                    "No rows updated — deployment_id may not exist in DB"
+                );
+                return;
+            }
+        }
+        Err(e) => {
+            tracing::error!(
+                deployment_id = %deployment_id,
+                "Failed to auto-disable deployment in DB: {}", e
+            );
+            return;
+        }
+    }
+
+    // 2. Reload deployments for this model from DB (removes the disabled one from memory).
+    reload_model_deployments(pool, deployment_store, model_name).await;
+
+    tracing::warn!(
+        deployment_id = %deployment_id,
+        model = %model_name,
+        "Deployment auto-disabled and removed from routing"
+    );
 }
 
 #[derive(Debug, sqlx::FromRow)]

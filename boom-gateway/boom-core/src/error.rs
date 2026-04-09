@@ -86,6 +86,16 @@ impl GatewayError {
         )
     }
 
+    /// Whether this error represents a deterministic deployment failure
+    /// (unreachable upstream or authentication failure) that will not self-heal.
+    pub fn is_deployment_failure(&self) -> bool {
+        match self {
+            Self::ProviderError(_) => true,
+            Self::UpstreamError { status, .. } => *status == 401 || *status == 403,
+            _ => false,
+        }
+    }
+
     /// OpenAI-style error type string.
     pub fn error_type(&self) -> &str {
         match self {

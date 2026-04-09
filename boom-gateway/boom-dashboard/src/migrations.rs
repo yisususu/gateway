@@ -55,6 +55,12 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
     )
     .execute(&mut *conn)
     .await;
+    // Add auto_disabled column (no-op if already present).
+    let _ = sqlx::query(
+        boom_routing::migrations::migration_add_auto_disabled(),
+    )
+    .execute(&mut *conn)
+    .await;
     tracing::info!("Migration 2/7: done");
     tracing::info!("Migration 3/7: alias...");
     run_ddl_on_conn(&mut conn, boom_routing::migrations::alias_ddl()).await?;

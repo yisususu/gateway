@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS boom_model_deployment (
     temperature       DOUBLE PRECISION,
     max_tokens        INTEGER,
     enabled           BOOLEAN NOT NULL DEFAULT true,
+    auto_disabled     BOOLEAN NOT NULL DEFAULT false,
     source            TEXT    NOT NULL DEFAULT 'yaml',
     deployment_id     TEXT,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -26,6 +27,13 @@ CREATE TABLE IF NOT EXISTS boom_model_deployment (
 );
 
 CREATE INDEX IF NOT EXISTS idx_boom_deployment_model ON boom_model_deployment(model_name);
+"#
+}
+
+/// Migration: add auto_disabled column to existing tables.
+pub fn migration_add_auto_disabled() -> &'static str {
+    r#"
+ALTER TABLE boom_model_deployment ADD COLUMN IF NOT EXISTS auto_disabled BOOLEAN NOT NULL DEFAULT false;
 "#
 }
 

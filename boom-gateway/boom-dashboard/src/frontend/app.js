@@ -663,20 +663,31 @@
     if (models.length === 0) { wrap.innerHTML = "<p>No model deployments.</p>"; return; }
     wrap.innerHTML = `<table>
       <tr><th>Model Name</th><th>LiteLLM Model</th><th>Base URL</th><th>Quota Ratio</th><th>RPM</th><th>Timeout</th><th>Enabled</th><th>Source</th><th>Actions</th></tr>
-      ${models.map((m) => `<tr>
+      ${models.map((m) => {
+        const isAutoDisabled = !m.enabled && m.auto_disabled;
+        const enabledBadge = m.enabled
+          ? '<span class="badge badge-active">Yes</span>'
+          : isAutoDisabled
+            ? '<span class="badge badge-blocked">No</span><br><span style="color:var(--danger);font-size:0.8em">Auto-disabled</span>'
+            : '<span class="badge badge-blocked">No</span>';
+        const warningRow = isAutoDisabled
+          ? `<tr style="background:rgba(255,80,80,0.08)"><td colspan="9" style="padding:4px 8px;font-size:0.85em;color:var(--danger)">Fault auto-disabled: this deployment was automatically disabled due to consecutive failures. Please fix the upstream issue and re-enable it.</td></tr>`
+          : '';
+        return `<tr${isAutoDisabled ? ' style="background:rgba(255,80,80,0.04)"' : ''}>
         <td><strong>${esc(m.model_name)}</strong></td>
         <td class="mono">${esc(m.litellm_model)}</td>
         <td class="mono">${esc(m.api_base || "-")}</td>
         <td>${m.quota_count_ratio && m.quota_count_ratio !== 1 ? '<span class="badge badge-plan">x' + m.quota_count_ratio + '</span>' : 'x1'}</td>
         <td>${m.rpm || "-"}</td>
         <td>${m.timeout}s</td>
-        <td>${m.enabled ? '<span class="badge badge-active">Yes</span>' : '<span class="badge badge-blocked">No</span>'}</td>
+        <td>${enabledBadge}</td>
         <td><span class="badge badge-plan">${esc(m.source || "-")}</span></td>
         <td>
           <button class="btn-small" onclick="window._editModel('${m.id}')">Edit</button>
           <button class="btn-danger" onclick="window._deleteModel('${m.id}','${esc(m.model_name)}')">Delete</button>
         </td>
-      </tr>`).join("")}
+      </tr>${warningRow}`;
+      }).join("")}
     </table>`;
   }
 

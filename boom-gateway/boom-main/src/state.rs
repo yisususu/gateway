@@ -5,9 +5,10 @@ use boom_core::provider::Authenticator;
 use boom_limiter::{PlanStore, RateLimitPlan, ScheduleSlot, SlidingWindowLimiter};
 use boom_routing::{AliasStore, DeploymentStore, InFlightTracker, KeyAffinityPolicy, Router, RoundRobinPolicy, SchedulePolicy};
 use boom_provider;
+use dashmap::DashMap;
 use sqlx::PgPool;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU32, AtomicU64};
 
 /// Shared application state.
 ///
@@ -41,6 +42,8 @@ pub struct AppState {
     pub inflight: Arc<InFlightTracker>,
     /// Request counter for periodic summary logging.
     pub request_count: Arc<AtomicU64>,
+    /// deployment_id → consecutive failure count (auto-disable threshold).
+    pub failure_counter: Arc<DashMap<String, Arc<AtomicU32>>>,
 }
 
 /// The state that gets swapped on config reload.
@@ -147,6 +150,7 @@ impl AppState {
             router,
             inflight,
             request_count: Arc::new(AtomicU64::new(0)),
+            failure_counter: Arc::new(DashMap::new()),
         })
     }
 
