@@ -90,6 +90,13 @@ pub fn anthropic_request_to_openai(req: &AnthropicMessagesRequest) -> ChatComple
         tools,
         tool_choice: req.tool_choice.clone(),
         response_format: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        seed: None,
+        user: None,
+        logprobs: None,
+        top_logprobs: None,
+        logit_bias: None,
         extra,
     }
 }

@@ -101,8 +101,26 @@ pub struct ChatCompletionRequest {
     pub tool_choice: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<serde_json::Value>,
-    /// Catch-all for provider-specific parameters.
-    #[serde(default, flatten)]
+    // Standard OpenAI fields (accepted and forwarded to upstream).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_logprobs: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logit_bias: Option<serde_json::Value>,
+    /// Catch-all: accepts all fields during deserialization so requests are
+    /// never rejected for unknown keys, but **skips serialization** so that
+    /// non-standard fields (service_tier, store, etc.) are NOT forwarded to
+    /// upstream providers that may not understand them.
+    #[serde(default, flatten, skip_serializing)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -129,7 +147,7 @@ pub struct CompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suffix: Option<String>,
     /// Catch-all for provider-specific parameters.
-    #[serde(default, flatten)]
+    #[serde(default, flatten, skip_serializing)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -168,6 +186,13 @@ impl CompletionRequest {
             tools: None,
             tool_choice: None,
             response_format: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            seed: None,
+            user: None,
+            logprobs: None,
+            top_logprobs: None,
+            logit_bias: None,
             extra: self.extra,
         }
     }
@@ -388,7 +413,7 @@ pub struct AnthropicMessagesRequest {
     pub thinking: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
-    #[serde(default, flatten)]
+    #[serde(default, flatten, skip_serializing)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 

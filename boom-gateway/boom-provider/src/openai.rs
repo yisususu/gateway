@@ -36,12 +36,9 @@ impl OpenAIProvider {
     fn build_request(&self, mut req: ChatCompletionRequest) -> serde_json::Value {
         // Replace model name with the actual provider model ID.
         req.model = self.model.clone();
-        // Remove our extra fields before forwarding.
-        let mut val = serde_json::to_value(&req).unwrap_or_default();
-        if let Some(obj) = val.as_object_mut() {
-            obj.remove("extra");
-        }
-        val
+        // Serialize — skip_serializing on `extra` ensures non-standard fields
+        // (service_tier, store, etc.) are NOT forwarded to upstream providers.
+        serde_json::to_value(&req).unwrap_or_default()
     }
 }
 
