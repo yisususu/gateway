@@ -1228,6 +1228,7 @@
   function initModelCombo(container, existingModels, allNames) {
     const checked = new Set(existingModels || []);
     const isFullAccess = checked.size === 0 || checked.has("all-team-models") || checked.has("*");
+    console.log("[initModelCombo] existingModels:", JSON.stringify(existingModels), "checked.size:", checked.size, "hasAll:", checked.has("all-team-models"), "isFullAccess:", isFullAccess, "allNames:", JSON.stringify(allNames));
 
     // Build HTML
     container.innerHTML = `
