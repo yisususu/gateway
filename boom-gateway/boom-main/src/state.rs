@@ -317,6 +317,24 @@ async fn sync_yaml_to_db(pool: &PgPool, config: &Config) -> Result<(), sqlx::Err
         .execute(pool)
         .await?;
 
+    // Delete source='db' deployments that conflict with YAML model_names.
+    if !config.model_list.is_empty() {
+        let yaml_model_names: Vec<String> = config.model_list.iter()
+            .map(|e| e.model_name.clone()).collect();
+        let result = sqlx::query(
+            r#"DELETE FROM boom_model_deployment WHERE source = 'db' AND model_name = ANY($1)"#,
+        )
+        .bind(&yaml_model_names)
+        .execute(pool)
+        .await?;
+        if result.rows_affected() > 0 {
+            tracing::info!(
+                "Removed {} conflicting source='db' deployment(s)",
+                result.rows_affected()
+            );
+        }
+    }
+
     for entry in &config.model_list {
         let p = &entry.litellm_params;
         let headers_json = serde_json::to_value(&p.headers).unwrap_or(serde_json::json!({}));

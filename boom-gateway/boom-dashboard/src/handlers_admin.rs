@@ -892,6 +892,7 @@ pub async fn list_models(
                 "id": r.id,
                 "model_name": r.model_name,
                 "litellm_model": r.litellm_model,
+                "api_key": r.api_key,
                 "api_key_env": r.api_key_env.unwrap_or(false),
                 "api_base": r.api_base,
                 "api_version": r.api_version,

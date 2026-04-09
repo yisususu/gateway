@@ -101,9 +101,13 @@ async fn handle_update_model(
 
     let result = sqlx::query(
         r#"UPDATE boom_model_deployment
-           SET model_name = $2, litellm_model = $3, api_key = $4, api_key_env = $5,
-               api_base = $6, api_version = $7, aws_region_name = $8,
-               aws_access_key_id = $9, aws_secret_access_key = $10,
+           SET model_name = $2, litellm_model = $3,
+               api_key = COALESCE($4, api_key),
+               api_key_env = $5,
+               api_base = COALESCE($6, api_base),
+               api_version = $7, aws_region_name = $8,
+               aws_access_key_id = COALESCE($9, aws_access_key_id),
+               aws_secret_access_key = COALESCE($10, aws_secret_access_key),
                rpm = $11, tpm = $12, timeout = $13, headers = $14,
                temperature = $15, max_tokens = $16, enabled = $17,
                deployment_id = $18, quota_count_ratio = $19, updated_at = NOW()
