@@ -819,6 +819,12 @@ pub struct CreateDeploymentRequest {
     /// Quota count multiplier (default 1).
     #[serde(default)]
     pub quota_count_ratio: Option<i64>,
+    /// Max concurrent in-flight requests (flow control, 0 = no limit).
+    #[serde(default)]
+    pub max_inflight_queue_len: Option<i32>,
+    /// Max total input context chars across in-flight requests (flow control, 0 = no limit).
+    #[serde(default)]
+    pub max_context_len: Option<i64>,
 }
 
 fn default_timeout() -> i64 {
@@ -853,6 +859,8 @@ struct DeploymentRow {
     source: Option<String>,
     deployment_id: Option<String>,
     quota_count_ratio: Option<i64>,
+    max_inflight_queue_len: Option<i32>,
+    max_context_len: Option<i64>,
     created_at: Option<chrono::DateTime<chrono::Utc>>,
     updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -872,7 +880,9 @@ pub async fn list_models(
         r#"SELECT id, model_name, litellm_model, api_key, api_key_env, api_base, api_version,
                   aws_region_name, aws_access_key_id, aws_secret_access_key,
                   rpm, tpm, timeout, headers, temperature, max_tokens, enabled, auto_disabled,
-                  source, deployment_id, quota_count_ratio, created_at, updated_at
+                  source, deployment_id, quota_count_ratio,
+                  max_inflight_queue_len, max_context_len,
+                  created_at, updated_at
            FROM boom_model_deployment
            ORDER BY model_name, created_at"#,
     )
@@ -908,6 +918,8 @@ pub async fn list_models(
                 "source": r.source,
                 "deployment_id": r.deployment_id,
                 "quota_count_ratio": r.quota_count_ratio.unwrap_or(1),
+                "max_inflight_queue_len": r.max_inflight_queue_len,
+                "max_context_len": r.max_context_len,
                 "created_at": r.created_at.map(|d| d.to_string()),
                 "updated_at": r.updated_at.map(|d| d.to_string()),
             })
@@ -1643,21 +1655,60 @@ pub async fn get_inflight_stats(
     _session: AdminSession,
     Extension(state): Extension<Arc<DashboardState>>,
 ) -> Response {
-    let model_stats = state.inflight.get_stats();
-    let deployment_stats = state.inflight.get_stats_by_deployment();
-    Json(json!({
-        "models": model_stats.iter().map(|s| json!({
-            "model": s.model,
-            "inflight_requests": s.inflight_requests,
-            "inflight_input_chars": s.inflight_input_chars,
-        })).collect::<Vec<_>>(),
-        "deployments": deployment_stats.iter().map(|s| json!({
-            "model": s.model,
-            "deployment_id": s.deployment_id,
-            "inflight_requests": s.inflight_requests,
-            "inflight_input_chars": s.inflight_input_chars,
-        })).collect::<Vec<_>>()
-    })).into_response()
+    use std::collections::HashMap;
+
+    let inflight_deployments = state.inflight.get_stats_by_deployment();
+    let flowcontrol_stats = state.flow_controller.get_stats();
+
+    // Merge by deployment_id (full outer join).
+    let mut rows: HashMap<String, serde_json::Value> = HashMap::new();
+
+    // 1. Inflight data — has model + deployment_id + inflight metrics.
+    for d in &inflight_deployments {
+        rows.insert(d.deployment_id.clone(), json!({
+            "model": d.model,
+            "deployment_id": d.deployment_id,
+            "fc_reqs": 0,
+            "fc_context": 0,
+            "in_reqs": d.inflight_requests,
+            "in_context": d.inflight_input_chars,
+        }));
+    }
+
+    // 2. FlowControl data — has deployment_id + fc metrics.
+    for fc in &flowcontrol_stats {
+        let did = &fc.deployment_id;
+        if let Some(row) = rows.get_mut(did) {
+            // Deployment already in inflight — merge fc data.
+            row["fc_reqs"] = json!(fc.current_inflight);
+            row["fc_context"] = json!(fc.current_context);
+        } else {
+            // FlowControl-only deployment (no active inflight requests).
+            // Need to find model_name from deployment_store.
+            let model = state.deployment_store.find_model_by_deployment_id(did)
+                .unwrap_or_else(|| "-".to_string());
+            rows.insert(did.clone(), json!({
+                "model": model,
+                "deployment_id": did,
+                "fc_reqs": fc.current_inflight,
+                "fc_context": fc.current_context,
+                "in_reqs": 0,
+                "in_context": 0,
+            }));
+        }
+    }
+
+    // Sort by model then deployment_id for stable display.
+    let mut result: Vec<_> = rows.into_values().collect();
+    result.sort_by(|a, b| {
+        let am = a["model"].as_str().unwrap_or("");
+        let bm = b["model"].as_str().unwrap_or("");
+        am.cmp(bm).then_with(|| {
+            a["deployment_id"].as_str().unwrap_or("").cmp(b["deployment_id"].as_str().unwrap_or(""))
+        })
+    });
+
+    Json(json!({ "deployments": result })).into_response()
 }
 
 // ═══════════════════════════════════════════════════════════

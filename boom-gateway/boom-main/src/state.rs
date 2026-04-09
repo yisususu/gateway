@@ -3,6 +3,7 @@ use boom_auth::DbAuthenticator;
 use boom_config::Config;
 use boom_core::provider::Authenticator;
 use boom_limiter::{PlanStore, RateLimitPlan, ScheduleSlot, SlidingWindowLimiter};
+use boom_flowcontrol::{FlowControlConfig, FlowController};
 use boom_routing::{AliasStore, DeploymentStore, InFlightTracker, KeyAffinityPolicy, Router, RoundRobinPolicy, SchedulePolicy};
 use boom_provider;
 use dashmap::DashMap;
@@ -44,6 +45,8 @@ pub struct AppState {
     pub request_count: Arc<AtomicU64>,
     /// deployment_id → consecutive failure count (auto-disable threshold).
     pub failure_counter: Arc<DashMap<String, Arc<AtomicU32>>>,
+    /// Per-deployment flow controller (survives reloads).
+    pub flow_controller: Arc<FlowController>,
 }
 
 /// The state that gets swapped on config reload.
@@ -104,6 +107,9 @@ impl AppState {
         // In-flight tracker survives across reloads — must be created before policy.
         let inflight = Arc::new(InFlightTracker::new());
 
+        // Flow controller survives across reloads.
+        let flow_controller = Arc::new(FlowController::new());
+
         // Create scheduling policy from config (may reference inflight).
         let policy = create_policy(&config, &inflight);
 
@@ -114,6 +120,7 @@ impl AppState {
         build_deployments_from_config(&config, &deployment_store);
         build_aliases_from_config(&config, &alias_store, &deployment_store);
         load_plans_from_config(&plan_store, &config);
+        seed_flow_controller_from_config(&config, &flow_controller);
 
         if let Some(ref pool) = db_pool {
             // Run migrations (all tables).
@@ -127,7 +134,7 @@ impl AppState {
             }
 
             // Load source='db' records on top of YAML-built stores.
-            load_db_only_deployments(pool, &deployment_store).await;
+            load_db_only_deployments(pool, &deployment_store, &flow_controller).await;
             load_db_only_aliases(pool, &alias_store).await;
             load_db_only_plans(pool, &plan_store).await;
 
@@ -151,6 +158,7 @@ impl AppState {
             inflight,
             request_count: Arc::new(AtomicU64::new(0)),
             failure_counter: Arc::new(DashMap::new()),
+            flow_controller,
         })
     }
 
@@ -204,6 +212,7 @@ impl AppState {
 
         self.plan_store.clear_plans();
         load_plans_from_config(&self.plan_store, &new_config);
+        seed_flow_controller_from_config(&new_config, &self.flow_controller);
 
         // Recreate policy (fresh counters etc.) — router reuses same stores.
         let new_policy = create_policy(&new_config, &self.inflight);
@@ -216,7 +225,7 @@ impl AppState {
             }
 
             // Load source='db' records on top of YAML-built stores.
-            load_db_only_deployments(pool, &self.deployment_store).await;
+            load_db_only_deployments(pool, &self.deployment_store, &self.flow_controller).await;
             load_db_only_aliases(pool, &self.alias_store).await;
             load_db_only_plans(pool, &self.plan_store).await;
         }
@@ -351,8 +360,10 @@ async fn sync_yaml_to_db(pool: &PgPool, config: &Config) -> Result<(), sqlx::Err
             r#"INSERT INTO boom_model_deployment
                (model_name, litellm_model, api_key, api_key_env, api_base, api_version,
                 aws_region_name, aws_access_key_id, aws_secret_access_key,
-                rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source, deployment_id, quota_count_ratio)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, true, 'yaml', $16, $17)"#,
+                rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source, deployment_id,
+                quota_count_ratio, max_inflight_queue_len, max_context_len)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, true, 'yaml', $16,
+                $17, $18, $19)"#,
         )
         .bind(&entry.model_name)
         .bind(&p.model)
@@ -371,6 +382,8 @@ async fn sync_yaml_to_db(pool: &PgPool, config: &Config) -> Result<(), sqlx::Err
         .bind(p.max_tokens.map(|v| v as i32))
         .bind(&deployment_id)
         .bind(quota_ratio)
+        .bind(entry.flow_control.as_ref().and_then(|fc| fc.model_queue_limit).map(|v| v as i32))
+        .bind(entry.flow_control.as_ref().and_then(|fc| fc.model_context_limit).map(|v| v as i64))
         .execute(pool)
         .await?;
     }
@@ -513,15 +526,19 @@ struct DeploymentRow {
     enabled: Option<bool>,
     source: Option<String>,
     deployment_id: Option<String>,
+    max_inflight_queue_len: Option<i32>,
+    max_context_len: Option<i64>,
 }
 
 /// Load source='db' model deployments from DB and add providers to DeploymentStore.
 /// Uses add_deployment (not set_deployments) so YAML providers for the same model are preserved.
-async fn load_db_only_deployments(pool: &PgPool, deployment_store: &Arc<DeploymentStore>) {
+async fn load_db_only_deployments(pool: &PgPool, deployment_store: &Arc<DeploymentStore>,
+                                   flow_controller: &Arc<FlowController>) {
     let rows: Vec<DeploymentRow> = match sqlx::query_as::<_, DeploymentRow>(
         r#"SELECT id, model_name, litellm_model, api_key, api_key_env, api_base, api_version,
                   aws_region_name, aws_access_key_id, aws_secret_access_key,
-                  rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source, deployment_id
+                  rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source, deployment_id,
+                  max_inflight_queue_len, max_context_len
            FROM boom_model_deployment
            WHERE source = 'db' AND enabled IS NOT FALSE
            ORDER BY model_name, created_at"#,
@@ -573,6 +590,18 @@ async fn load_db_only_deployments(pool: &PgPool, deployment_store: &Arc<Deployme
             Ok(provider) => {
                 deployment_store.add_deployment(&row.model_name, provider);
                 deployment_count += 1;
+
+                // Seed flow control for DB deployments.
+                if let Some(ref did) = row.deployment_id {
+                    let max_inflight = row.max_inflight_queue_len.unwrap_or(0) as u32;
+                    let max_context = row.max_context_len.unwrap_or(0) as u64;
+                    if max_inflight > 0 || max_context > 0 {
+                        flow_controller.ensure_slot(did, &FlowControlConfig {
+                            max_inflight,
+                            max_context,
+                        });
+                    }
+                }
             }
             Err(e) => {
                 tracing::error!(
@@ -803,6 +832,44 @@ fn build_aliases_from_config(
     );
 }
 
+/// Seed FlowController from YAML config.
+/// Only creates slots for deployments that have flow control parameters set.
+fn seed_flow_controller_from_config(config: &Config, flow_controller: &Arc<FlowController>) {
+    let mut active_ids = Vec::new();
+
+    for entry in &config.model_list {
+        let deployment_id = match entry.model_info.as_ref().and_then(|mi| mi.id.as_ref()) {
+            Some(id) if !id.is_empty() => id.clone(),
+            _ => continue, // No deployment_id — skip flow control.
+        };
+
+        let fc = match entry.flow_control.as_ref() {
+            Some(fc) => fc,
+            None => continue, // No flow_control section — skip.
+        };
+
+        let max_inflight = fc.model_queue_limit.unwrap_or(0);
+        let max_context = fc.model_context_limit.unwrap_or(0);
+
+        if max_inflight > 0 || max_context > 0 {
+            flow_controller.ensure_slot(&deployment_id, &FlowControlConfig {
+                max_inflight,
+                max_context,
+            });
+            active_ids.push(deployment_id.clone());
+            tracing::info!(
+                deployment_id = %deployment_id,
+                max_inflight,
+                max_context,
+                "Flow control configured"
+            );
+        }
+    }
+
+    // Remove slots for deployments no longer in config.
+    flow_controller.retain_slots(&active_ids);
+}
+
 /// Load plans from YAML config into PlanStore.
 fn load_plans_from_config(plan_store: &Arc<PlanStore>, config: &Config) {
     for (name, pc) in &config.plan_settings.plans {
@@ -968,9 +1035,9 @@ struct SnapshotDeploymentRow {
     temperature: Option<f64>,
     max_tokens: Option<i32>,
     deployment_id: Option<String>,
+    max_inflight_queue_len: Option<i32>,
+    max_context_len: Option<i64>,
 }
-
-/// Row for snapshot: alias.
 #[derive(Debug, sqlx::FromRow)]
 struct SnapshotAliasRow {
     alias_name: String,
@@ -995,7 +1062,8 @@ async fn build_config_snapshot_value(pool: &PgPool) -> Result<serde_json::Value,
     let model_rows: Vec<SnapshotDeploymentRow> = sqlx::query_as::<_, SnapshotDeploymentRow>(
         r#"SELECT model_name, litellm_model, api_key, api_base, api_version,
                   aws_region_name, aws_access_key_id, aws_secret_access_key,
-                  rpm, tpm, timeout, headers, temperature, max_tokens, deployment_id
+                  rpm, tpm, timeout, headers, temperature, max_tokens, deployment_id,
+                  max_inflight_queue_len, max_context_len
            FROM boom_model_deployment
            WHERE enabled IS NOT FALSE
            ORDER BY model_name, created_at"#,
@@ -1043,6 +1111,12 @@ async fn build_config_snapshot_value(pool: &PgPool) -> Result<serde_json::Value,
             }
             if let Some(m) = r.max_tokens {
                 litellm_params.insert("max_tokens".into(), serde_json::Value::Number(m.into()));
+            }
+            if let Some(v) = r.max_inflight_queue_len {
+                litellm_params.insert("max_inflight_queue_len".into(), serde_json::Value::Number(v.into()));
+            }
+            if let Some(v) = r.max_context_len {
+                litellm_params.insert("max_context_len".into(), serde_json::Value::Number(v.into()));
             }
             // Only include headers if non-empty.
             if let Some(obj) = r.headers.as_object() {

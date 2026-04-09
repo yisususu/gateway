@@ -97,12 +97,32 @@ pub struct ModelInfo {
     pub quota_count_ratio: Option<u64>,
 }
 
+/// Per-deployment flow control configuration.
+///
+/// ```yaml
+/// flow_control:
+///   model_queue_limit: 50
+///   model_context_limit: 5000000
+/// ```
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct FlowControlEntry {
+    /// Max concurrent in-flight requests. 0 or unset = no limit.
+    #[serde(default)]
+    pub model_queue_limit: Option<u32>,
+    /// Max total input context chars across all in-flight requests. 0 or unset = no limit.
+    #[serde(default)]
+    pub model_context_limit: Option<u64>,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ModelEntry {
     pub model_name: String,
     pub litellm_params: ProviderParams,
     #[serde(default)]
     pub model_info: Option<ModelInfo>,
+    /// Per-deployment flow control (queue + context limits).
+    #[serde(default)]
+    pub flow_control: Option<FlowControlEntry>,
 }
 
 /// Provider params — compatible with litellm's `litellm_params` format.

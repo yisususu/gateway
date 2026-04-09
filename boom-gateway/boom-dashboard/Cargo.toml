@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 boom-core = { path = "../boom-core" }
+boom-flowcontrol = { path = "../boom-flowcontrol" }
 boom-limiter = { path = "../boom-limiter" }
 boom-routing = { path = "../boom-routing" }
 boom-audit = { path = "../boom-audit" }

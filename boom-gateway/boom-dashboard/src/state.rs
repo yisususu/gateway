@@ -1,3 +1,4 @@
+use boom_flowcontrol::FlowController;
 use boom_limiter::{PlanStore, SlidingWindowLimiter};
 use boom_routing::{AliasStore, DeploymentStore, InFlightTracker};
 use dashmap::DashMap;
@@ -60,6 +61,8 @@ pub struct DashboardState {
     pub alias_store: Arc<AliasStore>,
     /// In-flight request tracker for real-time stats.
     pub inflight: Arc<InFlightTracker>,
+    /// Per-deployment flow controller for real-time stats.
+    pub flow_controller: Arc<FlowController>,
     /// Channel for model write operations (handled by boom-main).
     pub admin_tx: AdminTx,
     /// JWT signing key (derived from master_key at startup).
@@ -78,6 +81,7 @@ impl DashboardState {
         deployment_store: Arc<DeploymentStore>,
         alias_store: Arc<AliasStore>,
         inflight: Arc<InFlightTracker>,
+        flow_controller: Arc<FlowController>,
         admin_tx: AdminTx,
         master_key: Option<String>,
     ) -> Self {
@@ -93,6 +97,7 @@ impl DashboardState {
             deployment_store,
             alias_store,
             inflight,
+            flow_controller,
             admin_tx,
             jwt_secret,
             master_key,

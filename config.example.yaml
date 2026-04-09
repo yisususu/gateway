@@ -40,6 +40,17 @@ model_list:
       temperature: 0.7             # 可选：温度覆盖
       max_tokens: 4096             # 可选：最大输出 token
 
+  # 带流控的部署 — 限制在途请求数和上下文总量
+  # - model_name: gpt-4o
+  #   model_info:
+  #     id: gpt4o-node-1
+  #   flow_control:
+  #     model_queue_limit: 50            # 最大在途请求数（0 或不设 = 无限制）
+  #     model_context_limit: 5000000     # 最大在途输入字符总量（0 或不设 = 无限制）
+  #   litellm_params:
+  #     model: openai/gpt-4o
+  #     api_key: ${OPENAI_API_KEY}
+
   # Azure OpenAI
   - model_name: azure-gpt4
     litellm_params:

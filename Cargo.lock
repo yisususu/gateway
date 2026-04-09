@@ -292,6 +292,7 @@ dependencies = [
  "axum",
  "boom-audit",
  "boom-core",
+ "boom-flowcontrol",
  "boom-limiter",
  "boom-routing",
  "chrono",
@@ -305,6 +306,17 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "boom-flowcontrol"
+version = "0.1.0"
+dependencies = [
+ "boom-core",
+ "dashmap",
+ "futures",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -335,6 +347,7 @@ dependencies = [
  "boom-config",
  "boom-core",
  "boom-dashboard",
+ "boom-flowcontrol",
  "boom-limiter",
  "boom-provider",
  "boom-routing",

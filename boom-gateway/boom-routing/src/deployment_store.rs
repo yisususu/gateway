@@ -115,6 +115,18 @@ impl DeploymentStore {
             .map(|r| r.value().len())
             .sum()
     }
+
+    /// Reverse lookup: find the model_name that owns a deployment with the given deployment_id.
+    pub fn find_model_by_deployment_id(&self, deployment_id: &str) -> Option<String> {
+        for entry in self.deployments.iter() {
+            for provider in entry.value().iter() {
+                if provider.deployment_id() == Some(deployment_id) {
+                    return Some(entry.key().clone());
+                }
+            }
+        }
+        None
+    }
 }
 
 impl Default for DeploymentStore {

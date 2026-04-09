@@ -207,52 +207,31 @@
 
   function renderInflightTable(data) {
     const wrap = document.getElementById("inflight-table-wrap");
-    var models = data.models || [];
     var deployments = data.deployments || [];
 
-    if (!models.length && !deployments.length) {
+    if (!deployments.length) {
       wrap.innerHTML = "<p>No in-flight requests.</p>";
       return;
     }
 
-    // Prefer deployment-level view (shows per-endpoint granularity).
-    if (deployments.length) {
-      wrap.innerHTML =
-        '<table class="data-table"><thead><tr>' +
-        "<th>Model</th><th>Deployment</th><th>In-Flight Requests</th><th>In-Flight Input Chars</th>" +
-        "</tr></thead><tbody>" +
-        deployments
-          .map(function (d) {
-            return (
-              "<tr>" +
-              "<td>" + esc(d.model) + "</td>" +
-              "<td>" + esc(d.deployment_id || "-") + "</td>" +
-              "<td>" + d.inflight_requests + "</td>" +
-              "<td>" + d.inflight_input_chars.toLocaleString() + "</td>" +
-              "</tr>"
-            );
-          })
-          .join("") +
-        "</tbody></table>";
-    } else {
-      // Fallback: model-level only (no deployment_id available).
-      wrap.innerHTML =
-        '<table class="data-table"><thead><tr>' +
-        "<th>Model</th><th>In-Flight Requests</th><th>In-Flight Input Chars</th>" +
-        "</tr></thead><tbody>" +
-        models
-          .map(function (m) {
-            return (
-              "<tr>" +
-              "<td>" + esc(m.model) + "</td>" +
-              "<td>" + m.inflight_requests + "</td>" +
-              "<td>" + m.inflight_input_chars.toLocaleString() + "</td>" +
-              "</tr>"
-            );
-          })
-          .join("") +
-        "</tbody></table>";
-    }
+    wrap.innerHTML =
+      '<table class="data-table"><thead><tr>' +
+      "<th>Deployment</th><th>FC REQS</th><th>FC CONTEXT</th><th>IN-MODEL REQS</th><th>IN-MODEL CONTEXT</th>" +
+      "</tr></thead><tbody>" +
+      deployments
+        .map(function (d) {
+          return (
+            "<tr>" +
+            "<td>" + esc(d.model) + ":" + esc(d.deployment_id || "-") + "</td>" +
+            "<td>" + d.fc_reqs + "</td>" +
+            "<td>" + d.fc_context.toLocaleString() + "</td>" +
+            "<td>" + d.in_reqs + "</td>" +
+            "<td>" + d.in_context.toLocaleString() + "</td>" +
+            "</tr>"
+          );
+        })
+        .join("") +
+      "</tbody></table>";
   }
 
   function startInflightPoll() {
@@ -707,6 +686,8 @@
       <div class="form-group"><label>Timeout (seconds) ${tip("Request timeout. Default: 120s.")}</label><input id="m-model-timeout" type="number" value="${p.timeout || 120}"></div>
       <div class="form-group"><label>Temperature ${tip("Sampling temperature override (0.0-2.0). Leave empty to use provider default.")}</label><input id="m-model-temp" type="number" step="0.1" value="${p.temperature || ""}"></div>
       <div class="form-group"><label>Max Tokens ${tip("Maximum output tokens. Leave empty for provider default.")}</label><input id="m-model-maxtok" type="number" value="${p.max_tokens || ""}"></div>
+      <div class="form-group"><label>Max Inflight ${tip("Max concurrent in-flight requests for this deployment. 0 or empty = unlimited.")}</label><input id="m-model-maxinflight" type="number" min="0" value="${p.max_inflight_queue_len || ""}"></div>
+      <div class="form-group"><label>Max Context ${tip("Max total input characters across all in-flight requests. 0 or empty = unlimited.")}</label><input id="m-model-maxctx" type="number" min="0" value="${p.max_context_len || ""}"></div>
       <div class="form-group"><label>Enabled ${tip("Disabled deployments are ignored in routing.")}</label><select id="m-model-enabled"><option value="true" ${p.enabled !== false ? "selected" : ""}>Yes</option><option value="false" ${p.enabled === false ? "selected" : ""}>No</option></select></div>
       <div class="modal-actions">
         <button class="btn-secondary" onclick="hideModal()" style="width:auto">Cancel</button>
@@ -736,6 +717,8 @@
           timeout: Number(document.getElementById("m-model-timeout").value) || 120,
           temperature: document.getElementById("m-model-temp").value ? Number(document.getElementById("m-model-temp").value) : null,
           max_tokens: document.getElementById("m-model-maxtok").value ? Number(document.getElementById("m-model-maxtok").value) : null,
+          max_inflight_queue_len: document.getElementById("m-model-maxinflight").value ? Number(document.getElementById("m-model-maxinflight").value) : null,
+          max_context_len: document.getElementById("m-model-maxctx").value ? Number(document.getElementById("m-model-maxctx").value) : null,
           enabled: document.getElementById("m-model-enabled").value === "true",
           headers: {},
         };

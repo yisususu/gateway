@@ -1,5 +1,6 @@
 use boom_core::provider::Provider;
 use boom_dashboard::state::AdminCommand;
+use boom_flowcontrol::{FlowControlConfig, FlowController};
 use boom_routing::DeploymentStore;
 use serde_json::{json, Value};
 use sqlx::Row;
@@ -50,8 +51,10 @@ async fn handle_create_model(
         r#"INSERT INTO boom_model_deployment
            (model_name, litellm_model, api_key, api_key_env, api_base, api_version,
             aws_region_name, aws_access_key_id, aws_secret_access_key,
-            rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source, deployment_id, quota_count_ratio)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'db', $17, $18)
+            rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source, deployment_id,
+            quota_count_ratio, max_inflight_queue_len, max_context_len)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'db', $17,
+            $18, $19, $20)
            RETURNING id"#,
     )
     .bind(&req.model_name)
@@ -72,6 +75,8 @@ async fn handle_create_model(
     .bind(req.enabled)
     .bind(&req.deployment_id)
     .bind(req.quota_count_ratio.unwrap_or(1))
+    .bind(req.max_inflight_queue_len)
+    .bind(req.max_context_len)
     .fetch_one(db_pool)
     .await
     .map_err(|e| format!("DB insert failed: {}", e))?;
@@ -87,6 +92,9 @@ async fn handle_create_model(
             tracing::info!(model = %req.model_name, "Model deployment created and loaded");
         }
     }
+
+    // Sync flow control config.
+    sync_flow_control(&state.flow_controller, &req.deployment_id, req.max_inflight_queue_len, req.max_context_len);
 
     Ok(json!({"ok": true, "id": id, "model_name": req.model_name}))
 }
@@ -111,7 +119,9 @@ async fn handle_update_model(
                rpm = $11, tpm = $12, timeout = $13, headers = $14,
                temperature = $15, max_tokens = $16, enabled = $17,
                auto_disabled = CASE WHEN $17 = true THEN false ELSE auto_disabled END,
-               deployment_id = $18, quota_count_ratio = $19, updated_at = NOW()
+               deployment_id = $18, quota_count_ratio = $19,
+               max_inflight_queue_len = $20, max_context_len = $21,
+               updated_at = NOW()
            WHERE id = $1"#,
     )
     .bind(id)
@@ -133,6 +143,8 @@ async fn handle_update_model(
     .bind(req.enabled)
     .bind(&req.deployment_id)
     .bind(req.quota_count_ratio.unwrap_or(1))
+    .bind(req.max_inflight_queue_len)
+    .bind(req.max_context_len)
     .execute(db_pool)
     .await
     .map_err(|e| format!("DB update failed: {}", e))?;
@@ -149,6 +161,9 @@ async fn handle_update_model(
         state.deployment_store.set_quota_ratio(&req.model_name, ratio);
     }
 
+    // Sync flow control config.
+    sync_flow_control(&state.flow_controller, &req.deployment_id, req.max_inflight_queue_len, req.max_context_len);
+
     Ok(json!({"ok": true}))
 }
 
@@ -158,15 +173,19 @@ async fn handle_delete_model(
 ) -> Result<Value, String> {
     let db_pool = state.db_pool.as_ref().ok_or("Database not available")?;
 
-    // Get model_name before deleting.
-    let model_name: Option<String> = sqlx::query_scalar(
-        r#"SELECT model_name FROM boom_model_deployment WHERE id = $1"#,
+    // Get model_name + deployment_id before deleting.
+    let row_info: Option<(String, Option<String>)> = sqlx::query_as(
+        r#"SELECT model_name, deployment_id FROM boom_model_deployment WHERE id = $1"#,
     )
     .bind(id)
     .fetch_optional(db_pool)
     .await
-    .map_err(|e| format!("DB lookup failed: {}", e))?
-    .flatten();
+    .map_err(|e| format!("DB lookup failed: {}", e))?;
+
+    let (model_name, old_deployment_id) = match row_info {
+        Some((n, d)) => (n, d),
+        None => return Err("Model deployment not found".to_string()),
+    };
 
     let result = sqlx::query(
         r#"DELETE FROM boom_model_deployment WHERE id = $1"#,
@@ -180,14 +199,17 @@ async fn handle_delete_model(
         return Err("Model deployment not found".to_string());
     }
 
-    let name = model_name.unwrap_or_default();
-
     // Reload deployments for this model_name from DB to keep memory in sync.
     // This handles the case where multiple deployments exist for the same model.
-    reload_model_deployments(db_pool, &state.deployment_store, &name).await;
+    reload_model_deployments(db_pool, &state.deployment_store, &model_name).await;
 
-    tracing::info!(model = %name, "Model deployment deleted");
-    Ok(json!({"ok": true, "model_name": name}))
+    // Remove flow control slot (in-flight requests drain naturally).
+    if let Some(did) = old_deployment_id {
+        state.flow_controller.remove_slot(&did);
+    }
+
+    tracing::info!(model = %model_name, "Model deployment deleted");
+    Ok(json!({"ok": true, "model_name": model_name}))
 }
 
 /// Reload all deployments for a specific model_name from DB into the deployment store.
@@ -368,5 +390,21 @@ fn build_provider(req: &boom_dashboard::handlers_admin::CreateDeploymentRequest)
             tracing::error!("Failed to build provider for '{}': {}", req.model_name, e);
             None
         }
+    }
+}
+
+/// Sync flow control config for a deployment.
+fn sync_flow_control(
+    flow_controller: &Arc<FlowController>,
+    deployment_id: &Option<String>,
+    max_inflight: Option<i32>,
+    max_context: Option<i64>,
+) {
+    if let Some(ref did) = deployment_id {
+        let cfg = FlowControlConfig {
+            max_inflight: max_inflight.unwrap_or(0) as u32,
+            max_context: max_context.unwrap_or(0) as u64,
+        };
+        flow_controller.ensure_slot(did, &cfg);
     }
 }

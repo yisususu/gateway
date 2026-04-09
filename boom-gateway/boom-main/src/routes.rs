@@ -11,6 +11,7 @@ use boom_core::anthropic::{
 use boom_core::provider::RateLimiter;
 use boom_core::types::*;
 use boom_core::GatewayError;
+use boom_flowcontrol::{FlowControlError, FlowControlledStream};
 use boom_limiter::{ConcurrencyGuard, GuardedStream, PlanStore, RateLimitPlan};
 use boom_routing::{InFlightGuard, Router};
 use futures::StreamExt;
@@ -238,6 +239,26 @@ async fn chat_completions_inner(
     let deployment_id = provider.deployment_id().map(|s| s.to_string());
     let inflight_model = state.router.resolve_model_name(&model);
 
+    // 3.5. Flow control — queue if per-deployment limits exceeded.
+    let fc_guard = if let Some(ref did) = deployment_id {
+        let timeout = std::time::Duration::from_secs(1200);
+        match state.flow_controller.acquire(did, input_chars as u64, timeout).await {
+            Ok(g) => Some(g),
+            Err(FlowControlError::Timeout { waiters, .. }) => {
+                let e = GatewayError::FlowControlQueueTimeout {
+                    deployment_id: did.clone(),
+                    waiters,
+                    message: format!("Deployment '{}' flow control queue timeout — too many concurrent requests", did),
+                };
+                log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()), deployment_id.clone());
+                return Err(GatewayErrorReply(e, is_stream));
+            }
+            Err(FlowControlError::NoSlot) => None,
+        }
+    } else {
+        None
+    };
+
     // 4. Route to provider (streaming or non-streaming).
     if is_stream {
         let stream = provider.chat_stream(req).await.map_err(|e| {
@@ -254,7 +275,12 @@ async fn chat_completions_inner(
             InFlightGuard::new(state.inflight.clone(), &inflight_model, input_chars as u64)
         };
         let tracked = InFlightStream::new(sse_stream, inflight_guard);
-        let guarded = GuardedStream::new(tracked, guard);
+        // Wrap with flow control guard (held until stream ends).
+        let flow_controlled = match fc_guard {
+            Some(g) => FlowControlledStream::new(tracked, g),
+            None => FlowControlledStream::passthrough(tracked),
+        };
+        let guarded = GuardedStream::new(flow_controlled, guard);
 
         let api_path_owned = api_path.to_string();
         let logged = LoggedStream::new(guarded, state.db_pool.clone(), RequestLog {
@@ -1102,6 +1128,26 @@ pub async fn messages(
     let deployment_id = provider.deployment_id().map(|s| s.to_string());
     let inflight_model = state.router.resolve_model_name(&model);
 
+    // 3.5. Flow control — queue if per-deployment limits exceeded.
+    let fc_guard = if let Some(ref did) = deployment_id {
+        let timeout = std::time::Duration::from_secs(1200);
+        match state.flow_controller.acquire(did, input_chars as u64, timeout).await {
+            Ok(g) => Some(g),
+            Err(FlowControlError::Timeout { waiters, .. }) => {
+                let e = GatewayError::FlowControlQueueTimeout {
+                    deployment_id: did.clone(),
+                    waiters,
+                    message: format!("Deployment '{}' flow control queue timeout — too many concurrent requests", did),
+                };
+                log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()), deployment_id.clone());
+                return Err(AnthropicErrorReply(e, is_stream));
+            }
+            Err(FlowControlError::NoSlot) => None,
+        }
+    } else {
+        None
+    };
+
     // 4. Route to provider.
     if is_stream {
         let stream = provider.chat_stream(openai_req).await.map_err(|e| {
@@ -1118,7 +1164,11 @@ pub async fn messages(
             InFlightGuard::new(state.inflight.clone(), &inflight_model, input_chars as u64)
         };
         let tracked = InFlightStream::new(sse_stream, inflight_guard);
-        let guarded = GuardedStream::new(tracked, guard);
+        let flow_controlled = match fc_guard {
+            Some(g) => FlowControlledStream::new(tracked, g),
+            None => FlowControlledStream::passthrough(tracked),
+        };
+        let guarded = GuardedStream::new(flow_controlled, guard);
 
         // Wrap with LoggedStream — log is written when stream finishes (Drop).
         let logged = LoggedStream::new(guarded, state.db_pool.clone(), RequestLog {

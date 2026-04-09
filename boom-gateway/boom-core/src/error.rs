@@ -50,6 +50,13 @@ pub enum GatewayError {
     #[error("Endpoint not supported: {0}")]
     NotSupported(String),
 
+    #[error("Flow control queue timeout: {message}")]
+    FlowControlQueueTimeout {
+        deployment_id: String,
+        waiters: usize,
+        message: String,
+    },
+
     #[error("Internal error: {0}")]
     InternalError(String),
 }
@@ -70,6 +77,7 @@ impl GatewayError {
             Self::UpstreamTimeout => 504,
             Self::UpstreamError { .. } => 502,
             Self::NotSupported(_) => 404,
+            Self::FlowControlQueueTimeout { .. } => 503,
             Self::InternalError(_) => 500,
         }
     }
@@ -83,6 +91,7 @@ impl GatewayError {
             Self::RateLimitExceeded { .. }
                 | Self::ConcurrencyExceeded { .. }
                 | Self::BudgetExceeded
+                | Self::FlowControlQueueTimeout { .. }
         )
     }
 
@@ -111,6 +120,7 @@ impl GatewayError {
             Self::UpstreamError { .. } => "upstream_error",
             Self::NotSupported(_) => "not_supported",
             Self::ProviderError(_) => "provider_error",
+            Self::FlowControlQueueTimeout { .. } => "flow_control_timeout",
             Self::ConfigError(_) | Self::InternalError(_) => "internal_error",
         }
     }
