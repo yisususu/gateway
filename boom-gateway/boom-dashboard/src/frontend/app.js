@@ -1037,6 +1037,7 @@
     // Populate model checkbox combo with existing models pre-checked
     getModelNames().then((names) => {
       const container = document.getElementById("m-edit-models-combo");
+      console.log("[EDIT KEY] models from API:", JSON.stringify(key.models), "existingModels:", JSON.stringify(existingModels));
       if (container) initModelCombo(container, existingModels, names);
     });
     document.getElementById("m-edit-submit").addEventListener("click", async () => {
