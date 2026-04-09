@@ -1037,7 +1037,6 @@
     // Populate model checkbox combo with existing models pre-checked
     getModelNames().then((names) => {
       const container = document.getElementById("m-edit-models-combo");
-      console.log("[EDIT KEY] models from API:", JSON.stringify(key.models), "existingModels:", JSON.stringify(existingModels));
       if (container) initModelCombo(container, existingModels, names);
     });
     document.getElementById("m-edit-submit").addEventListener("click", async () => {
@@ -1227,8 +1226,7 @@
 
   function initModelCombo(container, existingModels, allNames) {
     const checked = new Set(existingModels || []);
-    const isFullAccess = checked.size === 0 || checked.has("all-team-models") || checked.has("*");
-    console.log("[initModelCombo] existingModels:", JSON.stringify(existingModels), "checked.size:", checked.size, "hasAll:", checked.has("all-team-models"), "isFullAccess:", isFullAccess, "allNames:", JSON.stringify(allNames));
+    const isFullAccess = checked.size === 0 || checked.has("all-team-models");
 
     // Build HTML
     container.innerHTML = `
