@@ -132,7 +132,7 @@ async fn chat_completions_inner(
     // 1. Model access check (deployment-aware, alias-aware).
     check_model_access(identity, &req.model, &state.router)
         .map_err(|e| {
-            log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()));
+            log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()), None);
             GatewayErrorReply(e, false)
         })?;
 
@@ -163,7 +163,7 @@ async fn chat_completions_inner(
     )
     .await
     .map_err(|e| {
-        log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()));
+        log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()), None);
         GatewayErrorReply(e, false)
     })?;
 
@@ -186,7 +186,7 @@ async fn chat_completions_inner(
         .select_provider(&req.model, Some(&identity.key_hash), input_chars as u64)
         .ok_or_else(|| {
             let e = GatewayError::ModelNotFound(req.model.clone());
-            log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()));
+            log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()), None);
             GatewayErrorReply(e, false)
         })?;
 
@@ -196,7 +196,7 @@ async fn chat_completions_inner(
     // 4. Route to provider (streaming or non-streaming).
     if is_stream {
         let stream = provider.chat_stream(req).await.map_err(|e| {
-            log_error(&state, &identity, &model, api_path, true, start, &e, Some(request_id.clone()));
+            log_error(&state, &identity, &model, api_path, true, start, &e, Some(request_id.clone()), deployment_id.clone());
             GatewayErrorReply(e, true)
         })?;
         let usage = UsageTracker::default();
@@ -237,7 +237,7 @@ async fn chat_completions_inner(
             InFlightGuard::new(state.inflight.clone(), &inflight_model, input_chars as u64)
         };
         let response = provider.chat(req).await.map_err(|e| {
-            log_error(&state, &identity, &model, api_path, false, start, &e, Some(request_id.clone()));
+            log_error(&state, &identity, &model, api_path, false, start, &e, Some(request_id.clone()), deployment_id.clone());
             GatewayErrorReply(e, false)
         })?;
 
@@ -993,7 +993,7 @@ pub async fn messages(
     // 1. Model access check (deployment-aware, alias-aware).
     check_model_access(identity, &openai_req.model, &state.router)
         .map_err(|e| {
-            log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()));
+            log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()), None);
             AnthropicErrorReply(e, is_stream)
         })?;
 
@@ -1024,7 +1024,7 @@ pub async fn messages(
     )
     .await
     .map_err(|e| {
-        log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()));
+        log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()), None);
         AnthropicErrorReply(e, is_stream)
     })?;
 
@@ -1046,7 +1046,7 @@ pub async fn messages(
         .select_provider(&openai_req.model, Some(&identity.key_hash), input_chars as u64)
         .ok_or_else(|| {
             let e = GatewayError::ModelNotFound(openai_req.model.clone());
-            log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()));
+            log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()), None);
             AnthropicErrorReply(e, is_stream)
         })?;
 
@@ -1056,7 +1056,7 @@ pub async fn messages(
     // 4. Route to provider.
     if is_stream {
         let stream = provider.chat_stream(openai_req).await.map_err(|e| {
-            log_error(&state, &identity, &model, "/v1/messages", true, start, &e, Some(request_id.clone()));
+            log_error(&state, &identity, &model, "/v1/messages", true, start, &e, Some(request_id.clone()), deployment_id.clone());
             AnthropicErrorReply(e, true)
         })?;
         let usage = UsageTracker::default();
@@ -1097,7 +1097,7 @@ pub async fn messages(
             InFlightGuard::new(state.inflight.clone(), &inflight_model, input_chars as u64)
         };
         let response = provider.chat(openai_req).await.map_err(|e| {
-            log_error(&state, &identity, &model, "/v1/messages", false, start, &e, Some(request_id.clone()));
+            log_error(&state, &identity, &model, "/v1/messages", false, start, &e, Some(request_id.clone()), deployment_id.clone());
             AnthropicErrorReply(e, false)
         })?;
 

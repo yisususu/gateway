@@ -87,6 +87,7 @@ pub fn log_error(
     start: Instant,
     error: &GatewayError,
     request_id: Option<String>,
+    deployment_id: Option<String>,
 ) {
     if !error.should_log_to_db() {
         let dedup_key = format!("{}:{}:{}", error.error_type(), identity.key_hash, model);
@@ -119,7 +120,7 @@ pub fn log_error(
             input_tokens: None,
             output_tokens: None,
             duration_ms: Some(start.elapsed().as_millis() as i32),
-            deployment_id: None,
+            deployment_id,
         },
     );
 }
