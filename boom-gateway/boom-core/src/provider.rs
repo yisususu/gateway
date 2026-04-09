@@ -76,3 +76,11 @@ pub struct Deployment {
     /// Priority for fallback routing (lower = higher priority).
     pub priority: u32,
 }
+
+/// Provider of per-deployment queue depth for scheduling decisions.
+/// Implemented by flow control to expose total load (in-flight + queued).
+pub trait DeploymentQueueInfo: Send + Sync + 'static {
+    /// Total load for a deployment: in-flight requests + queued requests.
+    /// Returns 0 if the deployment has no flow control configured.
+    fn total_load(&self, deployment_id: &str) -> u64;
+}

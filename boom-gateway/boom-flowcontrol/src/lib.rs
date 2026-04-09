@@ -1,3 +1,4 @@
+use boom_core::DeploymentQueueInfo;
 use dashmap::DashMap;
 use futures::Stream;
 use std::pin::Pin;
@@ -206,6 +207,19 @@ impl FlowController {
 impl Default for FlowController {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl DeploymentQueueInfo for FlowController {
+    fn total_load(&self, deployment_id: &str) -> u64 {
+        match self.slots.get(deployment_id) {
+            Some(slot) => {
+                let inflight = slot.current_inflight.load(Ordering::Relaxed) as u64;
+                let waiters = slot.waiters.load(Ordering::Relaxed) as u64;
+                inflight + waiters
+            }
+            None => 0,
+        }
     }
 }
 

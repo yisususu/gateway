@@ -111,7 +111,7 @@ impl AppState {
         let flow_controller = Arc::new(FlowController::new());
 
         // Create scheduling policy from config (may reference inflight).
-        let policy = create_policy(&config, &inflight);
+        let policy = create_policy(&config, &inflight, &flow_controller);
 
         // Router wraps stores + policy for routing decisions.
         let router = Arc::new(Router::new(deployment_store.clone(), alias_store.clone(), policy));
@@ -215,7 +215,7 @@ impl AppState {
         seed_flow_controller_from_config(&new_config, &self.flow_controller);
 
         // Recreate policy (fresh counters etc.) — router reuses same stores.
-        let new_policy = create_policy(&new_config, &self.inflight);
+        let new_policy = create_policy(&new_config, &self.inflight, &self.flow_controller);
         self.router.set_policy(new_policy);
 
         if let Some(ref pool) = db_pool {
@@ -921,7 +921,7 @@ fn load_plans_from_config(plan_store: &Arc<PlanStore>, config: &Config) {
 // ═══════════════════════════════════════════════════════════
 
 /// Create a scheduling policy from config.
-fn create_policy(config: &Config, inflight: &Arc<InFlightTracker>) -> Arc<dyn SchedulePolicy> {
+fn create_policy(config: &Config, inflight: &Arc<InFlightTracker>, flow_controller: &Arc<FlowController>) -> Arc<dyn SchedulePolicy> {
     match config.router_settings.schedule_policy.as_str() {
         "round_robin" | "" => Arc::new(RoundRobinPolicy::new()),
         "key_affinity" => {
@@ -932,11 +932,13 @@ fn create_policy(config: &Config, inflight: &Arc<InFlightTracker>) -> Arc<dyn Sc
                 ctx_threshold,
                 rebalance_threshold,
             );
-            Arc::new(KeyAffinityPolicy::new(
+            let mut policy = KeyAffinityPolicy::new(
                 inflight.clone(),
                 ctx_threshold,
                 rebalance_threshold,
-            ))
+            );
+            policy.set_queue_info(flow_controller.clone());
+            Arc::new(policy)
         }
         other => {
             tracing::warn!(

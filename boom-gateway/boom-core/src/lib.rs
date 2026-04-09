@@ -4,4 +4,4 @@ pub mod provider;
 pub mod types;
 
 pub use error::GatewayError;
-pub use provider::{Authenticator, Provider, RateLimiter};
+pub use provider::{Authenticator, DeploymentQueueInfo, Provider, RateLimiter};

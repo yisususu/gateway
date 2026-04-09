@@ -1,4 +1,4 @@
-use boom_core::provider::Provider;
+use boom_core::provider::{DeploymentQueueInfo, Provider};
 use dashmap::DashMap;
 use std::sync::Arc;
 
@@ -19,6 +19,8 @@ use super::SchedulePolicy;
 pub struct KeyAffinityPolicy {
     /// Reference to the in-flight tracker for load queries.
     tracker: Arc<InFlightTracker>,
+    /// Optional flow control queue info for total load (in-flight + queued).
+    queue_info: Option<Arc<dyn DeploymentQueueInfo>>,
     /// Affinity map: `{key_hash}:{model}` → `deployment_id`
     affinity: DashMap<String, String>,
     /// Context threshold: below this total input_chars across all providers,
@@ -39,10 +41,16 @@ impl KeyAffinityPolicy {
     ) -> Self {
         Self {
             tracker,
+            queue_info: None,
             affinity: DashMap::new(),
             context_threshold,
             rebalance_threshold,
         }
+    }
+
+    /// Inject flow control queue info for total load queries.
+    pub fn set_queue_info(&mut self, info: Arc<dyn DeploymentQueueInfo>) {
+        self.queue_info = Some(info);
     }
 }
 
@@ -64,7 +72,7 @@ impl SchedulePolicy for KeyAffinityPolicy {
         // No key context → fall back to lowest-load.
         let key_hash = match key_hash {
             Some(k) => k,
-            None => return select_lowest_load(&self.tracker, model, candidates),
+            None => return select_lowest_load(&self.tracker, &self.queue_info, model, candidates),
         };
 
         let affinity_key = format!("{}:{}", key_hash, model);
@@ -75,7 +83,7 @@ impl SchedulePolicy for KeyAffinityPolicy {
 
             if total_input < self.context_threshold {
                 // Warm-up: pick lowest-load and record affinity.
-                let provider = select_lowest_load(&self.tracker, model, candidates);
+                let provider = select_lowest_load(&self.tracker, &self.queue_info, model, candidates);
                 if let Some(ref p) = provider {
                     if let Some(did) = p.deployment_id() {
                         self.affinity.insert(affinity_key, did.to_string());
@@ -101,8 +109,8 @@ impl SchedulePolicy for KeyAffinityPolicy {
             }) {
                 // Rebalance check: if the preferred provider is significantly
                 // more loaded than the least-loaded candidate, reassign.
-                let load_preferred = load_for_deployment(&self.tracker, model, provider.as_ref());
-                let (min_load, least_loaded) = min_load_candidate(&self.tracker, model, candidates);
+                let load_preferred = load_for_deployment(&self.tracker, &self.queue_info, model, provider.as_ref());
+                let (min_load, least_loaded) = min_load_candidate(&self.tracker, &self.queue_info, model, candidates);
 
                 if load_preferred > min_load + self.rebalance_threshold {
                     // Rebalance to least loaded.
@@ -118,7 +126,7 @@ impl SchedulePolicy for KeyAffinityPolicy {
         }
 
         // First time or affinity miss: pick lowest-load and record.
-        let provider = select_lowest_load(&self.tracker, model, candidates);
+        let provider = select_lowest_load(&self.tracker, &self.queue_info, model, candidates);
         if let Some(ref p) = provider {
             if let Some(did) = p.deployment_id() {
                 self.affinity.insert(affinity_key, did.to_string());
@@ -132,19 +140,21 @@ impl SchedulePolicy for KeyAffinityPolicy {
     }
 }
 
-/// Select the candidate with the fewest in-flight requests.
+/// Select the candidate with the fewest total load (in-flight + queued).
 fn select_lowest_load(
     tracker: &InFlightTracker,
+    queue_info: &Option<Arc<dyn DeploymentQueueInfo>>,
     model: &str,
     candidates: &[Arc<dyn Provider>],
 ) -> Option<Arc<dyn Provider>> {
-    let (_min_load, provider) = min_load_candidate(tracker, model, candidates);
+    let (_min_load, provider) = min_load_candidate(tracker, queue_info, model, candidates);
     Some(provider)
 }
 
-/// Find the candidate with the lowest in-flight request count (O(1) per candidate).
+/// Find the candidate with the lowest total load (O(1) per candidate).
 fn min_load_candidate(
     tracker: &InFlightTracker,
+    queue_info: &Option<Arc<dyn DeploymentQueueInfo>>,
     model: &str,
     candidates: &[Arc<dyn Provider>],
 ) -> (u64, Arc<dyn Provider>) {
@@ -152,10 +162,7 @@ fn min_load_candidate(
     let mut best_load = u64::MAX;
 
     for candidate in candidates {
-        let load = candidate
-            .deployment_id()
-            .map(|id| tracker.get_deployment_count(model, id))
-            .unwrap_or(0);
+        let load = deployment_load(tracker, queue_info, model, candidate.as_ref());
 
         if load < best_load {
             best_load = load;
@@ -166,14 +173,31 @@ fn min_load_candidate(
     (best_load, best)
 }
 
-/// Get the in-flight request count for a specific deployment (O(1) lookup).
-fn load_for_deployment(
+/// Get the total load for a deployment: in-flight + FC queue depth.
+fn deployment_load(
     tracker: &InFlightTracker,
+    queue_info: &Option<Arc<dyn DeploymentQueueInfo>>,
     model: &str,
     provider: &dyn Provider,
 ) -> u64 {
     match provider.deployment_id() {
-        Some(id) => tracker.get_deployment_count(model, id),
+        Some(id) => {
+            let inflight = tracker.get_deployment_count(model, id);
+            let queued = queue_info.as_ref().map(|q| q.total_load(id)).unwrap_or(0);
+            // queued already includes current_inflight from FlowControl,
+            // which ≈ inflight. Use max to avoid double-counting.
+            std::cmp::max(inflight, queued)
+        }
         None => 0,
     }
+}
+
+/// Get the load for a specific deployment (used in rebalance check).
+fn load_for_deployment(
+    tracker: &InFlightTracker,
+    queue_info: &Option<Arc<dyn DeploymentQueueInfo>>,
+    model: &str,
+    provider: &dyn Provider,
+) -> u64 {
+    deployment_load(tracker, queue_info, model, provider)
 }
