@@ -1684,17 +1684,26 @@ pub async fn get_inflight_stats(
     // 2. FlowControl data — has deployment_id + fc metrics.
     for fc in &flowcontrol_stats {
         let did = &fc.deployment_id;
+        // FC REQS = waiters (queued requests), FC CONTEXT = current/max usage string.
+        let fc_reqs = fc.waiters;
+        let fc_context_display = if fc.max_context > 0 {
+            format!("{}/{}", fc.current_context, fc.max_context)
+        } else if fc.current_context > 0 {
+            fc.current_context.to_string()
+        } else {
+            "-".to_string()
+        };
         if let Some(row) = rows.get_mut(did) {
-            row["fc_reqs"] = json!(fc.current_inflight);
-            row["fc_context"] = json!(fc.current_context);
+            row["fc_reqs"] = json!(fc_reqs);
+            row["fc_context"] = json!(fc_context_display);
         } else {
             let model = state.deployment_store.find_model_by_deployment_id(did)
                 .unwrap_or_else(|| "-".to_string());
             rows.insert(did.clone(), json!({
                 "model": model,
                 "deployment_id": did,
-                "fc_reqs": fc.current_inflight,
-                "fc_context": fc.current_context,
+                "fc_reqs": fc_reqs,
+                "fc_context": fc_context_display,
                 "in_reqs": 0,
                 "in_context": 0,
             }));

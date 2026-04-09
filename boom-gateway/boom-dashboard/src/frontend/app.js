@@ -216,7 +216,7 @@
 
     wrap.innerHTML =
       '<table class="data-table"><thead><tr>' +
-      "<th>Deployment</th><th>FC REQS</th><th>FC CONTEXT</th><th>IN-MODEL REQS</th><th>IN-MODEL CONTEXT</th>" +
+      "<th>Deployment</th><th>FC QUEUE</th><th>FC CONTEXT</th><th>IN-MODEL REQS</th><th>IN-MODEL CONTEXT</th>" +
       "</tr></thead><tbody>" +
       deployments
         .map(function (d) {
@@ -224,7 +224,7 @@
             "<tr>" +
             "<td>" + esc(d.deployment_id ? d.model + ":" + d.deployment_id : d.model) + "</td>" +
             "<td>" + d.fc_reqs + "</td>" +
-            "<td>" + d.fc_context.toLocaleString() + "</td>" +
+            "<td>" + esc(String(d.fc_context)) + "</td>" +
             "<td>" + d.in_reqs + "</td>" +
             "<td>" + d.in_context.toLocaleString() + "</td>" +
             "</tr>"
