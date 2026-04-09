@@ -216,17 +216,18 @@
 
     wrap.innerHTML =
       '<table class="data-table"><thead><tr>' +
-      "<th>Deployment</th><th>FC QUEUE</th><th>FC CONTEXT</th><th>IN-MODEL REQS</th><th>IN-MODEL CONTEXT</th>" +
+      "<th>Deployment</th><th>FC QUEUE</th><th>IN-MODEL REQS</th><th>IN-MODEL CONTEXT</th>" +
       "</tr></thead><tbody>" +
       deployments
         .map(function (d) {
+          var reqsDisplay = d.in_reqs_max > 0 ? d.in_reqs + " / " + d.in_reqs_max : String(d.in_reqs);
+          var ctxDisplay = d.in_context_max > 0 ? d.in_context.toLocaleString() + " / " + d.in_context_max.toLocaleString() : d.in_context.toLocaleString();
           return (
             "<tr>" +
             "<td>" + esc(d.deployment_id ? d.model + ":" + d.deployment_id : d.model) + "</td>" +
-            "<td>" + d.fc_reqs + "</td>" +
-            "<td>" + esc(String(d.fc_context)) + "</td>" +
-            "<td>" + d.in_reqs + "</td>" +
-            "<td>" + d.in_context.toLocaleString() + "</td>" +
+            "<td>" + d.fc_queue + "</td>" +
+            "<td>" + reqsDisplay + "</td>" +
+            "<td>" + ctxDisplay + "</td>" +
             "</tr>"
           );
         })

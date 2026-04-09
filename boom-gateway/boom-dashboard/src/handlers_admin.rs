@@ -1661,67 +1661,66 @@ pub async fn get_inflight_stats(
     let inflight_deployments = state.inflight.get_stats_by_deployment();
     let flowcontrol_stats = state.flow_controller.get_stats();
 
-    // Collect model names that already appear in deployment-level stats
-    // to avoid double-counting in the model-level fallback.
+    // Build lookup: deployment_id → (max_inflight, max_context).
+    let fc_limits: HashMap<&str, (u32, u64)> = flowcontrol_stats.iter()
+        .map(|fc| (fc.deployment_id.as_str(), (fc.max_inflight, fc.max_context)))
+        .collect();
+
+    // Collect model names that already appear in deployment-level stats.
     let mut models_covered: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Merge by deployment_id (full outer join).
     let mut rows: HashMap<String, serde_json::Value> = HashMap::new();
 
-    // 1. Inflight deployment data — has model + deployment_id + inflight metrics.
+    // 1. Inflight deployment data.
     for d in &inflight_deployments {
         models_covered.insert(d.model.clone());
+        let (max_reqs, max_ctx) = fc_limits.get(d.deployment_id.as_str()).copied().unwrap_or((0, 0));
+        let fc_waiters = flowcontrol_stats.iter()
+            .find(|fc| fc.deployment_id == d.deployment_id)
+            .map(|fc| fc.waiters)
+            .unwrap_or(0);
         rows.insert(d.deployment_id.clone(), json!({
             "model": d.model,
             "deployment_id": d.deployment_id,
-            "fc_reqs": 0,
-            "fc_context": 0,
+            "fc_queue": fc_waiters,
             "in_reqs": d.inflight_requests,
+            "in_reqs_max": max_reqs,
             "in_context": d.inflight_input_chars,
+            "in_context_max": max_ctx,
         }));
     }
 
-    // 2. FlowControl data — has deployment_id + fc metrics.
+    // 2. FlowControl-only deployments (no active inflight but has FC config).
     for fc in &flowcontrol_stats {
-        let did = &fc.deployment_id;
-        // FC REQS = waiters (queued requests), FC CONTEXT = current/max usage string.
-        let fc_reqs = fc.waiters;
-        let fc_context_display = if fc.max_context > 0 {
-            format!("{}/{}", fc.current_context, fc.max_context)
-        } else if fc.current_context > 0 {
-            fc.current_context.to_string()
-        } else {
-            "-".to_string()
-        };
-        if let Some(row) = rows.get_mut(did) {
-            row["fc_reqs"] = json!(fc_reqs);
-            row["fc_context"] = json!(fc_context_display);
-        } else {
-            let model = state.deployment_store.find_model_by_deployment_id(did)
-                .unwrap_or_else(|| "-".to_string());
-            rows.insert(did.clone(), json!({
-                "model": model,
-                "deployment_id": did,
-                "fc_reqs": fc_reqs,
-                "fc_context": fc_context_display,
-                "in_reqs": 0,
-                "in_context": 0,
-            }));
+        if rows.contains_key(&fc.deployment_id) {
+            continue;
         }
+        let model = state.deployment_store.find_model_by_deployment_id(&fc.deployment_id)
+            .unwrap_or_else(|| "-".to_string());
+        rows.insert(fc.deployment_id.clone(), json!({
+            "model": model,
+            "deployment_id": fc.deployment_id,
+            "fc_queue": fc.waiters,
+            "in_reqs": fc.current_inflight,
+            "in_reqs_max": fc.max_inflight,
+            "in_context": fc.current_context,
+            "in_context_max": fc.max_context,
+        }));
     }
 
     // 3. Model-level fallback — deployments without deployment_id.
     for m in &inflight_models {
         if models_covered.contains(&m.model) {
-            continue; // Already covered by deployment-level data.
+            continue;
         }
         rows.insert(format!("__model__{}", m.model), json!({
             "model": m.model,
             "deployment_id": "",
-            "fc_reqs": 0,
-            "fc_context": 0,
+            "fc_queue": 0,
             "in_reqs": m.inflight_requests,
+            "in_reqs_max": 0,
             "in_context": m.inflight_input_chars,
+            "in_context_max": 0,
         }));
     }
 
