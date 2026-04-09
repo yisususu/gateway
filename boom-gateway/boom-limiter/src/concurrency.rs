@@ -33,11 +33,15 @@ impl RateLimitPlan {
     pub fn effective_limits(&self) -> (Option<u32>, Option<u64>, Vec<(u64, u64)>) {
         for slot in &self.schedule {
             if slot.is_active_now() {
-                return (
-                    slot.concurrency_limit,
-                    slot.rpm_limit,
-                    slot.window_limits.clone(),
-                );
+                // Merge: slot fields override plan base, unset fields fall back to base.
+                let concurrency = slot.concurrency_limit.or(self.concurrency_limit);
+                let rpm = slot.rpm_limit.or(self.rpm_limit);
+                let windows = if slot.window_limits.is_empty() {
+                    self.window_limits.clone()
+                } else {
+                    slot.window_limits.clone()
+                };
+                return (concurrency, rpm, windows);
             }
         }
         (

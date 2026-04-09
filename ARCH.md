@@ -43,8 +43,11 @@
 ```rust
 Provider      :: chat(req) → response | chat_stream(req) → stream
 Authenticator :: authenticate(key) → AuthIdentity
-RateLimiter   :: check_and_record(key, limits) → RateLimitDecision
+RateLimiter   :: check_and_record(key, rpm_limit, window_limits, weight) → RateLimitDecision
 ```
+
+`weight` is the quota consumption multiplier (from `model_info.quota_count_ratio`), defaulting to 1.
+The limiter increments the counter by `weight` instead of 1 on each request.
 
 ## Request Flow
 
@@ -69,6 +72,18 @@ Client Request
                                                      └─────────────────────────────┘
 ```
 
+### Quota Consumption (weight)
+
+Before rate-limit checking, the route handler resolves the model's `quota_count_ratio`:
+
+```
+req.model → alias_store.resolve() → deployment_store.get_quota_ratio() → weight
+```
+
+`check_plan_or_default_limits(key, weight)` then passes `weight` to the limiter.
+A model with `quota_count_ratio: 3` causes each request to consume 3 quota units
+instead of 1.
+
 ### Stream Duration Recording
 
 Streaming requests use `LoggedStream<S>` — a Drop-based wrapper that records the real
@@ -83,9 +98,6 @@ Request start ──▶ Provider.chat_stream() ──▶ LoggedStream wraps SSE 
                                                          log_request(real_duration)
 ```
 
-This applies to all stream paths: `chat_completions`, `messages`, `pt_chat_completions`,
-and `pt_messages` (pass-through SSE).
-
 ## AppState Structure
 
 ```
@@ -95,8 +107,9 @@ AppState (Clone, survives reload)
   ├─ db_pool: Option<PgPool>      // survives reload
   ├─ limiter: Arc<SlidingWindowLimiter>       // survives reload
   ├─ plan_store: Arc<PlanStore>               // survives reload
-  ├─ deployment_store: Arc<DeploymentStore>   // survives reload
-  ├─ alias_store: Arc<AliasStore>             // survives reload
+  ├─ deployment_store: Arc<DeploymentStore>   // survives reload (DashMap)
+  ├─ alias_store: Arc<AliasStore>             // survives reload (DashMap)
+  ├─ inflight: Arc<InFlightTracker>           // survives reload (real-time tracking)
   └─ request_count: Arc<AtomicU64>            // survives reload, /v1/ + /admin/ only
 
 AppStateInner (rebuilt on reload)
@@ -110,12 +123,15 @@ AppStateInner (rebuilt on reload)
 ```
 DashMap<String, Vec<Arc<dyn Provider>>>   // model_name → provider list
 DashMap<String, AtomicUsize>              // model_name → round-robin counter
+DashMap<String, u64>                      // model_name → quota_count_ratio (default 1)
 
 Methods:
-  select(model)        → round-robin provider selection
+  select(model)        → round-robin or key-affinity provider selection
   add_deployment()     → add provider to model group
   set_deployments()    → replace all providers for a model
   remove_deployments() → remove all providers for a model
+  set_quota_ratio()    → set quota consumption multiplier for a model
+  get_quota_ratio()    → get ratio (default 1 if not set)
   clear()              → reset all (before full reload)
 ```
 
@@ -133,9 +149,20 @@ Methods:
   clear()             → reset all (before full reload)
 ```
 
+### Scheduling Policy (boom-routing)
+
+```
+SchedulePolicy trait:
+  RoundRobinPolicy    → rotate through deployments evenly
+  KeyAffinityPolicy   → stick requests from same key to same deployment
+                        respects key_affinity_context_threshold (warm-up)
+                        respects key_affinity_rebalance_threshold (rebalance)
+  InFlightTracker     → tracks real-time in-flight requests per model/deployment
+```
+
 ## AdminCommand Channel (Decoupling Pattern)
 
-Dashboard needs to perform write operations (model CRUD, alias CRUD, config updates)
+Dashboard needs to perform write operations (model CRUD, config updates)
 but must NOT depend on boom-provider or boom-config. Solution:
 
 ```
@@ -148,12 +175,10 @@ but must NOT depend on boom-provider or boom-config. Solution:
 └──────────────────┘                      └──────────────────────────────┘
 
 AdminCommand variants:
-  UpsertModel(deployment)    → DB + DeploymentStore + build Provider
-  DeleteModel(id, name)      → DB + DeploymentStore cleanup
-  UpsertAlias(alias)         → DB + AliasStore
-  DeleteAlias(name)          → DB + AliasStore cleanup
-  UpsertPlan(plan)           → PlanStore + DB dual-write
-  DeletePlan(name)           → PlanStore + DB cleanup
+  CreateModel { req, reply }  → DB + DeploymentStore + build Provider + quota_ratio
+  UpdateModel { id, req, reply } → DB + DeploymentStore + quota_ratio
+  DeleteModel { id, reply }   → DB + DeploymentStore cleanup
+  ConfigChanged               → fire-and-forget: snapshot to DB
 ```
 
 ## Config Source: YAML vs DB
@@ -225,6 +250,10 @@ Plan (YAML / API defined)
   ├─ schedule[]          ──▶ time-based overrides (e.g. 9:00-21:00)
   └─ effective_limits()  ──▶ merge schedule × base
 
+Weighted counting:
+  check_and_record(key, rpm_limit, window_limits, weight)
+    └─ counter += weight (default weight=1, large models may use weight=3)
+
 Key Assignment:  key_hash ──▶ plan_name ──▶ plan limits
 Fallback:        explicit assignment → default_plan → config defaults
 ```
@@ -239,6 +268,7 @@ Fallback:        explicit assignment → default_plan → config defaults
 │  ├─ limiter           (shared, survives reload)        │
 │  ├─ deployment_store  (shared, survives reload)        │
 │  ├─ alias_store       (shared, survives reload)        │
+│  ├─ inflight          (shared, real-time tracking)     │
 │  ├─ admin_tx          (mpsc::Sender<AdminCommand>)     │
 │  ├─ jwt_secret        (derived from master_key)        │
 │  └─ master_key        (admin login verification)       │
@@ -261,6 +291,10 @@ Fallback:        explicit assignment → default_plan → config defaults
 │  /dashboard/api/admin/keys      → key management        │
 │  /dashboard/api/admin/assignments → key-plan assignment  │
 │  /dashboard/api/admin/logs      → request log query     │
+│  /dashboard/api/admin/teams     → team listing + stats  │
+│  /dashboard/api/admin/stats/models    → model stats     │
+│  /dashboard/api/admin/stats/inflight  → real-time stats │
+│  /dashboard/api/admin/limits/reset/*  → rate limit reset│
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -286,7 +320,8 @@ SIGHUP / POST /admin/config/reload
   ArcSwap::store()  ──▶ atomic swap, zero downtime
      │
      └─ preserved: db_pool, limiter counters, plan assignments,
-                   deployment_store, alias_store (rebuilt from source)
+                   deployment_store, alias_store (rebuilt from source),
+                   inflight tracker, quota ratios
 ```
 
 ## DB Schema & DDL Ownership
@@ -303,6 +338,9 @@ LiteLLM_VerificationToken   ← boom-auth reads for key verification
 
 LiteLLM_TeamTable           ← boom-auth reads for team model resolution
   └─ team_id → models (JSON array)
+
+boom_team_table             ← boom-dashboard reads for team alias
+  └─ team_id → team_alias
 ```
 
 ### BooMGateway Tables (full CRUD, by module)
@@ -311,11 +349,12 @@ LiteLLM_TeamTable           ← boom-auth reads for team model resolution
 -- boom-audit owns:
 boom_request_log
   ├─ id BIGSERIAL PRIMARY KEY
-  ├─ request_id, key_hash, key_name, team_id
+  ├─ request_id, key_hash, key_name, key_alias, team_id
   ├─ model, api_path
   ├─ is_stream, status_code
   ├─ error_type, error_message
   ├─ input_tokens, output_tokens, duration_ms
+  ├─ deployment_id TEXT
   └─ created_at TIMESTAMPTZ DEFAULT NOW()
 
 -- boom-routing owns:
@@ -327,6 +366,8 @@ boom_model_deployment
   ├─ aws_region_name, aws_access_key_id, aws_secret_access_key
   ├─ rpm, tpm, timeout, headers (JSONB)
   ├─ temperature, max_tokens, enabled
+  ├─ deployment_id TEXT
+  ├─ quota_count_ratio BIGINT DEFAULT 1
   ├─ source TEXT ('yaml' | 'db')
   └─ created_at, updated_at
 
@@ -375,16 +416,3 @@ Anthropic Request → deserialize AnthropicMessagesRequest
 Anthropic stream uses `AnthropicStreamTranscoder` to convert OpenAI SSE chunks
 into Anthropic event types (`message_start`, `content_block_delta`, `message_delta`,
 `message_stop`).
-
-## Pass-Through Mode
-
-When `pass_through.enabled=true`, requests are forwarded raw to an upstream gateway:
-
-```
-Client → auth + rate limit → forward raw bytes to upstream gateway → return response
-```
-
-- Model access check and rate limiting still run locally.
-- SSE streaming is forwarded chunk-by-chunk with `LoggedStream` for accurate duration.
-- No token usage is recorded (response body is not parsed).
-```

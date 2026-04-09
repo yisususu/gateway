@@ -35,6 +35,7 @@ server:
 general_settings:
   master_key: ${MASTER_KEY}                  # 支持 ${ENV_VAR} 引用
   database_url: os.environ/DATABASE_URL      # 支持 os.environ/VAR 引用
+  store_model_in_db: false                   # true 时 DB 为权威数据源，YAML 仅首次 seed
 
 # ──────────────────────────────────────────────
 # 模型部署列表
@@ -47,7 +48,7 @@ model_list:
       api_key: ${OPENAI_API_KEY}
       rpm: 60                     # 可选：部署级 RPM 限制
       tpm: 100000                 # 可选：部署级 TPM 限制
-      timeout: 120                # 默认 120 秒
+      timeout: 1200               # 默认 1200 秒
 
   # 同名多部署 → 自动负载均衡（轮询）
   - model_name: gpt-4o
@@ -56,11 +57,18 @@ model_list:
       api_key: ${OPENAI_API_KEY_BACKUP}
       api_base: https://api.openai.com/v1
 
-  # Anthropic
+  # Anthropic — 带 model_info
   - model_name: claude-sonnet-4-20250514
+    model_info:
+      id: node-a                            # 可选：部署标识
+      input_cost_per_token: 0.000003        # 可选：输入成本
+      output_cost_per_token: 0.000015       # 可选：输出成本
+      quota_count_ratio: 3                  # 可选：配额消耗倍率（默认 1）
     litellm_params:
       model: anthropic/claude-sonnet-4-20250514
       api_key: ${ANTHROPIC_API_KEY}
+      temperature: 0.7                      # 可选：温度覆盖
+      max_tokens: 4096                      # 可选：最大输出 token
 
   # Azure OpenAI
   - model_name: my-gpt4
@@ -108,11 +116,20 @@ model_list:
       model: openai/*
       api_key: ${OPENAI_API_KEY}
 
+  # 自定义请求头
+  - model_name: custom-provider
+    litellm_params:
+      model: openai/custom-model
+      api_key: ${CUSTOM_API_KEY}
+      api_base: https://custom.api.com/v1
+      headers:
+        X-Custom-Header: custom-value
+
 # ──────────────────────────────────────────────
 # 路由设置
 # ──────────────────────────────────────────────
 router_settings:
-  routing_strategy: round_robin     # 默认 round_robin
+  routing_strategy: round_robin     # 默认 round_robin，可选 key_affinity
 
   # 模型别名：客户端用别名请求，实际路由到目标模型
   model_group_alias:
@@ -125,6 +142,10 @@ router_settings:
       hidden: true
 
     "claude": "claude-sonnet-4-20250514"
+
+  # key_affinity 策略参数（仅 routing_strategy: key_affinity 时生效）
+  key_affinity_context_threshold: 0     # 上下文字符数阈值，低于此值优先最低负载
+  key_affinity_rebalance_threshold: 10  # 再均衡阈值（请求数差异超过此值时重新分配）
 
 # ──────────────────────────────────────────────
 # 全局限流设置
@@ -198,6 +219,7 @@ plan_settings:
 |---|---|---|---|
 | `master_key` | string | null | 管理 API 密钥，支持环境变量 |
 | `database_url` | string | null | PostgreSQL 连接串（litellm DB） |
+| `store_model_in_db` | bool | `false` | DB 权威模式。true 时 DB 为模型/别名/套餐的数据源，YAML 仅首次 seed |
 
 ### model_list[]
 
@@ -213,17 +235,28 @@ plan_settings:
 | `litellm_params.aws_secret_access_key` | string | AWS Secret Key |
 | `litellm_params.rpm` | u64 | 部署级 RPM |
 | `litellm_params.tpm` | u64 | 部署级 TPM |
-| `litellm_params.timeout` | u64 | 请求超时（秒），默认 120 |
+| `litellm_params.timeout` | u64 | 请求超时（秒），默认 1200 |
 | `litellm_params.headers` | map | 自定义请求头 |
 | `litellm_params.temperature` | f64 | 温度覆盖 |
 | `litellm_params.max_tokens` | u32 | 最大 token 数覆盖 |
+
+### model_list[].model_info
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `id` | string | null | 部署标识 |
+| `input_cost_per_token` | f64 | null | 输入成本（每 token） |
+| `output_cost_per_token` | f64 | null | 输出成本（每 token） |
+| `quota_count_ratio` | u64 | `1` | 配额消耗倍率。每次请求消耗的配额数，例如设为 3 则一次请求消耗 3 个配额 |
 
 ### router_settings
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `routing_strategy` | string | `"round_robin"` | 路由策略 |
+| `routing_strategy` | string | `"round_robin"` | 路由策略：`round_robin` 或 `key_affinity` |
 | `model_group_alias` | map | {} | 模型别名映射 |
+| `key_affinity_context_threshold` | u64 | `0` | key_affinity 模式下，上下文字符数低于此值时优先最低负载 |
+| `key_affinity_rebalance_threshold` | u64 | `10` | key_affinity 模式下，再均衡阈值（请求数差异） |
 
 ### rate_limit
 
@@ -287,7 +320,7 @@ plan_settings:
 | `xai/` | xAI (Grok) |
 | `ai21/`, `ai21_chat/` | AI21 Labs |
 
-无前缀时自动按模型名检测：`gpt-*` / `o1-*` / `o3-*` → OpenAI, `claude-*` → Anthropic, `gemini-*` → Gemini。
+无前缀时自动按模型名检测：`gpt-*` / `o1-*` / `o3-*` / `o4-*` → OpenAI, `claude-*` → Anthropic, `gemini-*` → Gemini。
 
 ---
 

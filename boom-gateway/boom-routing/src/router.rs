@@ -52,6 +52,19 @@ impl Router {
         self.alias_store.resolve(model)
     }
 
+    /// Resolve the request model to the actual deployment model_name
+    /// (after alias resolution). Returns the original name if it's a direct
+    /// deployment or a wildcard.
+    pub fn resolve_model_name(&self, model: &str) -> String {
+        if self.deployment_store.contains(model) {
+            return model.to_string();
+        }
+        if let Some(target) = self.alias_store.resolve(model) {
+            return target;
+        }
+        model.to_string()
+    }
+
     /// Core routing: exact match → alias resolution → wildcard "*".
     ///
     /// Resolves candidates then delegates to the SchedulePolicy for selection.

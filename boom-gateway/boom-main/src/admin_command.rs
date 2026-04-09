@@ -136,13 +136,12 @@ async fn handle_update_model(
         return Err("Model deployment not found".to_string());
     }
 
-    // Rebuild provider and add to memory (if enabled).
+    // Rebuild provider list for this model from DB (handles enable/disable/rename).
+    reload_model_deployments(db_pool, &state.deployment_store, &req.model_name).await;
+
     if req.enabled {
-        if let Some(provider) = build_provider(&req) {
-            state.deployment_store.add_deployment(&req.model_name, provider);
-            let ratio = req.quota_count_ratio.unwrap_or(1) as u64;
-            state.deployment_store.set_quota_ratio(&req.model_name, ratio);
-        }
+        let ratio = req.quota_count_ratio.unwrap_or(1) as u64;
+        state.deployment_store.set_quota_ratio(&req.model_name, ratio);
     }
 
     Ok(json!({"ok": true}))

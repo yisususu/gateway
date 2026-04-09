@@ -191,6 +191,7 @@ async fn chat_completions_inner(
         })?;
 
     let deployment_id = provider.deployment_id().map(|s| s.to_string());
+    let inflight_model = state.router.resolve_model_name(&model);
 
     // 4. Route to provider (streaming or non-streaming).
     if is_stream {
@@ -201,9 +202,9 @@ async fn chat_completions_inner(
         let usage = UsageTracker::default();
         let sse_stream = sse_stream_from_chat_stream(stream, usage.clone());
         let inflight_guard = if let Some(ref did) = deployment_id {
-            InFlightGuard::new_for_deployment(state.inflight.clone(), &model, did, input_chars as u64)
+            InFlightGuard::new_for_deployment(state.inflight.clone(), &inflight_model, did, input_chars as u64)
         } else {
-            InFlightGuard::new(state.inflight.clone(), &model, input_chars as u64)
+            InFlightGuard::new(state.inflight.clone(), &inflight_model, input_chars as u64)
         };
         let tracked = InFlightStream::new(sse_stream, inflight_guard);
         let guarded = GuardedStream::new(tracked, guard);
@@ -231,9 +232,9 @@ async fn chat_completions_inner(
         Ok(response.into_response())
     } else {
         let _inflight = if let Some(ref did) = deployment_id {
-            InFlightGuard::new_for_deployment(state.inflight.clone(), &model, did, input_chars as u64)
+            InFlightGuard::new_for_deployment(state.inflight.clone(), &inflight_model, did, input_chars as u64)
         } else {
-            InFlightGuard::new(state.inflight.clone(), &model, input_chars as u64)
+            InFlightGuard::new(state.inflight.clone(), &inflight_model, input_chars as u64)
         };
         let response = provider.chat(req).await.map_err(|e| {
             log_error(&state, &identity, &model, api_path, false, start, &e, Some(request_id.clone()));
@@ -1050,6 +1051,7 @@ pub async fn messages(
         })?;
 
     let deployment_id = provider.deployment_id().map(|s| s.to_string());
+    let inflight_model = state.router.resolve_model_name(&model);
 
     // 4. Route to provider.
     if is_stream {
@@ -1060,9 +1062,9 @@ pub async fn messages(
         let usage = UsageTracker::default();
         let sse_stream = sse_stream_from_anthropic_chat_stream(stream, model.clone(), usage.clone());
         let inflight_guard = if let Some(ref did) = deployment_id {
-            InFlightGuard::new_for_deployment(state.inflight.clone(), &model, did, input_chars as u64)
+            InFlightGuard::new_for_deployment(state.inflight.clone(), &inflight_model, did, input_chars as u64)
         } else {
-            InFlightGuard::new(state.inflight.clone(), &model, input_chars as u64)
+            InFlightGuard::new(state.inflight.clone(), &inflight_model, input_chars as u64)
         };
         let tracked = InFlightStream::new(sse_stream, inflight_guard);
         let guarded = GuardedStream::new(tracked, guard);
@@ -1090,9 +1092,9 @@ pub async fn messages(
         Ok(response.into_response())
     } else {
         let _inflight = if let Some(ref did) = deployment_id {
-            InFlightGuard::new_for_deployment(state.inflight.clone(), &model, did, input_chars as u64)
+            InFlightGuard::new_for_deployment(state.inflight.clone(), &inflight_model, did, input_chars as u64)
         } else {
-            InFlightGuard::new(state.inflight.clone(), &model, input_chars as u64)
+            InFlightGuard::new(state.inflight.clone(), &inflight_model, input_chars as u64)
         };
         let response = provider.chat(openai_req).await.map_err(|e| {
             log_error(&state, &identity, &model, "/v1/messages", false, start, &e, Some(request_id.clone()));
