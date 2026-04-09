@@ -86,7 +86,13 @@ impl SchedulePolicy for KeyAffinityPolicy {
         }
 
         // Look up existing affinity.
-        if let Some(preferred_id) = self.affinity.get(&affinity_key) {
+        // Clone the value immediately to release the DashMap read guard
+        // before any subsequent insert() — holding a Ref while inserting
+        // into the same shard causes a parking_lot::RwLock self-deadlock.
+        let preferred_id = self.affinity.get(&affinity_key)
+            .map(|r| r.value().clone());
+
+        if let Some(ref preferred_id) = preferred_id {
             // Find the preferred provider in candidates.
             if let Some(provider) = candidates.iter().find(|c| {
                 c.deployment_id()
