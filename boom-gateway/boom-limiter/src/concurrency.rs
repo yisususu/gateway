@@ -66,13 +66,15 @@ pub struct ScheduleSlot {
 }
 
 impl ScheduleSlot {
-    /// Check whether this slot is currently active (server local time).
+    /// Check whether this slot is currently active (UTC+8 Beijing time).
     pub fn is_active_now(&self) -> bool {
         let (start_min, end_min) = match parse_hours(&self.hours) {
             Some(pair) => pair,
             None => return false,
         };
-        let now = chrono::Local::now();
+        let now = chrono::Utc::now().with_timezone(
+            &chrono::FixedOffset::east_opt(8 * 3600).unwrap(),
+        );
         let current_min = now.hour() * 60 + now.minute();
         if start_min <= end_min {
             // Same day: e.g. 9:00-21:00
