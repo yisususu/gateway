@@ -973,7 +973,7 @@
       <div class="form-group"><label>Key Name ${tip("Human-readable name for this key.")}</label><input id="m-key-name"></div>
       <div class="form-group"><label>User ID ${tip("Optional user identifier for tracking.")}</label><input id="m-key-user"></div>
       <div class="form-group"><label>Team ID ${tip("Optional team identifier.")}</label><input id="m-key-team"></div>
-      <div class="form-group"><label>Models ${tip("Allowed models for this key. Leave empty for all models. Hold Ctrl/Cmd to multi-select.")}</label><select id="m-key-models" multiple></select></div>
+      <div class="form-group"><label>Models ${tip("Select model access for this key. 'all-team-models' grants full access to all models.")}</label><select id="m-key-models"></select></div>
       <div class="form-group"><label>Max Budget ${tip("Maximum budget in USD. Leave empty for unlimited.")}</label><input id="m-key-budget" type="number" step="0.01"></div>
       <div class="form-group"><label>RPM Limit ${tip("Per-key RPM override. Leave empty to use plan or default limits.")}</label><input id="m-key-rpm" type="number"></div>
       <div class="form-group"><label>Plan ${tip("Assign this key to a rate limit plan. Leave empty for default plan.")}</label><input id="m-key-plan" list="key-plan-list"><datalist id="key-plan-list"></datalist></div>
@@ -982,10 +982,20 @@
         <button class="btn-primary" id="m-key-submit">Create</button>
       </div>
     `);
-    // Populate model select and plan datalist
+    // Populate model select: all-team-models (full access) + each model
     getModelNames().then((names) => {
       const sel = document.getElementById("m-key-models");
-      if (sel) names.forEach((n) => { const o = document.createElement("option"); o.value = n; o.textContent = n; sel.appendChild(o); });
+      if (!sel) return;
+      const allOpt = document.createElement("option");
+      allOpt.value = "all-team-models";
+      allOpt.textContent = "all-team-models (Full Access)";
+      sel.appendChild(allOpt);
+      names.forEach((n) => {
+        const o = document.createElement("option");
+        o.value = n;
+        o.textContent = n;
+        sel.appendChild(o);
+      });
     });
     getPlanNames().then((names) => {
       const dl = document.getElementById("key-plan-list");
@@ -993,15 +1003,14 @@
     });
     document.getElementById("m-key-submit").addEventListener("click", async () => {
       try {
-        const modelsSel = document.getElementById("m-key-models");
-        const selectedModels = modelsSel ? Array.from(modelsSel.selectedOptions).map((o) => o.value) : [];
+        const modelVal = document.getElementById("m-key-models").value;
         const data = await api("/admin/keys", {
           method: "POST",
           body: JSON.stringify({
             key_name: document.getElementById("m-key-name").value || null,
             user_id: document.getElementById("m-key-user").value || null,
             team_id: document.getElementById("m-key-team").value || null,
-            models: selectedModels.length > 0 ? selectedModels : null,
+            models: modelVal && modelVal !== "all-team-models" ? [modelVal] : null,
             max_budget: document.getElementById("m-key-budget").value ? Number(document.getElementById("m-key-budget").value) : null,
             rpm_limit: document.getElementById("m-key-rpm").value ? Number(document.getElementById("m-key-rpm").value) : null,
             plan_name: document.getElementById("m-key-plan").value || null,
@@ -1023,11 +1032,13 @@
 
   function showEditKeyModal(key) {
     const existingModels = Array.isArray(key.models) ? key.models : [];
+    const hasFullAccess = existingModels.length === 0 || existingModels.includes("all-team-models") || existingModels.includes("*");
+    const currentModel = hasFullAccess ? "all-team-models" : (existingModels[0] || "all-team-models");
     showModal(`
       <h3>Edit Key</h3>
       <div class="form-group"><label>Alias ${tip("Human-readable name for this key.")}</label><input id="m-edit-alias" value="${esc(key.key_alias || "")}"></div>
       <div class="form-group"><label>User ID ${tip("Optional user identifier.")}</label><input id="m-edit-user" value="${esc(key.user_id || "")}"></div>
-      <div class="form-group"><label>Models ${tip("Allowed models for this key. Leave empty for all models. Hold Ctrl/Cmd to multi-select.")}</label><select id="m-edit-models" multiple></select></div>
+      <div class="form-group"><label>Models ${tip("Select model access for this key. 'all-team-models' grants full access to all models.")}</label><select id="m-edit-models"></select></div>
       <div class="form-group"><label>Max Budget ${tip("Maximum budget in USD. Leave empty for unlimited.")}</label><input id="m-edit-budget" type="number" step="0.01" value="${key.max_budget != null ? key.max_budget : ""}"></div>
       <div class="form-group"><label>RPM Limit ${tip("Per-key RPM override. Leave empty to use plan limits.")}</label><input id="m-edit-rpm" type="number" value="${key.rpm_limit || ""}"></div>
       <div class="modal-actions">
@@ -1035,14 +1046,20 @@
         <button class="btn-primary" id="m-edit-submit">Save</button>
       </div>
     `);
-    // Populate select with model names and pre-select existing
+    // Populate select: all-team-models + each model, pre-select current
     getModelNames().then((names) => {
       const sel = document.getElementById("m-edit-models");
-      if (sel) names.forEach((n) => {
+      if (!sel) return;
+      const allOpt = document.createElement("option");
+      allOpt.value = "all-team-models";
+      allOpt.textContent = "all-team-models (Full Access)";
+      if (currentModel === "all-team-models") allOpt.selected = true;
+      sel.appendChild(allOpt);
+      names.forEach((n) => {
         const o = document.createElement("option");
         o.value = n;
         o.textContent = n;
-        if (existingModels.includes(n)) o.selected = true;
+        if (n === currentModel) o.selected = true;
         sel.appendChild(o);
       });
     });
@@ -1050,12 +1067,11 @@
       try {
         const aliasVal = document.getElementById("m-edit-alias").value.trim();
         const userVal = document.getElementById("m-edit-user").value.trim();
-        const modelsSel = document.getElementById("m-edit-models");
-        const selectedModels = modelsSel ? Array.from(modelsSel.selectedOptions).map((o) => o.value) : [];
+        const modelVal = document.getElementById("m-edit-models").value;
         const body = {
           key_alias: aliasVal || null,
           user_id: userVal || null,
-          models: selectedModels.length > 0 ? selectedModels : null,
+          models: modelVal && modelVal !== "all-team-models" ? [modelVal] : null,
           max_budget: document.getElementById("m-edit-budget").value ? Number(document.getElementById("m-edit-budget").value) : null,
           rpm_limit: document.getElementById("m-edit-rpm").value ? Number(document.getElementById("m-edit-rpm").value) : null,
         };
