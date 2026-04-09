@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
+**注意：`"*"` 在本网关中是一个真实的 model_name（兜底路由），不是 litellm 的"全权限"通配符。** 当用户请求的模型名匹配不到任何已配置的 model_name 时，路由到 `"*"` 对应的 deployment。判断"全权限"的唯一依据是 `models` 数组为空或包含 `"all-team-models"`，不要把 `"*"` 作为全权限标记。
+
 **Intelligence Boom Gateway** — 高性能 LLM API 网关。Rust workspace 实现，Docker 容器化部署。兼容 litellm 密钥体系，自建速率限制、Dashboard、审计、计费等全部上层功能。
 
 ## Build & Run
