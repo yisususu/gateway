@@ -1,5 +1,5 @@
 use crate::types::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 // ============================================================
 // Request Conversion: Anthropic → OpenAI
@@ -188,10 +188,13 @@ pub struct AnthropicStreamTranscoder {
     text_block_open: bool,
     /// Maps OpenAI tool_call index → Anthropic content block index.
     tool_block_map: HashMap<u32, u32>,
-    /// Tracks which tool calls have already had partial_json emitted.
-    /// Used to detect and skip duplicate complete-JSON arguments that some
-    /// backends (e.g. vLLM) send in the finish_reason chunk.
-    tool_has_fragments: HashSet<u32>,
+    /// Buffers argument fragments per OpenAI tool_call index.
+    /// Fragments are accumulated during streaming and flushed as a SINGLE
+    /// `input_json_delta` event right before `content_block_stop`.
+    /// This avoids depending on the client SDK to correctly concatenate
+    /// many small `partial_json` fragments — some SDK versions / clients
+    /// fail at this, producing `input: {}`.
+    tool_arg_buf: HashMap<u32, String>,
     output_tokens: u32,
 }
 
@@ -204,7 +207,7 @@ impl AnthropicStreamTranscoder {
             content_block_index: 0,
             text_block_open: false,
             tool_block_map: HashMap::new(),
-            tool_has_fragments: HashSet::new(),
+            tool_arg_buf: HashMap::new(),
             output_tokens: 0,
         }
     }
@@ -308,36 +311,17 @@ impl AnthropicStreamTranscoder {
                             .to_string(),
                         });
                     }
-                    // Argument delta.
+                    // Argument delta — buffer instead of emitting immediately.
+                    // We flush all buffered args as a single input_json_delta right
+                    // before content_block_stop, so the client SDK only needs to
+                    // handle one partial_json per tool call.
                     if let Some(ref func) = tc.function {
                         if let Some(ref args) = func.arguments {
                             if !args.is_empty() {
-                                // Some backends (e.g. vLLM) send the COMPLETE tool-call
-                                // arguments in the chunk that also carries finish_reason.
-                                // If we've already emitted partial_json fragments, appending
-                                // the complete JSON would produce invalid concatenated JSON
-                                // (fragments + complete = garbage).  Detect and skip.
-                                let is_duplicate_complete = choice.finish_reason.is_some()
-                                    && self.tool_has_fragments.contains(&tc.index)
-                                    && args.starts_with('{');
-
-                                if !is_duplicate_complete {
-                                    self.tool_has_fragments.insert(tc.index);
-                                    let content_idx =
-                                        self.tool_block_map.get(&tc.index).copied().unwrap_or(0);
-                                    events.push(AnthropicSseEvent {
-                                        event: "content_block_delta".to_string(),
-                                        data: serde_json::json!({
-                                            "type": "content_block_delta",
-                                            "index": content_idx,
-                                            "delta": {
-                                                "type": "input_json_delta",
-                                                "partial_json": args
-                                            }
-                                        })
-                                        .to_string(),
-                                    });
-                                }
+                                self.tool_arg_buf
+                                    .entry(tc.index)
+                                    .or_default()
+                                    .push_str(args);
                             }
                         }
                     }
@@ -357,13 +341,34 @@ impl AnthropicStreamTranscoder {
                             .to_string(),
                     });
                 }
-                // Close tool blocks.
-                for &idx in self.tool_block_map.values() {
-                    events.push(AnthropicSseEvent {
-                        event: "content_block_stop".to_string(),
-                        data: serde_json::json!({ "type": "content_block_stop", "index": idx })
-                            .to_string(),
-                    });
+                // Close tool blocks — flush buffered args as a single partial_json first.
+                let mut tc_indices: Vec<u32> = self.tool_block_map.keys().copied().collect();
+                tc_indices.sort();
+                for tc_idx in &tc_indices {
+                    if let Some(block_idx) = self.tool_block_map.get(tc_idx) {
+                        // Flush buffered arguments as one input_json_delta.
+                        if let Some(buf) = self.tool_arg_buf.remove(tc_idx) {
+                            if !buf.is_empty() {
+                                events.push(AnthropicSseEvent {
+                                    event: "content_block_delta".to_string(),
+                                    data: serde_json::json!({
+                                        "type": "content_block_delta",
+                                        "index": block_idx,
+                                        "delta": {
+                                            "type": "input_json_delta",
+                                            "partial_json": buf
+                                        }
+                                    })
+                                    .to_string(),
+                                });
+                            }
+                        }
+                        events.push(AnthropicSseEvent {
+                            event: "content_block_stop".to_string(),
+                            data: serde_json::json!({ "type": "content_block_stop", "index": block_idx })
+                                .to_string(),
+                        });
+                    }
                 }
                 self.tool_block_map.clear();
 
