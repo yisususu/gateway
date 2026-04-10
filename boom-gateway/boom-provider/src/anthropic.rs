@@ -56,9 +56,10 @@ impl AnthropicProvider {
     fn beta_headers(&self, req: &ChatCompletionRequest) -> Vec<&'static str> {
         let mut betas = Vec::new();
         if self.has_thinking(req) {
-            betas.push("prompt-caching-2024-07-31");
             betas.push("extended-thinking-2025-04-11");
         }
+        // Prompt caching beta header — needed when cache_control is used.
+        betas.push("prompt-caching-2024-07-31");
         betas
     }
 
@@ -81,19 +82,28 @@ impl AnthropicProvider {
                     // the array form to support cache_control.
                     match &msg.content {
                         MessageContent::Text(t) if !t.is_empty() => {
-                            system_blocks.push(serde_json::json!({
+                            let mut block = serde_json::json!({
                                 "type": "text",
                                 "text": t,
-                            }));
+                            });
+                            // Forward cache_control if present in extra.
+                            if let Some(cc) = req.extra.get("system_cache_control") {
+                                block["cache_control"] = cc.clone();
+                            }
+                            system_blocks.push(block);
                         }
                         MessageContent::Parts(parts) => {
                             for p in parts {
                                 match p {
                                     ContentPart::Text { text } => {
-                                        system_blocks.push(serde_json::json!({
+                                        let mut block = serde_json::json!({
                                             "type": "text",
                                             "text": text,
-                                        }));
+                                        });
+                                        if let Some(cc) = req.extra.get("system_cache_control") {
+                                            block["cache_control"] = cc.clone();
+                                        }
+                                        system_blocks.push(block);
                                     }
                                     _ => {}
                                 }
@@ -101,9 +111,6 @@ impl AnthropicProvider {
                         }
                         _ => {}
                     }
-                    // Note: cache_control for system blocks can be carried via
-                    // extra fields on the request. The system block format already
-                    // supports cache_control at the Anthropic API level.
                 }
                 MessageRole::Assistant => {
                     let mut content_blocks: Vec<serde_json::Value> = Vec::new();
@@ -264,24 +271,55 @@ impl AnthropicProvider {
             normalize::convert_tool_choice_for_anthropic(&req.tool_choice, parallel_tool_calls);
 
         if !strip_tools {
+            let mut anthropic_tools: Vec<serde_json::Value> = Vec::new();
+
+            // User-provided tools.
             if let Some(ref tools) = req.tools {
-                let anthropic_tools: Vec<serde_json::Value> = tools
-                    .iter()
-                    .map(|t| {
-                        let mut tool = serde_json::json!({
-                            "name": t.function.name,
-                            "input_schema": t.function.parameters,
-                        });
-                        if let Some(ref desc) = t.function.description {
-                            tool["description"] = serde_json::json!(desc);
-                        }
-                        tool
-                    })
-                    .collect();
+                for t in tools {
+                    let mut tool = serde_json::json!({
+                        "name": t.function.name,
+                        "input_schema": t.function.parameters,
+                    });
+                    if let Some(ref desc) = t.function.description {
+                        tool["description"] = serde_json::json!(desc);
+                    }
+                    anthropic_tools.push(tool);
+                }
+            }
+
+            // response_format → synthetic tool (matches litellm behavior).
+            // litellm creates a tool named "output_json" and forces tool_choice.
+            if let Some(ref rf) = req.response_format {
+                let rf_type = rf.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                if rf_type != "text" {
+                    // Build the JSON schema for the synthetic tool.
+                    let schema = if rf_type == "json_schema" {
+                        rf.get("json_schema")
+                            .and_then(|js| js.get("schema"))
+                            .cloned()
+                            .unwrap_or(serde_json::json!({"type": "object"}))
+                    } else {
+                        // json_object — no specific schema.
+                        serde_json::json!({"type": "object"})
+                    };
+                    anthropic_tools.push(serde_json::json!({
+                        "name": "output_json",
+                        "description": "Respond with a JSON object matching the provided schema.",
+                        "input_schema": schema,
+                    }));
+                    // Force the model to use this tool.
+                    body["tool_choice"] = serde_json::json!({"type": "tool", "name": "output_json"});
+                }
+            }
+
+            if !anthropic_tools.is_empty() {
                 body["tools"] = serde_json::json!(anthropic_tools);
             }
-            if let Some(tc) = tc_value {
-                body["tool_choice"] = tc;
+            // Only set tool_choice if response_format didn't already set it.
+            if !body.get("tool_choice").is_some() {
+                if let Some(tc) = tc_value {
+                    body["tool_choice"] = tc;
+                }
             }
         }
         // If strip_tools is true, we simply don't include tools or tool_choice.
@@ -292,6 +330,17 @@ impl AnthropicProvider {
         }
         if let Some(metadata) = req.extra.get("metadata") {
             body["metadata"] = metadata.clone();
+        }
+        // Forward Anthropic-specific params from extra.
+        if let Some(top_k) = req.extra.get("top_k") {
+            body["top_k"] = top_k.clone();
+        }
+        // Forward user (litellm does this too).
+        if let Some(ref user) = req.user {
+            body["metadata"] = body.get("metadata").cloned().unwrap_or(serde_json::json!({}));
+            if let Some(meta) = body.get_mut("metadata").and_then(|m| m.as_object_mut()) {
+                meta.insert("user_id".to_string(), serde_json::json!(user));
+            }
         }
 
         body
@@ -326,23 +375,32 @@ impl AnthropicProvider {
                         // Intentionally opaque — skip.
                     }
                     "tool_use" => {
-                        let id = block
-                            .get("id")
-                            .and_then(|i| i.as_str())
-                            .unwrap_or("")
-                            .to_string();
                         let name = block
                             .get("name")
                             .and_then(|n| n.as_str())
                             .unwrap_or("")
                             .to_string();
                         let input = block.get("input").cloned().unwrap_or(serde_json::json!({}));
-                        let arguments = serde_json::to_string(&input).unwrap_or_default();
-                        tool_calls.push(ToolCall {
-                            id,
-                            call_type: "function".to_string(),
-                            function: FunctionCall { name, arguments },
-                        });
+                        // If this is the synthetic output_json tool from response_format,
+                        // convert the input to text content instead of a tool_call.
+                        if name == "output_json" {
+                            let json_text = serde_json::to_string(&input).unwrap_or_default();
+                            if !json_text.is_empty() {
+                                content_parts.push(ContentPart::Text { text: json_text });
+                            }
+                        } else {
+                            let id = block
+                                .get("id")
+                                .and_then(|i| i.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let arguments = serde_json::to_string(&input).unwrap_or_default();
+                            tool_calls.push(ToolCall {
+                                id,
+                                call_type: "function".to_string(),
+                                function: FunctionCall { name, arguments },
+                            });
+                        }
                     }
                     _ => {}
                 }
@@ -771,8 +829,28 @@ impl Provider for AnthropicProvider {
                                     }
                                 }
                                 "message_start" => {
-                                    // Extract input_tokens from message_start for usage tracking.
-                                    // No chunk emitted — usage is tracked by the caller.
+                                    // Emit a role chunk so OpenAI clients see `role: "assistant"`
+                                    // in the first SSE chunk (matching litellm behavior).
+                                    let role_chunk = ChatStreamChunk {
+                                        id: response_id.clone(),
+                                        object: "chat.completion.chunk".to_string(),
+                                        created,
+                                        model: model.clone(),
+                                        choices: vec![StreamChoice {
+                                            index: 0,
+                                            delta: StreamDelta {
+                                                role: Some(MessageRole::Assistant),
+                                                content: None,
+                                                tool_calls: None,
+                                                reasoning_content: None,
+                                            },
+                                            finish_reason: None,
+                                        }],
+                                        usage: None,
+                                    };
+                                    if tx.send(Ok(Some(role_chunk))).await.is_err() {
+                                        return;
+                                    }
                                 }
                                 "message_stop" => {
                                     let _ = tx.send(Ok(None)).await;

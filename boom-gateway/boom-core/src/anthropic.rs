@@ -553,7 +553,14 @@ fn convert_user_message(content: &AnthropicContent, messages: &mut Vec<Message>)
                             Some(AnthropicContent::Blocks(bs)) => bs
                                 .iter()
                                 .filter_map(|b| match b {
-                                    AnthropicContentBlock::Text { text, .. } => Some(text.as_str()),
+                                    AnthropicContentBlock::Text { text, .. } => Some(text.clone()),
+                                    AnthropicContentBlock::Image { source } => {
+                                        // OpenAI Tool role doesn't support images —
+                                        // emit a placeholder so the content isn't silently lost.
+                                        let url = normalize::convert_image_source(source);
+                                        let display = if url.len() > 80 { &url[..80] } else { &url };
+                                        Some(format!("[image: {}]", display))
+                                    }
                                     _ => None,
                                 })
                                 .collect::<Vec<_>>()
