@@ -120,6 +120,9 @@ impl InFlightTracker {
 
     /// Current in-flight stats for all deployments with active requests.
     pub fn get_stats_by_deployment(&self) -> Vec<DeploymentInFlightStat> {
+        // Clean up any stale key_metrics entries (count == 0 but not yet removed).
+        self.key_metrics.retain(|_, v| v.request_count.load(Ordering::Relaxed) > 0);
+
         self.deployment_metrics
             .iter()
             .filter(|r| r.value().request_count.load(Ordering::Relaxed) > 0)
@@ -281,10 +284,15 @@ impl Drop for InFlightGuard {
             }
         }
 
-        // Decrement key-level metrics.
+        // Decrement key-level metrics. Remove entry if count reaches zero
+        // to prevent unbounded DashMap growth.
         if let Some(ref kk) = self.key_tracking_key {
-            if let Some(km) = self.tracker.key_metrics.get(kk) {
-                km.request_count.fetch_sub(1, Ordering::Relaxed);
+            let should_remove = self.tracker.key_metrics.get(kk).map_or(false, |km| {
+                km.request_count.fetch_sub(1, Ordering::Relaxed) == 1
+            });
+            if should_remove {
+                drop(self.tracker.key_metrics.get(kk));
+                self.tracker.key_metrics.remove(kk);
             }
         }
     }
