@@ -362,7 +362,7 @@ pub async fn create_key(
     .bind(req.max_budget)
     .bind(&req.budget_duration)
     .bind(expires)
-    .bind(&req.metadata)
+    .bind(req.metadata.as_ref().unwrap_or(&serde_json::json!({})))
     .execute(db_pool)
     .await;
 
@@ -752,7 +752,7 @@ pub async fn batch_create_keys(
         .bind(req.max_budget)
         .bind(&req.budget_duration)
         .bind(expires)
-        .bind(&req.metadata)
+        .bind(req.metadata.as_ref().unwrap_or(&serde_json::json!({})))
         .execute(db_pool)
         .await;
 
