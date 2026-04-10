@@ -231,22 +231,25 @@ impl AnthropicStreamTranscoder {
                 });
             }
 
-            // Text content delta.
+            // Text content delta — only open a text block when there's actual text.
+            // Some backends send content="" in tool_call chunks; opening a text block
+            // for empty content creates spurious content_block_start events that cause
+            // the Anthropic SDK to finalize tool_use blocks prematurely (input={}).
             if let Some(ref text) = choice.delta.content {
-                if !self.text_block_open {
-                    self.text_block_open = true;
-                    let idx = self.content_block_index;
-                    events.push(AnthropicSseEvent {
-                        event: "content_block_start".to_string(),
-                        data: serde_json::json!({
-                            "type": "content_block_start",
-                            "index": idx,
-                            "content_block": { "type": "text", "text": "" }
-                        })
-                        .to_string(),
-                    });
-                }
                 if !text.is_empty() {
+                    if !self.text_block_open {
+                        self.text_block_open = true;
+                        let idx = self.content_block_index;
+                        events.push(AnthropicSseEvent {
+                            event: "content_block_start".to_string(),
+                            data: serde_json::json!({
+                                "type": "content_block_start",
+                                "index": idx,
+                                "content_block": { "type": "text", "text": "" }
+                            })
+                            .to_string(),
+                        });
+                    }
                     self.output_tokens += 1;
                     events.push(AnthropicSseEvent {
                         event: "content_block_delta".to_string(),
