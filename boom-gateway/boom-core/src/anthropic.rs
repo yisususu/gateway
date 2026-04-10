@@ -407,23 +407,28 @@ impl AnthropicStreamTranscoder {
                         if let Some(ref args) = func.arguments {
                             if !args.is_empty() {
                                 // vLLM quirk: the finish chunk may contain the COMPLETE
-                                // JSON arguments after already sending all fragments.
-                                // Detect this: if we already have buffered content AND
-                                // the new args look like a complete JSON object (starts
-                                // with '{' and is parseable), skip it to avoid doubling.
-                                if let Some(existing) = self.tool_arg_buf.get(&tc.index) {
-                                    if !existing.is_empty()
-                                        && args.starts_with('{')
-                                        && serde_json::from_str::<serde_json::Value>(args).is_ok()
-                                    {
-                                        // Skip duplicate complete JSON from vLLM finish chunk.
-                                        continue;
-                                    }
+                                // JSON arguments after already sending (possibly incomplete)
+                                // fragments. When we detect a complete JSON object AND the
+                                // buffer already has content, REPLACE the buffer with the
+                                // canonical complete version rather than concatenating.
+                                // This handles both:
+                                //   a) fragments are complete → replace with same value (no-op)
+                                //   b) fragments are incomplete (e.g. missing closing '}')
+                                //      → replace with correct complete JSON
+                                let is_vllm_complete = args.starts_with('{')
+                                    && serde_json::from_str::<serde_json::Value>(args).is_ok();
+                                let has_existing = self
+                                    .tool_arg_buf
+                                    .get(&tc.index)
+                                    .map_or(false, |e| !e.is_empty());
+                                if is_vllm_complete && has_existing {
+                                    self.tool_arg_buf.insert(tc.index, args.clone());
+                                } else {
+                                    self.tool_arg_buf
+                                        .entry(tc.index)
+                                        .or_default()
+                                        .push_str(args);
                                 }
-                                self.tool_arg_buf
-                                    .entry(tc.index)
-                                    .or_default()
-                                    .push_str(args);
                             }
                         }
                     }
