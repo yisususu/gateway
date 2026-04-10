@@ -230,7 +230,7 @@
               var prefix = k.is_vip ? "[VIP] " : "";
               return prefix + esc(k.key_alias || "?");
             });
-            fcQueueHtml = '<span class="field-tip" data-tip="' + items.join("&#10;").replace(/"/g, "&quot;") + '">' + d.fc_queue + '</span>';
+            fcQueueHtml = '<span class="cell-tip" data-tip="' + items.join("&#10;").replace(/"/g, "&quot;") + '">' + d.fc_queue + '</span>';
           }
 
           // IN-MODEL REQS tooltip — show per-key request counts.
@@ -239,7 +239,7 @@
             var reqItems = d.key_stats.map(function (k) {
               return esc(k.key_alias || "?") + ": " + k.request_count;
             });
-            reqsHtml = '<span class="field-tip" data-tip="' + reqItems.join("&#10;").replace(/"/g, "&quot;") + '">' + reqsDisplay + '</span>';
+            reqsHtml = '<span class="cell-tip" data-tip="' + reqItems.join("&#10;").replace(/"/g, "&quot;") + '">' + reqsDisplay + '</span>';
           }
 
           return (
@@ -1049,7 +1049,7 @@
       <div class="form-group"><label>Models ${tip("Select model access. Check 'all-team-models' for full access, or pick specific models.")}</label><div class="model-check-combo" id="m-edit-models-combo"></div></div>
       <div class="form-group"><label>Max Budget ${tip("Maximum budget in USD. Leave empty for unlimited.")}</label><input id="m-edit-budget" type="number" step="0.01" value="${key.max_budget != null ? key.max_budget : ""}"></div>
       <div class="form-group"><label>RPM Limit ${tip("Per-key RPM override. Leave empty to use plan limits.")}</label><input id="m-edit-rpm" type="number" value="${key.rpm_limit || ""}"></div>
-      <div class="form-group"><label>VIP ${tip("VIP keys get priority in flow control queues when deployments are at capacity.")}</label><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="m-edit-vip" ${isVip ? "checked" : ""}><span style="font-weight:600;color:#b45309">Priority queue access</span></label></div>
+      <div class="form-group"><label>VIP ${tip("VIP keys get priority in flow control queues when deployments are at capacity.")}</label><div style="display:flex;align-items:center;gap:8px;margin-top:4px"><input type="checkbox" id="m-edit-vip" ${isVip ? "checked" : ""}><span style="font-weight:600;color:#b45309">Priority queue access</span></div></div>
       <div class="modal-actions">
         <button class="btn-secondary" onclick="hideModal()" style="width:auto">Cancel</button>
         <button class="btn-primary" id="m-edit-submit">Save</button>
