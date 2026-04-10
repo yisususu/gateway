@@ -269,7 +269,7 @@ impl Drop for FlowControlGuard {
             slot.current_inflight.fetch_sub(1, Ordering::Relaxed);
             slot.current_context.fetch_sub(self.context_chars, Ordering::Relaxed);
             if slot.waiters.load(Ordering::Relaxed) > 0 {
-                slot.notify.notify_one();
+                slot.notify.notify_waiters();
             }
         }
     }
