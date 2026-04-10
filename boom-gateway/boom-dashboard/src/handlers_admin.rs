@@ -1623,7 +1623,7 @@ pub async fn get_model_stats(
     };
 
     let stats = sqlx::query_as::<_, ModelStatsRow>(
-        r#"SELECT model,
+        r#"SELECT COALESCE(model_name, model) AS model,
                   COUNT(*) as total_requests,
                   COUNT(*) FILTER (WHERE status_code = 200) as success_count,
                   COUNT(*) FILTER (WHERE status_code != 200) as error_count,
@@ -1632,7 +1632,7 @@ pub async fn get_model_stats(
                   COALESCE(AVG(duration_ms), 0)::int as avg_duration_ms,
                   MAX(created_at) as last_request_at
            FROM boom_request_log
-           GROUP BY model
+           GROUP BY COALESCE(model_name, model)
            ORDER BY total_requests DESC"#,
     )
     .fetch_all(pool)
@@ -1660,10 +1660,16 @@ pub async fn get_inflight_stats(
     let inflight_models = state.inflight.get_stats();
     let inflight_deployments = state.inflight.get_stats_by_deployment();
     let flowcontrol_stats = state.flow_controller.get_stats();
+    let queued_waiters = state.flow_controller.get_queued_waiters();
 
     // Build lookup: deployment_id → (max_inflight, max_context).
     let fc_limits: HashMap<&str, (u32, u64)> = flowcontrol_stats.iter()
         .map(|fc| (fc.deployment_id.as_str(), (fc.max_inflight, fc.max_context)))
+        .collect();
+
+    // Build lookup: deployment_id → queued waiter entries.
+    let queued_map: HashMap<&str, &Vec<boom_flowcontrol::QueuedWaiterEntry>> = queued_waiters.iter()
+        .map(|q| (q.deployment_id.as_str(), &q.waiters))
         .collect();
 
     // Collect model names that already appear in deployment-level stats.
@@ -1679,6 +1685,16 @@ pub async fn get_inflight_stats(
             .find(|fc| fc.deployment_id == d.deployment_id)
             .map(|fc| fc.waiters)
             .unwrap_or(0);
+        let queued_keys: Vec<serde_json::Value> = queued_map.get(d.deployment_id.as_str())
+            .map(|entries| entries.iter().map(|e| json!({
+                "key_alias": e.key_alias,
+                "is_vip": e.is_vip,
+            })).collect())
+            .unwrap_or_default();
+        let key_stats: Vec<serde_json::Value> = d.key_stats.iter().map(|k| json!({
+            "key_alias": k.key_alias,
+            "request_count": k.request_count,
+        })).collect();
         rows.insert(d.deployment_id.clone(), json!({
             "model": d.model,
             "deployment_id": d.deployment_id,
@@ -1687,6 +1703,8 @@ pub async fn get_inflight_stats(
             "in_reqs_max": max_reqs,
             "in_context": d.inflight_input_chars,
             "in_context_max": max_ctx,
+            "queued_keys": queued_keys,
+            "key_stats": key_stats,
         }));
     }
 
@@ -1697,6 +1715,12 @@ pub async fn get_inflight_stats(
         }
         let model = state.deployment_store.find_model_by_deployment_id(&fc.deployment_id)
             .unwrap_or_else(|| "-".to_string());
+        let queued_keys: Vec<serde_json::Value> = queued_map.get(fc.deployment_id.as_str())
+            .map(|entries| entries.iter().map(|e| json!({
+                "key_alias": e.key_alias,
+                "is_vip": e.is_vip,
+            })).collect())
+            .unwrap_or_default();
         rows.insert(fc.deployment_id.clone(), json!({
             "model": model,
             "deployment_id": fc.deployment_id,
@@ -1705,6 +1729,8 @@ pub async fn get_inflight_stats(
             "in_reqs_max": fc.max_inflight,
             "in_context": fc.current_context,
             "in_context_max": fc.max_context,
+            "queued_keys": queued_keys,
+            "key_stats": [],
         }));
     }
 
@@ -1721,6 +1747,8 @@ pub async fn get_inflight_stats(
             "in_reqs_max": 0,
             "in_context": m.inflight_input_chars,
             "in_context_max": 0,
+            "queued_keys": [],
+            "key_stats": [],
         }));
     }
 

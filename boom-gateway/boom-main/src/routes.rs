@@ -271,7 +271,8 @@ async fn chat_completions_inner(
     // 3.5. Flow control — queue if per-deployment limits exceeded.
     let fc_guard = if let Some(ref did) = deployment_id {
         let timeout = std::time::Duration::from_secs(1200);
-        match state.flow_controller.acquire(did, input_chars as u64, timeout).await {
+        let vip = is_vip_key(&identity.metadata);
+        match state.flow_controller.acquire(did, input_chars as u64, timeout, vip, identity.key_alias.clone()).await {
             Ok(g) => Some(g),
             Err(FlowControlError::Timeout { waiters, .. }) => {
                 let e = GatewayError::FlowControlQueueTimeout {
@@ -300,7 +301,7 @@ async fn chat_completions_inner(
         let usage = UsageTracker::default();
         let sse_stream = sse_stream_from_chat_stream(stream, usage.clone(), debug);
         let inflight_guard = if let Some(ref did) = deployment_id {
-            InFlightGuard::new_for_deployment(state.inflight.clone(), &inflight_model, did, input_chars as u64)
+            InFlightGuard::new_for_deployment_with_key(state.inflight.clone(), &inflight_model, did, input_chars as u64, identity.key_alias.as_deref(), &identity.key_hash)
         } else {
             InFlightGuard::new(state.inflight.clone(), &inflight_model, input_chars as u64)
         };
@@ -320,6 +321,7 @@ async fn chat_completions_inner(
             key_alias: identity.key_alias.clone(),
             team_id: identity.team_id.clone(),
             model,
+            model_name: Some(inflight_model.clone()),
             api_path: api_path_owned,
             is_stream: true,
             status_code: 200,
@@ -335,7 +337,7 @@ async fn chat_completions_inner(
         Ok(response.into_response())
     } else {
         let _inflight = if let Some(ref did) = deployment_id {
-            InFlightGuard::new_for_deployment(state.inflight.clone(), &inflight_model, did, input_chars as u64)
+            InFlightGuard::new_for_deployment_with_key(state.inflight.clone(), &inflight_model, did, input_chars as u64, identity.key_alias.as_deref(), &identity.key_hash)
         } else {
             InFlightGuard::new(state.inflight.clone(), &inflight_model, input_chars as u64)
         };
@@ -360,6 +362,7 @@ async fn chat_completions_inner(
                 key_alias: identity.key_alias.clone(),
                 team_id: identity.team_id.clone(),
                 model,
+                model_name: Some(inflight_model.clone()),
                 api_path: api_path.to_string(),
                 is_stream: false,
                 status_code: 200,
@@ -920,6 +923,15 @@ fn resolve_quota_weight(model: &str, state: &AppState) -> u64 {
     state.deployment_store.get_quota_ratio(&resolved)
 }
 
+/// Check if a key has VIP status from metadata.
+fn is_vip_key(metadata: &serde_json::Value) -> bool {
+    metadata
+        .as_object()
+        .and_then(|m| m.get("vip"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 /// Rollback plan window counters when an upstream request fails.
 /// RPM counters are NOT rolled back (DDoS protection).
 fn rollback_plan_quota(limiter: &Arc<boom_limiter::SlidingWindowLimiter>, rl_info: &RateLimitInfo) {
@@ -1219,7 +1231,8 @@ pub async fn messages(
     // 3.5. Flow control — queue if per-deployment limits exceeded.
     let fc_guard = if let Some(ref did) = deployment_id {
         let timeout = std::time::Duration::from_secs(1200);
-        match state.flow_controller.acquire(did, input_chars as u64, timeout).await {
+        let vip = is_vip_key(&identity.metadata);
+        match state.flow_controller.acquire(did, input_chars as u64, timeout, vip, identity.key_alias.clone()).await {
             Ok(g) => Some(g),
             Err(FlowControlError::Timeout { waiters, .. }) => {
                 let e = GatewayError::FlowControlQueueTimeout {
@@ -1248,7 +1261,7 @@ pub async fn messages(
         let usage = UsageTracker::default();
         let sse_stream = sse_stream_from_anthropic_chat_stream(stream, model.clone(), usage.clone(), debug);
         let inflight_guard = if let Some(ref did) = deployment_id {
-            InFlightGuard::new_for_deployment(state.inflight.clone(), &inflight_model, did, input_chars as u64)
+            InFlightGuard::new_for_deployment_with_key(state.inflight.clone(), &inflight_model, did, input_chars as u64, identity.key_alias.as_deref(), &identity.key_hash)
         } else {
             InFlightGuard::new(state.inflight.clone(), &inflight_model, input_chars as u64)
         };
@@ -1267,6 +1280,7 @@ pub async fn messages(
             key_alias: identity.key_alias.clone(),
             team_id: identity.team_id.clone(),
             model,
+            model_name: Some(inflight_model.clone()),
             api_path: "/v1/messages".to_string(),
             is_stream: true,
             status_code: 200,
@@ -1282,7 +1296,7 @@ pub async fn messages(
         Ok(response.into_response())
     } else {
         let _inflight = if let Some(ref did) = deployment_id {
-            InFlightGuard::new_for_deployment(state.inflight.clone(), &inflight_model, did, input_chars as u64)
+            InFlightGuard::new_for_deployment_with_key(state.inflight.clone(), &inflight_model, did, input_chars as u64, identity.key_alias.as_deref(), &identity.key_hash)
         } else {
             InFlightGuard::new(state.inflight.clone(), &inflight_model, input_chars as u64)
         };
@@ -1307,6 +1321,7 @@ pub async fn messages(
                 key_alias: identity.key_alias.clone(),
                 team_id: identity.team_id.clone(),
                 model,
+                model_name: Some(inflight_model.clone()),
                 api_path: "/v1/messages".to_string(),
                 is_stream: false,
                 status_code: 200,

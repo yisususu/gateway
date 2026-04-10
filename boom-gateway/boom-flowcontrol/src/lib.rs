@@ -36,6 +36,7 @@ pub struct FlowControlStat {
     pub current_inflight: u32,
     pub current_context: u64,
     pub waiters: usize,
+    pub vip_waiters: usize,
     pub max_inflight: u32,
     pub max_context: u64,
 }
@@ -52,6 +53,30 @@ pub enum FlowControlError {
     NoSlot,
 }
 
+/// Per-deployment queued waiter info for dashboard visibility.
+#[derive(Debug, Clone)]
+pub struct QueuedWaiterStat {
+    pub deployment_id: String,
+    pub waiters: Vec<QueuedWaiterEntry>,
+}
+
+/// A single queued waiter's info.
+#[derive(Debug, Clone)]
+pub struct QueuedWaiterEntry {
+    pub key_alias: Option<String>,
+    pub is_vip: bool,
+}
+
+// ═══════════════════════════════════════════════════════════
+// Internal types
+// ═══════════════════════════════════════════════════════════
+
+/// Tracks individual waiters for dashboard visibility.
+struct QueuedWaiter {
+    key_alias: Option<String>,
+    is_vip: bool,
+}
+
 // ═══════════════════════════════════════════════════════════
 // FlowController
 // ═══════════════════════════════════════════════════════════
@@ -61,6 +86,7 @@ pub enum FlowControlError {
 /// Each deployment has a `FlowControlSlot` that tracks in-flight
 /// request count and total input context. When limits are exceeded,
 /// new requests wait asynchronously until a slot opens or timeout.
+/// VIP keys are always woken before non-VIP keys.
 pub struct FlowController {
     slots: Arc<DashMap<String, FlowControlSlot>>,
 }
@@ -70,8 +96,16 @@ struct FlowControlSlot {
     max_context: AtomicU64,
     current_inflight: AtomicU32,
     current_context: AtomicU64,
+    /// Non-VIP waiter count.
     waiters: AtomicU32,
+    /// VIP waiter count.
+    vip_waiters: AtomicU32,
+    /// Non-VIP wake-up channel.
     notify: tokio::sync::Notify,
+    /// VIP wake-up channel.
+    vip_notify: tokio::sync::Notify,
+    /// Individual waiter tracking for dashboard visibility.
+    queued_waiters: std::sync::Mutex<Vec<QueuedWaiter>>,
 }
 
 impl FlowController {
@@ -103,7 +137,10 @@ impl FlowController {
                     current_inflight: AtomicU32::new(0),
                     current_context: AtomicU64::new(0),
                     waiters: AtomicU32::new(0),
+                    vip_waiters: AtomicU32::new(0),
                     notify: tokio::sync::Notify::new(),
+                    vip_notify: tokio::sync::Notify::new(),
+                    queued_waiters: std::sync::Mutex::new(Vec::new()),
                 }
             });
 
@@ -129,12 +166,15 @@ impl FlowController {
     ///
     /// If the deployment has no slot configured, returns `Err(FlowControlError::NoSlot)`.
     /// If limits are exceeded, waits asynchronously up to `timeout` duration.
+    /// VIP requests are always woken before non-VIP requests.
     /// On success, returns a `FlowControlGuard` that releases the slot on Drop.
     pub async fn acquire(
         &self,
         deployment_id: &str,
         context_chars: u64,
         timeout: Duration,
+        is_vip: bool,
+        key_alias: Option<String>,
     ) -> Result<FlowControlGuard, FlowControlError> {
         let slot = match self.slots.get(deployment_id) {
             Some(s) => s,
@@ -151,38 +191,69 @@ impl FlowController {
         }
 
         // Slow path: wait for a slot to open.
-        slot.waiters.fetch_add(1, Ordering::Relaxed);
+        // Track this waiter for dashboard visibility.
+        {
+            let mut q = slot.queued_waiters.lock().unwrap();
+            q.push(QueuedWaiter {
+                key_alias: key_alias.clone(),
+                is_vip,
+            });
+        }
+
+        if is_vip {
+            slot.vip_waiters.fetch_add(1, Ordering::Relaxed);
+        } else {
+            slot.waiters.fetch_add(1, Ordering::Relaxed);
+        }
 
         let deadline = tokio::time::Instant::now() + timeout;
-        loop {
+        let notify_ref = if is_vip {
+            &slot.vip_notify
+        } else {
+            &slot.notify
+        };
+
+        let waiter_key_alias = key_alias.clone();
+        let result = loop {
             tokio::select! {
-                _ = slot.notify.notified() => {
+                _ = notify_ref.notified() => {
                     if try_acquire_slot(&slot, context_chars) {
-                        slot.waiters.fetch_sub(1, Ordering::Relaxed);
-                        return Ok(FlowControlGuard {
+                        break Ok(FlowControlGuard {
                             slots: self.slots.clone(),
                             deployment_id: deployment_id.to_string(),
                             context_chars,
                         });
                     }
-                    // Still can't acquire — keep waiting.
+                    // Failed to acquire — let someone else try.
+                    notify_ref.notify_one();
                     if tokio::time::Instant::now() >= deadline {
-                        let waiters = slot.waiters.fetch_sub(1, Ordering::Relaxed) - 1;
-                        return Err(FlowControlError::Timeout {
+                        break Err(FlowControlError::Timeout {
                             deployment_id: deployment_id.to_string(),
-                            waiters: waiters as usize,
+                            waiters: total_waiters(&slot),
                         });
                     }
                 }
                 _ = tokio::time::sleep_until(deadline) => {
-                    let waiters = slot.waiters.fetch_sub(1, Ordering::Relaxed) - 1;
-                    return Err(FlowControlError::Timeout {
+                    break Err(FlowControlError::Timeout {
                         deployment_id: deployment_id.to_string(),
-                        waiters: waiters as usize,
+                        waiters: total_waiters(&slot),
                     });
                 }
             }
+        };
+
+        // Clean up waiter tracking.
+        if is_vip {
+            slot.vip_waiters.fetch_sub(1, Ordering::Relaxed);
+        } else {
+            slot.waiters.fetch_sub(1, Ordering::Relaxed);
         }
+        {
+            let mut q = slot.queued_waiters.lock().unwrap();
+            q.retain(|w| !(w.key_alias == waiter_key_alias && w.is_vip == is_vip));
+        }
+
+        result
     }
 
     /// Get stats for all deployments with flow control configured.
@@ -196,8 +267,41 @@ impl FlowController {
                     current_inflight: s.current_inflight.load(Ordering::Relaxed),
                     current_context: s.current_context.load(Ordering::Relaxed),
                     waiters: s.waiters.load(Ordering::Relaxed) as usize,
+                    vip_waiters: s.vip_waiters.load(Ordering::Relaxed) as usize,
                     max_inflight: s.max_inflight.load(Ordering::Relaxed),
                     max_context: s.max_context.load(Ordering::Relaxed),
+                }
+            })
+            .collect()
+    }
+
+    /// Get per-deployment queued waiter details for dashboard visibility.
+    pub fn get_queued_waiters(&self) -> Vec<QueuedWaiterStat> {
+        self.slots
+            .iter()
+            .map(|r| {
+                let s = r.value();
+                let q = s.queued_waiters.lock().unwrap();
+                // VIP entries first.
+                let mut entries: Vec<QueuedWaiterEntry> = q
+                    .iter()
+                    .filter(|w| w.is_vip)
+                    .map(|w| QueuedWaiterEntry {
+                        key_alias: w.key_alias.clone(),
+                        is_vip: true,
+                    })
+                    .collect();
+                entries.extend(
+                    q.iter()
+                        .filter(|w| !w.is_vip)
+                        .map(|w| QueuedWaiterEntry {
+                            key_alias: w.key_alias.clone(),
+                            is_vip: false,
+                        }),
+                );
+                QueuedWaiterStat {
+                    deployment_id: r.key().clone(),
+                    waiters: entries,
                 }
             })
             .collect()
@@ -216,14 +320,20 @@ impl DeploymentQueueInfo for FlowController {
             Some(slot) => {
                 let inflight = slot.current_inflight.load(Ordering::Relaxed) as u64;
                 let waiters = slot.waiters.load(Ordering::Relaxed) as u64;
-                inflight + waiters
+                let vip_waiters = slot.vip_waiters.load(Ordering::Relaxed) as u64;
+                inflight + waiters + vip_waiters
             }
             None => 0,
         }
     }
 }
 
-/// Attempt to atomically acquire a slot. Returns true if successful.
+/// Total waiters (VIP + normal).
+fn total_waiters(slot: &FlowControlSlot) -> usize {
+    (slot.waiters.load(Ordering::Relaxed) + slot.vip_waiters.load(Ordering::Relaxed)) as usize
+}
+
+/// Attempt to acquire a slot. Returns true if successful.
 fn try_acquire_slot(slot: &FlowControlSlot, context_chars: u64) -> bool {
     let max_inflight = slot.max_inflight.load(Ordering::Relaxed);
     let max_context = slot.max_context.load(Ordering::Relaxed);
@@ -245,8 +355,6 @@ fn try_acquire_slot(slot: &FlowControlSlot, context_chars: u64) -> bool {
     }
 
     // Both checks passed — increment counters.
-    // Note: this is not perfectly atomic (TOCTOU), but is acceptable for
-    // flow control: worst case we allow 1-2 extra requests beyond the limit.
     slot.current_inflight.fetch_add(1, Ordering::Relaxed);
     slot.current_context.fetch_add(context_chars, Ordering::Relaxed);
     true
@@ -268,8 +376,12 @@ impl Drop for FlowControlGuard {
         if let Some(slot) = self.slots.get(&self.deployment_id) {
             slot.current_inflight.fetch_sub(1, Ordering::Relaxed);
             slot.current_context.fetch_sub(self.context_chars, Ordering::Relaxed);
-            let waiter_count = slot.waiters.load(Ordering::Relaxed);
-            for _ in 0..waiter_count {
+
+            // Wake one waiter — VIP first.
+            let vip_count = slot.vip_waiters.load(Ordering::Relaxed);
+            if vip_count > 0 {
+                slot.vip_notify.notify_one();
+            } else if slot.waiters.load(Ordering::Relaxed) > 0 {
                 slot.notify.notify_one();
             }
         }

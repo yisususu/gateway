@@ -16,6 +16,12 @@ struct DeploymentMetrics {
     input_chars: AtomicU64,
 }
 
+/// Per-key in-flight metrics within a deployment.
+#[derive(Debug)]
+struct InFlightKeyMetrics {
+    request_count: AtomicU64,
+}
+
 /// Tracks in-flight requests per model and per deployment.
 ///
 /// Lives at `AppState` level — survives config reloads.
@@ -27,6 +33,9 @@ pub struct InFlightTracker {
     metrics: DashMap<String, InFlightMetrics>,
     /// `{model_name}\0{deployment_id}` → metrics (per-deployment tracking).
     deployment_metrics: DashMap<String, DeploymentMetrics>,
+    /// `{model_name}\0{deployment_id}\0{key_alias_or_hash}` → per-key metrics.
+    /// Used for dashboard tooltip showing which keys have active requests.
+    key_metrics: DashMap<String, InFlightKeyMetrics>,
 }
 
 /// Snapshot of in-flight stats for one model.
@@ -38,12 +47,21 @@ pub struct InFlightStat {
 }
 
 /// Snapshot of in-flight stats for one deployment.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DeploymentInFlightStat {
     pub model: String,
     pub deployment_id: String,
     pub inflight_requests: u64,
     pub inflight_input_chars: u64,
+    /// Per-key breakdown for dashboard tooltip.
+    pub key_stats: Vec<InFlightKeyStat>,
+}
+
+/// Per-key in-flight stats within a deployment.
+#[derive(Debug, Clone)]
+pub struct InFlightKeyStat {
+    pub key_alias: String,
+    pub request_count: u64,
 }
 
 /// RAII guard that decrements in-flight metrics on Drop.
@@ -57,6 +75,8 @@ pub struct InFlightGuard {
     input_chars: u64,
     /// Optional deployment_id for per-deployment tracking.
     deployment_key: Option<String>,
+    /// Optional key-level tracking key.
+    key_tracking_key: Option<String>,
 }
 
 impl InFlightTracker {
@@ -64,6 +84,7 @@ impl InFlightTracker {
         Self {
             metrics: DashMap::new(),
             deployment_metrics: DashMap::new(),
+            key_metrics: DashMap::new(),
         }
     }
 
@@ -105,11 +126,35 @@ impl InFlightTracker {
             .filter_map(|r| {
                 let key = r.key();
                 let (model, deployment_id) = key.split_once('\0')?;
+
+                // Collect per-key stats for this deployment.
+                let prefix = format!("{}\0{}\0", model, deployment_id);
+                let mut key_stats: Vec<InFlightKeyStat> = self
+                    .key_metrics
+                    .iter()
+                    .filter(|kr| kr.key().starts_with(&prefix))
+                    .filter_map(|kr| {
+                        let count = kr.value().request_count.load(Ordering::Relaxed);
+                        if count > 0 {
+                            let key_alias = kr.key()[prefix.len()..].to_string();
+                            Some(InFlightKeyStat {
+                                key_alias,
+                                request_count: count,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                // Sort by request count descending.
+                key_stats.sort_by(|a, b| b.request_count.cmp(&a.request_count));
+
                 Some(DeploymentInFlightStat {
                     model: model.to_string(),
                     deployment_id: deployment_id.to_string(),
                     inflight_requests: r.value().request_count.load(Ordering::Relaxed),
                     inflight_input_chars: r.value().input_chars.load(Ordering::Relaxed),
+                    key_stats,
                 })
             })
             .collect()
@@ -140,13 +185,13 @@ impl InFlightGuard {
             metrics.request_count.fetch_add(1, Ordering::Relaxed);
             metrics.input_chars.fetch_add(input_chars, Ordering::Relaxed);
         }
-        // metrics ref dropped here — safe to move tracker.
 
         Self {
             tracker,
             model: model.to_string(),
             input_chars,
             deployment_key: None,
+            key_tracking_key: None,
         }
     }
 
@@ -157,6 +202,18 @@ impl InFlightGuard {
         model: &str,
         deployment_id: &str,
         input_chars: u64,
+    ) -> Self {
+        Self::new_for_deployment_with_key(tracker, model, deployment_id, input_chars, None, "")
+    }
+
+    /// Acquire an in-flight slot with per-deployment and per-key tracking.
+    pub fn new_for_deployment_with_key(
+        tracker: Arc<InFlightTracker>,
+        model: &str,
+        deployment_id: &str,
+        input_chars: u64,
+        key_alias: Option<&str>,
+        key_hash: &str,
     ) -> Self {
         // Model-level tracking.
         {
@@ -185,11 +242,25 @@ impl InFlightGuard {
             dm.input_chars.fetch_add(input_chars, Ordering::Relaxed);
         }
 
+        // Key-level tracking.
+        let key_id = key_alias.unwrap_or(key_hash);
+        let key_tracking_key = format!("{}\0{}\0{}", model, deployment_id, key_id);
+        {
+            let km = tracker
+                .key_metrics
+                .entry(key_tracking_key.clone())
+                .or_insert_with(|| InFlightKeyMetrics {
+                    request_count: AtomicU64::new(0),
+                });
+            km.request_count.fetch_add(1, Ordering::Relaxed);
+        }
+
         Self {
             tracker,
             model: model.to_string(),
             input_chars,
             deployment_key: Some(deployment_key),
+            key_tracking_key: Some(key_tracking_key),
         }
     }
 }
@@ -207,6 +278,13 @@ impl Drop for InFlightGuard {
             if let Some(dm) = self.tracker.deployment_metrics.get(dk) {
                 dm.request_count.fetch_sub(1, Ordering::Relaxed);
                 dm.input_chars.fetch_sub(self.input_chars, Ordering::Relaxed);
+            }
+        }
+
+        // Decrement key-level metrics.
+        if let Some(ref kk) = self.key_tracking_key {
+            if let Some(km) = self.tracker.key_metrics.get(kk) {
+                km.request_count.fetch_sub(1, Ordering::Relaxed);
             }
         }
     }

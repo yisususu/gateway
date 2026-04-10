@@ -289,6 +289,7 @@ tr.filter-row td { padding: 2px 4px; background: var(--surface2); border-bottom:
 .badge-active { background: var(--success-bg); color: var(--success); }
 .badge-blocked { background: var(--danger-bg); color: var(--danger); }
 .badge-plan { background: var(--primary-bg); color: var(--primary); }
+.badge-vip { background: rgba(217,119,6,.12); color: #b45309; font-weight: 700; border: 1px solid rgba(217,119,6,.3); }
 
 /* ── Token stats ──────────────────────────────────────── */
 .token-stats { display: flex; gap: 16px; }
@@ -345,7 +346,7 @@ tr.filter-row td { padding: 2px 4px; background: var(--surface2); border-bottom:
   text-transform: none;
   padding: 8px 12px;
   border-radius: 6px;
-  white-space: normal;
+  white-space: pre-line;
   width: max-content;
   max-width: 320px;
   z-index: 200;

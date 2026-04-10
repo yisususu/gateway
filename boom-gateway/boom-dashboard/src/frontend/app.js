@@ -222,11 +222,31 @@
         .map(function (d) {
           var reqsDisplay = d.in_reqs_max > 0 ? d.in_reqs + " / " + d.in_reqs_max : String(d.in_reqs);
           var ctxDisplay = d.in_context_max > 0 ? d.in_context.toLocaleString() + " / " + d.in_context_max.toLocaleString() : d.in_context.toLocaleString();
+
+          // FC QUEUE tooltip — show queued key aliases (VIP first).
+          var fcQueueHtml = String(d.fc_queue);
+          if (d.fc_queue > 0 && d.queued_keys && d.queued_keys.length > 0) {
+            var items = d.queued_keys.map(function (k) {
+              var prefix = k.is_vip ? "[VIP] " : "";
+              return prefix + esc(k.key_alias || "?");
+            });
+            fcQueueHtml = '<span class="field-tip" data-tip="' + items.join("&#10;").replace(/"/g, "&quot;") + '">' + d.fc_queue + '</span>';
+          }
+
+          // IN-MODEL REQS tooltip — show per-key request counts.
+          var reqsHtml = reqsDisplay;
+          if (d.in_reqs > 0 && d.key_stats && d.key_stats.length > 0) {
+            var reqItems = d.key_stats.map(function (k) {
+              return esc(k.key_alias || "?") + ": " + k.request_count;
+            });
+            reqsHtml = '<span class="field-tip" data-tip="' + reqItems.join("&#10;").replace(/"/g, "&quot;") + '">' + reqsDisplay + '</span>';
+          }
+
           return (
             "<tr>" +
             "<td>" + esc(d.deployment_id ? d.model + ":" + d.deployment_id : d.model) + "</td>" +
-            "<td>" + d.fc_queue + "</td>" +
-            "<td>" + reqsDisplay + "</td>" +
+            "<td>" + fcQueueHtml + "</td>" +
+            "<td>" + reqsHtml + "</td>" +
             "<td>" + ctxDisplay + "</td>" +
             "</tr>"
           );
@@ -559,7 +579,11 @@
         <td>${formatCountdown(k.usage_reset_secs || 0)}</td>
         <td>$${(k.spend || 0).toFixed(4)}</td>
         <td>${k.max_budget != null ? "$" + k.max_budget : "-"}</td>
-        <td>${k.blocked ? '<span style="color:var(--danger)">Blocked</span>' : "Active"}</td>
+        <td>${k.blocked
+              ? '<span style="color:var(--danger)">Blocked</span>'
+              : (k.metadata && k.metadata.vip === true)
+                ? '<span class="badge badge-vip">Active(VIP)</span>'
+                : "Active"}</td>
         <td>
           <button class="btn-small" onclick="window._editKey('${esc(k.token_hash)}')">Edit</button>
           <button class="btn-small" onclick="window._resetKeyLimits('${esc(k.token_hash)}')">Reset Limits</button>
