@@ -42,13 +42,77 @@ impl AnthropicProvider {
     /// Convert our ChatCompletionRequest to Anthropic's format.
     fn to_anthropic_request(&self, req: &ChatCompletionRequest) -> serde_json::Value {
         let mut system_prompt = String::new();
+        let system_blocks: Vec<serde_json::Value> = Vec::new();
         let mut messages = Vec::new();
 
         for msg in &req.messages {
             match msg.role {
                 MessageRole::System => {
                     // Anthropic puts system as a top-level field.
-                    system_prompt = match &msg.content {
+                    match &msg.content {
+                        MessageContent::Text(t) => system_prompt = t.clone(),
+                        MessageContent::Parts(parts) => {
+                            system_prompt = parts
+                                .iter()
+                                .filter_map(|p| match p {
+                                    ContentPart::Text { text } => Some(text.as_str()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                        }
+                        MessageContent::Null => {}
+                    }
+                }
+                MessageRole::Assistant => {
+                    let mut content_blocks: Vec<serde_json::Value> = Vec::new();
+
+                    // Text content.
+                    match &msg.content {
+                        MessageContent::Text(t) if !t.is_empty() => {
+                            content_blocks
+                                .push(serde_json::json!({"type": "text", "text": t}));
+                        }
+                        MessageContent::Parts(parts) => {
+                            for p in parts {
+                                if let ContentPart::Text { text } = p {
+                                    content_blocks.push(
+                                        serde_json::json!({"type": "text", "text": text}),
+                                    );
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    // Tool calls → tool_use content blocks.
+                    if let Some(ref tool_calls) = msg.tool_calls {
+                        for tc in tool_calls {
+                            let input: serde_json::Value =
+                                serde_json::from_str(&tc.function.arguments)
+                                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                            content_blocks.push(serde_json::json!({
+                                "type": "tool_use",
+                                "id": tc.id,
+                                "name": tc.function.name,
+                                "input": input,
+                            }));
+                        }
+                    }
+
+                    // Ensure at least one content block (Anthropic requires non-empty content).
+                    if content_blocks.is_empty() {
+                        content_blocks.push(serde_json::json!({"type": "text", "text": ""}));
+                    }
+
+                    messages.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": content_blocks,
+                    }));
+                }
+                MessageRole::Tool => {
+                    // Tool result → user message with tool_result content block.
+                    let text = match &msg.content {
                         MessageContent::Text(t) => t.clone(),
                         MessageContent::Parts(parts) => parts
                             .iter()
@@ -57,9 +121,18 @@ impl AnthropicProvider {
                                 _ => None,
                             })
                             .collect::<Vec<_>>()
-                            .join("\n"),
+                            .join(""),
                         MessageContent::Null => String::new(),
                     };
+                    let tool_call_id = msg.tool_call_id.clone().unwrap_or_default();
+                    messages.push(serde_json::json!({
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": tool_call_id,
+                            "content": text,
+                        }],
+                    }));
                 }
                 _ => {
                     let content = match &msg.content {
@@ -72,11 +145,7 @@ impl AnthropicProvider {
                         MessageContent::Null => serde_json::json!([]),
                     };
                     messages.push(serde_json::json!({
-                        "role": match msg.role {
-                            MessageRole::User => "user",
-                            MessageRole::Assistant => "assistant",
-                            _ => "user",
-                        },
+                        "role": "user",
                         "content": content,
                     }));
                 }
@@ -89,8 +158,11 @@ impl AnthropicProvider {
             "max_tokens": req.max_completion_tokens.or(req.max_tokens).unwrap_or(4096),
         });
 
+        // System prompt.
         if !system_prompt.is_empty() {
             body["system"] = serde_json::json!(system_prompt);
+        } else if !system_blocks.is_empty() {
+            body["system"] = serde_json::json!(system_blocks);
         }
         if let Some(temp) = req.temperature {
             body["temperature"] = serde_json::json!(temp);
@@ -102,6 +174,46 @@ impl AnthropicProvider {
             body["n"] = serde_json::json!(n);
         }
 
+        // Stop sequences.
+        if let Some(ref stop) = req.stop {
+            let seqs: Vec<String> = match stop {
+                StopSequence::Single(s) => vec![s.clone()],
+                StopSequence::Multiple(v) => v.clone(),
+            };
+            body["stop_sequences"] = serde_json::json!(seqs);
+        }
+
+        // Tools: OpenAI format → Anthropic format.
+        if let Some(ref tools) = req.tools {
+            let anthropic_tools: Vec<serde_json::Value> = tools
+                .iter()
+                .map(|t| {
+                    let mut tool = serde_json::json!({
+                        "name": t.function.name,
+                        "input_schema": t.function.parameters,
+                    });
+                    if let Some(ref desc) = t.function.description {
+                        tool["description"] = serde_json::json!(desc);
+                    }
+                    tool
+                })
+                .collect();
+            body["tools"] = serde_json::json!(anthropic_tools);
+        }
+
+        // Tool choice.
+        if let Some(ref tc) = req.tool_choice {
+            body["tool_choice"] = serde_json::json!(tc);
+        }
+
+        // Forward extra fields: thinking, metadata, etc.
+        if let Some(thinking) = req.extra.get("thinking") {
+            body["thinking"] = thinking.clone();
+        }
+        if let Some(metadata) = req.extra.get("metadata") {
+            body["metadata"] = metadata.clone();
+        }
+
         body
     }
 
@@ -111,17 +223,41 @@ impl AnthropicProvider {
         resp: serde_json::Value,
         requested_model: &str,
     ) -> ChatCompletionResponse {
-        let content_blocks = resp
-            .get("content")
-            .and_then(|c| c.as_array())
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()).map(String::from))
-                    .collect::<Vec<_>>()
-                    .join("")
-            })
-            .unwrap_or_default();
+        let mut text_parts = Vec::new();
+        let mut tool_calls = Vec::new();
+
+        if let Some(blocks) = resp.get("content").and_then(|c| c.as_array()) {
+            for block in blocks {
+                let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match block_type {
+                    "text" => {
+                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                            text_parts.push(text.to_string());
+                        }
+                    }
+                    "tool_use" => {
+                        let id = block
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let name = block
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let input = block.get("input").cloned().unwrap_or(serde_json::json!({}));
+                        let arguments = serde_json::to_string(&input).unwrap_or_default();
+                        tool_calls.push(ToolCall {
+                            id,
+                            call_type: "function".to_string(),
+                            function: FunctionCall { name, arguments },
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         let stop_reason = resp
             .get("stop_reason")
@@ -138,6 +274,15 @@ impl AnthropicProvider {
             .and_then(|t| t.as_u64())
             .unwrap_or(0) as u32;
 
+        let finish_reason = stop_reason
+            .map(|r| match r.as_str() {
+                "tool_use" => "tool_calls".to_string(),
+                "end_turn" | "stop" => "stop".to_string(),
+                "max_tokens" => "length".to_string(),
+                other => other.to_string(),
+            })
+            .or_else(|| Some("stop".to_string()));
+
         ChatCompletionResponse {
             id: resp
                 .get("id")
@@ -151,12 +296,16 @@ impl AnthropicProvider {
                 index: 0,
                 message: Message {
                     role: MessageRole::Assistant,
-                    content: MessageContent::Text(content_blocks),
+                    content: MessageContent::Text(text_parts.join("")),
                     name: None,
-                    tool_calls: None,
+                    tool_calls: if tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(tool_calls)
+                    },
                     tool_call_id: None,
                 },
-                finish_reason: stop_reason.or_else(|| Some("stop".to_string())),
+                finish_reason,
                 logprobs: None,
             }],
             usage: Usage {
@@ -257,6 +406,12 @@ impl Provider for AnthropicProvider {
             let response_id = generate_response_id();
             let created = now_timestamp();
 
+            // Track open content blocks by index for proper tool_use handling.
+            // Maps content_block index → block type ("text" or "tool_use").
+            let mut block_types: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+            // Maps tool_use content_block index → tool_call_id.
+            let mut tool_ids: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
                     Ok(bytes) => {
@@ -281,16 +436,23 @@ impl Provider for AnthropicProvider {
                                 continue;
                             }
 
+                            let data: serde_json::Value = match serde_json::from_str(&data_str) {
+                                Ok(d) => d,
+                                Err(_) => continue,
+                            };
+
                             match event_type.as_str() {
-                                "content_block_delta" => {
-                                    if let Ok(data) =
-                                        serde_json::from_str::<serde_json::Value>(&data_str)
-                                    {
-                                        let text = data
-                                            .get("delta")
-                                            .and_then(|d| d.get("text"))
-                                            .and_then(|t| t.as_str())
-                                            .unwrap_or("");
+                                "content_block_start" => {
+                                    let idx = data.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
+                                    let block = data.get("content_block").unwrap_or(&serde_json::Value::Null);
+                                    let btype = block.get("type").and_then(|t| t.as_str()).unwrap_or("text").to_string();
+                                    block_types.insert(idx, btype.clone());
+
+                                    // For tool_use blocks, record id and emit a tool_call delta.
+                                    if btype == "tool_use" {
+                                        let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                                        let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                                        tool_ids.insert(idx, id.clone());
 
                                         let chunk = ChatStreamChunk {
                                             id: response_id.clone(),
@@ -301,8 +463,16 @@ impl Provider for AnthropicProvider {
                                                 index: 0,
                                                 delta: StreamDelta {
                                                     role: None,
-                                                    content: Some(text.to_string()),
-                                                    tool_calls: None,
+                                                    content: None,
+                                                    tool_calls: Some(vec![ToolCallDelta {
+                                                        index: idx,
+                                                        id: Some(id),
+                                                        call_type: Some("function".to_string()),
+                                                        function: Some(FunctionCallDelta {
+                                                            name: Some(name),
+                                                            arguments: Some(String::new()),
+                                                        }),
+                                                    }]),
                                                 },
                                                 finish_reason: None,
                                             }],
@@ -312,14 +482,125 @@ impl Provider for AnthropicProvider {
                                             return;
                                         }
                                     }
+                                    // Text blocks: nothing to emit on start.
+                                }
+                                "content_block_delta" => {
+                                    let idx = data.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
+                                    let delta = data.get("delta").unwrap_or(&serde_json::Value::Null);
+                                    let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+                                    match delta_type {
+                                        "text_delta" => {
+                                            let text = delta.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                                            if !text.is_empty() {
+                                                let chunk = ChatStreamChunk {
+                                                    id: response_id.clone(),
+                                                    object: "chat.completion.chunk".to_string(),
+                                                    created,
+                                                    model: model.clone(),
+                                                    choices: vec![StreamChoice {
+                                                        index: 0,
+                                                        delta: StreamDelta {
+                                                            role: None,
+                                                            content: Some(text.to_string()),
+                                                            tool_calls: None,
+                                                        },
+                                                        finish_reason: None,
+                                                    }],
+                                                    usage: None,
+                                                };
+                                                if tx.send(Ok(Some(chunk))).await.is_err() {
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                        "input_json_delta" => {
+                                            // Tool argument fragment.
+                                            let partial = delta.get("partial_json").and_then(|p| p.as_str()).unwrap_or("");
+                                            let chunk = ChatStreamChunk {
+                                                id: response_id.clone(),
+                                                object: "chat.completion.chunk".to_string(),
+                                                created,
+                                                model: model.clone(),
+                                                choices: vec![StreamChoice {
+                                                    index: 0,
+                                                    delta: StreamDelta {
+                                                        role: None,
+                                                        content: None,
+                                                        tool_calls: Some(vec![ToolCallDelta {
+                                                            index: idx,
+                                                            id: None,
+                                                            call_type: None,
+                                                            function: Some(FunctionCallDelta {
+                                                                name: None,
+                                                                arguments: Some(partial.to_string()),
+                                                            }),
+                                                        }]),
+                                                    },
+                                                    finish_reason: None,
+                                                }],
+                                                usage: None,
+                                            };
+                                            if tx.send(Ok(Some(chunk))).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                "message_delta" => {
+                                    // Final event: stop_reason + usage.
+                                    let stop_reason = data
+                                        .get("delta")
+                                        .and_then(|d| d.get("stop_reason"))
+                                        .and_then(|s| s.as_str());
+                                    let finish_reason = stop_reason.map(|r| match r {
+                                        "tool_use" => "tool_calls".to_string(),
+                                        "end_turn" | "stop" => "stop".to_string(),
+                                        "max_tokens" => "length".to_string(),
+                                        other => other.to_string(),
+                                    });
+
+                                    let usage_data = data.get("usage");
+                                    let output_tokens = usage_data
+                                        .and_then(|u| u.get("output_tokens"))
+                                        .and_then(|t| t.as_u64())
+                                        .unwrap_or(0) as i32;
+
+                                    let chunk = ChatStreamChunk {
+                                        id: response_id.clone(),
+                                        object: "chat.completion.chunk".to_string(),
+                                        created,
+                                        model: model.clone(),
+                                        choices: vec![StreamChoice {
+                                            index: 0,
+                                            delta: StreamDelta {
+                                                role: None,
+                                                content: None,
+                                                tool_calls: None,
+                                            },
+                                            finish_reason,
+                                        }],
+                                        usage: Some(StreamUsage {
+                                            prompt_tokens: None,
+                                            completion_tokens: Some(output_tokens),
+                                            total_tokens: None,
+                                        }),
+                                    };
+                                    if tx.send(Ok(Some(chunk))).await.is_err() {
+                                        return;
+                                    }
+                                }
+                                "message_start" => {
+                                    // Extract input_tokens from message_start for usage tracking.
+                                    // No chunk emitted — role is set on first content.
                                 }
                                 "message_stop" => {
                                     let _ = tx.send(Ok(None)).await;
                                     return;
                                 }
-                                "message_start" | "message_delta" | "content_block_start"
-                                | "content_block_stop" | "ping" => {
-                                    // Forward relevant events, skip others.
+                                "content_block_stop" | "ping" => {
+                                    // No action needed.
                                 }
                                 _ => {}
                             }

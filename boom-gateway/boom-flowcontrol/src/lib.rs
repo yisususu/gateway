@@ -268,8 +268,9 @@ impl Drop for FlowControlGuard {
         if let Some(slot) = self.slots.get(&self.deployment_id) {
             slot.current_inflight.fetch_sub(1, Ordering::Relaxed);
             slot.current_context.fetch_sub(self.context_chars, Ordering::Relaxed);
-            if slot.waiters.load(Ordering::Relaxed) > 0 {
-                slot.notify.notify_waiters();
+            let waiter_count = slot.waiters.load(Ordering::Relaxed);
+            for _ in 0..waiter_count {
+                slot.notify.notify_one();
             }
         }
     }
