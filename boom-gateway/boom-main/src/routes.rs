@@ -1112,32 +1112,121 @@ fn sse_stream_from_chat_stream(
     usage: UsageTracker,
     debug: bool,
 ) -> impl futures::Stream<Item = Result<Event, Infallible>> {
-    stream.map(move |result| match result {
-        Ok(chunk) => {
-            if debug {
-                debug_append("STREAM CHUNK", &serde_json::to_string(&chunk).unwrap_or_default());
-            }
-            // Extract usage from the last chunk (OpenAI sends usage in the final chunk).
-            if let Some(ref u) = chunk.usage {
-                if let Ok(mut g) = usage.lock() {
-                    g.0 = u.prompt_tokens;
-                    g.1 = u.completion_tokens;
+    let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
+    tokio::spawn(async move {
+        let mut tool_arg_buf: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        let mut stream = std::pin::pin!(stream);
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(mut chunk) => {
+                    if debug {
+                        debug_append("STREAM CHUNK", &serde_json::to_string(&chunk).unwrap_or_default());
+                    }
+                    if let Some(ref u) = chunk.usage {
+                        if let Ok(mut g) = usage.lock() {
+                            g.0 = u.prompt_tokens;
+                            g.1 = u.completion_tokens;
+                        }
+                    }
+
+                    let has_finish = chunk.choices.iter().any(|c| c.finish_reason.is_some());
+
+                    // Buffer tool_call arguments, suppressing incremental deltas.
+                    // vLLM quirk: incremental fragments may be incomplete (missing
+                    // closing '}'), and the finish chunk repeats the complete JSON.
+                    // By buffering and flushing the canonical complete version at
+                    // finish, we ensure the client always receives valid JSON.
+                    for choice in &mut chunk.choices {
+                        if let Some(ref mut tool_calls) = choice.delta.tool_calls {
+                            for tc in tool_calls.iter_mut() {
+                                if let Some(ref mut func) = tc.function {
+                                    if let Some(ref args) = func.arguments.clone() {
+                                        if !args.is_empty() {
+                                            let is_complete = args.starts_with('{')
+                                                && serde_json::from_str::<serde_json::Value>(args).is_ok();
+                                            let has_existing = tool_arg_buf.get(&tc.index).map_or(false, |e| !e.is_empty());
+
+                                            if is_complete && has_existing {
+                                                // vLLM duplicate: replace buffer with canonical complete JSON.
+                                                tool_arg_buf.insert(tc.index, args.clone());
+                                            } else {
+                                                // Normal incremental fragment: append to buffer.
+                                                tool_arg_buf
+                                                    .entry(tc.index)
+                                                    .or_default()
+                                                    .push_str(&args);
+                                            }
+                                            // Suppress this delta — we'll flush the buffer at finish.
+                                            func.arguments = None;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Emit the chunk (argument deltas suppressed).
+                    let data = serde_json::to_string(&chunk).unwrap_or_default();
+                    if tx.send(Event::default().data(data)).await.is_err() {
+                        return;
+                    }
+
+                    // At finish, flush buffered arguments as a single delta per tool call.
+                    if has_finish {
+                        let mut indices: Vec<u32> = tool_arg_buf.keys().copied().collect();
+                        indices.sort();
+                        for idx in indices {
+                            if let Some(buf) = tool_arg_buf.get(&idx) {
+                                if !buf.is_empty() {
+                                    let flush_chunk = ChatStreamChunk {
+                                        id: chunk.id.clone(),
+                                        object: "chat.completion.chunk".to_string(),
+                                        created: chunk.created,
+                                        model: chunk.model.clone(),
+                                        choices: vec![StreamChoice {
+                                            index: 0,
+                                            delta: StreamDelta {
+                                                role: None,
+                                                content: None,
+                                                tool_calls: Some(vec![ToolCallDelta {
+                                                    index: idx,
+                                                    id: None,
+                                                    call_type: None,
+                                                    function: Some(FunctionCallDelta {
+                                                        name: None,
+                                                        arguments: Some(buf.clone()),
+                                                    }),
+                                                }]),
+                                                reasoning_content: None,
+                                            },
+                                            finish_reason: None,
+                                        }],
+                                        usage: None,
+                                    };
+                                    let data = serde_json::to_string(&flush_chunk).unwrap_or_default();
+                                    if tx.send(Event::default().data(data)).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        tool_arg_buf.clear();
+                    }
+                }
+                Err(e) => {
+                    if debug {
+                        debug_append("STREAM ERROR", &e.to_string());
+                    }
+                    tracing::error!("SSE stream error (OpenAI): {}", e);
+                    let error_data =
+                        serde_json::to_string(&serde_json::json!({"error": "Upstream error"}))
+                            .unwrap_or_default();
+                    let _ = tx.send(Event::default().data(error_data)).await;
                 }
             }
-            let data = serde_json::to_string(&chunk).unwrap_or_default();
-            Ok(Event::default().data(data))
         }
-        Err(e) => {
-            if debug {
-                debug_append("STREAM ERROR", &e.to_string());
-            }
-            tracing::error!("SSE stream error (OpenAI): {}", e);
-            let error_data =
-                serde_json::to_string(&serde_json::json!({"error": "Upstream error"}))
-                    .unwrap_or_default();
-            Ok(Event::default().data(error_data))
-        }
-    })
+    });
+    tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok)
 }
 
 // ============================================================
