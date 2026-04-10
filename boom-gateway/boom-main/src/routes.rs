@@ -71,6 +71,29 @@ fn new_request_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+// ═══════════════════════════════════════════════════════════
+// Debug logging — dump full request/response for specific keys
+// ═══════════════════════════════════════════════════════════
+
+const DEBUG_KEY_PATTERN: &str = "l00882395";
+
+fn is_debug_key(key_alias: Option<&str>) -> bool {
+    key_alias.map(|a| a.contains(DEBUG_KEY_PATTERN)).unwrap_or(false)
+}
+
+fn debug_append(label: &str, data: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("reqs.log")
+    {
+        let ts = chrono::Utc::now().to_rfc3339();
+        let _ = writeln!(f, "\n===== {} {} =====\n{}", ts, label, data);
+        let _ = f.flush();
+    }
+}
+
 // ============================================================
 // InFlightStream — wraps a stream with an InFlightGuard so the
 // guard is released when the stream is fully consumed or dropped.
@@ -175,6 +198,11 @@ async fn chat_completions_inner(
 
     tracing::info!(request_id = %request_id, model = %model, stream = is_stream, path = api_path, "chat_completions request started");
 
+    let debug = is_debug_key(identity.key_alias.as_deref());
+    if debug {
+        debug_append("REQUEST", &serde_json::to_string(&req).unwrap_or_default());
+    }
+
     // 1. Model access check (deployment-aware, alias-aware).
     check_model_access(identity, &req.model, &state.router)
         .map_err(|e| {
@@ -268,7 +296,7 @@ async fn chat_completions_inner(
         })?;
         reset_deployment_failure(&state, &deployment_id);
         let usage = UsageTracker::default();
-        let sse_stream = sse_stream_from_chat_stream(stream, usage.clone());
+        let sse_stream = sse_stream_from_chat_stream(stream, usage.clone(), debug);
         let inflight_guard = if let Some(ref did) = deployment_id {
             InFlightGuard::new_for_deployment(state.inflight.clone(), &inflight_model, did, input_chars as u64)
         } else {
@@ -1023,9 +1051,13 @@ fn log_request_summary(
 fn sse_stream_from_chat_stream(
     stream: ChatStream,
     usage: UsageTracker,
+    debug: bool,
 ) -> impl futures::Stream<Item = Result<Event, Infallible>> {
     stream.map(move |result| match result {
         Ok(chunk) => {
+            if debug {
+                debug_append("STREAM CHUNK", &serde_json::to_string(&chunk).unwrap_or_default());
+            }
             // Extract usage from the last chunk (OpenAI sends usage in the final chunk).
             if let Some(ref u) = chunk.usage {
                 if let Ok(mut g) = usage.lock() {
@@ -1037,6 +1069,9 @@ fn sse_stream_from_chat_stream(
             Ok(Event::default().data(data))
         }
         Err(e) => {
+            if debug {
+                debug_append("STREAM ERROR", &e.to_string());
+            }
             tracing::error!("SSE stream error (OpenAI): {}", e);
             let error_data =
                 serde_json::to_string(&serde_json::json!({"error": "Upstream error"}))
@@ -1064,6 +1099,11 @@ pub async fn messages(
     let is_stream = openai_req.stream.unwrap_or(false);
 
     tracing::info!(request_id = %request_id, model = %model, stream = is_stream, "messages request started");
+
+    let debug = is_debug_key(identity.key_alias.as_deref());
+    if debug {
+        debug_append("REQUEST (anthropic)", &serde_json::to_string(&req).unwrap_or_default());
+    }
 
     // 1. Model access check (deployment-aware, alias-aware).
     check_model_access(identity, &openai_req.model, &state.router)
@@ -1157,7 +1197,7 @@ pub async fn messages(
         })?;
         reset_deployment_failure(&state, &deployment_id);
         let usage = UsageTracker::default();
-        let sse_stream = sse_stream_from_anthropic_chat_stream(stream, model.clone(), usage.clone());
+        let sse_stream = sse_stream_from_anthropic_chat_stream(stream, model.clone(), usage.clone(), debug);
         let inflight_guard = if let Some(ref did) = deployment_id {
             InFlightGuard::new_for_deployment(state.inflight.clone(), &inflight_model, did, input_chars as u64)
         } else {
@@ -1239,6 +1279,7 @@ fn sse_stream_from_anthropic_chat_stream(
     stream: ChatStream,
     model: String,
     usage: UsageTracker,
+    debug: bool,
 ) -> impl futures::Stream<Item = Result<Event, Infallible>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
 
@@ -1249,6 +1290,9 @@ fn sse_stream_from_anthropic_chat_stream(
         while let Some(result) = stream.next().await {
             match result {
                 Ok(chunk) => {
+                    if debug {
+                        debug_append("STREAM CHUNK (anthropic)", &serde_json::to_string(&chunk).unwrap_or_default());
+                    }
                     // Extract usage from the chunk (OpenAI sends usage in the final chunk).
                     if let Some(ref u) = chunk.usage {
                         if let Ok(mut g) = usage.lock() {
@@ -1267,7 +1311,9 @@ fn sse_stream_from_anthropic_chat_stream(
                     }
                 }
                 Err(e) => {
-                    tracing::error!("SSE stream error (Anthropic): {}", e);
+                    if debug {
+                        debug_append("STREAM ERROR (anthropic)", &e.to_string());
+                    }
                     let error_data = serde_json::json!({
                         "type": "error",
                         "error": { "type": "api_error", "message": "Upstream error" }
