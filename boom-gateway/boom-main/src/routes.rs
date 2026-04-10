@@ -1351,6 +1351,11 @@ fn sse_stream_from_anthropic_chat_stream(
                         }
                     }
                     let events = transcoder.transcode(&chunk);
+                    for ev in &events {
+                        if debug {
+                            debug_append("ANTHROPIC SSE", &format!("event: {} | data: {}", ev.event, ev.data));
+                        }
+                    }
                     for ev in events {
                         let axum_event = Event::default()
                             .event(&ev.event)
