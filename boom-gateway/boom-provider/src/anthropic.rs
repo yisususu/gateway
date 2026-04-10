@@ -407,10 +407,9 @@ impl Provider for AnthropicProvider {
             let created = now_timestamp();
 
             // Track open content blocks by index for proper tool_use handling.
-            // Maps content_block index → block type ("text" or "tool_use").
-            let mut block_types: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
-            // Maps tool_use content_block index → tool_call_id.
-            let mut tool_ids: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+            // Maps Anthropic content_block index → OpenAI tool_call index (0-based).
+            let mut tool_index_map: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+            let mut next_tool_index: u32 = 0;
 
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
@@ -446,13 +445,14 @@ impl Provider for AnthropicProvider {
                                     let idx = data.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
                                     let block = data.get("content_block").unwrap_or(&serde_json::Value::Null);
                                     let btype = block.get("type").and_then(|t| t.as_str()).unwrap_or("text").to_string();
-                                    block_types.insert(idx, btype.clone());
 
                                     // For tool_use blocks, record id and emit a tool_call delta.
                                     if btype == "tool_use" {
                                         let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
                                         let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-                                        tool_ids.insert(idx, id.clone());
+                                        let openai_idx = next_tool_index;
+                                        tool_index_map.insert(idx, openai_idx);
+                                        next_tool_index += 1;
 
                                         let chunk = ChatStreamChunk {
                                             id: response_id.clone(),
@@ -465,7 +465,7 @@ impl Provider for AnthropicProvider {
                                                     role: None,
                                                     content: None,
                                                     tool_calls: Some(vec![ToolCallDelta {
-                                                        index: idx,
+                                                        index: openai_idx,
                                                         id: Some(id),
                                                         call_type: Some("function".to_string()),
                                                         function: Some(FunctionCallDelta {
@@ -517,6 +517,7 @@ impl Provider for AnthropicProvider {
                                         "input_json_delta" => {
                                             // Tool argument fragment.
                                             let partial = delta.get("partial_json").and_then(|p| p.as_str()).unwrap_or("");
+                                            let openai_idx = tool_index_map.get(&idx).copied().unwrap_or(idx);
                                             let chunk = ChatStreamChunk {
                                                 id: response_id.clone(),
                                                 object: "chat.completion.chunk".to_string(),
@@ -528,7 +529,7 @@ impl Provider for AnthropicProvider {
                                                         role: None,
                                                         content: None,
                                                         tool_calls: Some(vec![ToolCallDelta {
-                                                            index: idx,
+                                                            index: openai_idx,
                                                             id: None,
                                                             call_type: None,
                                                             function: Some(FunctionCallDelta {
