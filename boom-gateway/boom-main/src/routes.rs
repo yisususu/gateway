@@ -261,6 +261,7 @@ async fn chat_completions_inner(
         .ok_or_else(|| {
             let e = GatewayError::ModelNotFound(req.model.clone());
             log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()), None);
+            rollback_plan_quota(&state.limiter, &rl_info);
             GatewayErrorReply(e, false)
         })?;
 
@@ -292,6 +293,7 @@ async fn chat_completions_inner(
         let stream = provider.chat_stream(req).await.map_err(|e| {
             log_error(&state, &identity, &model, api_path, true, start, &e, Some(request_id.clone()), deployment_id.clone());
             record_deployment_failure(&state, &deployment_id, &model, &e);
+            rollback_plan_quota(&state.limiter, &rl_info);
             GatewayErrorReply(e, true)
         })?;
         reset_deployment_failure(&state, &deployment_id);
@@ -340,6 +342,7 @@ async fn chat_completions_inner(
         let response = provider.chat(req).await.map_err(|e| {
             log_error(&state, &identity, &model, api_path, false, start, &e, Some(request_id.clone()), deployment_id.clone());
             record_deployment_failure(&state, &deployment_id, &model, &e);
+            rollback_plan_quota(&state.limiter, &rl_info);
             GatewayErrorReply(e, false)
         })?;
         reset_deployment_failure(&state, &deployment_id);
@@ -896,6 +899,16 @@ struct RateLimitInfo {
     concurrency: u32,
     /// Concurrency limit (if plan has one).
     concurrency_limit: Option<u32>,
+    /// Info needed to rollback plan window counters if the upstream request fails.
+    /// RPM counters are never rolled back (DDoS protection).
+    plan_rollback: Option<PlanRollback>,
+}
+
+/// Carries the info needed to rollback plan window counters on upstream failure.
+struct PlanRollback {
+    key: RateLimitKey,
+    window_limits: Vec<(u64, u64)>,
+    weight: u64,
 }
 
 /// Resolve the quota weight for a model, handling alias resolution.
@@ -905,6 +918,20 @@ fn resolve_quota_weight(model: &str, state: &AppState) -> u64 {
     let resolved = state.router.resolve_model(model)
         .unwrap_or_else(|| model.to_string());
     state.deployment_store.get_quota_ratio(&resolved)
+}
+
+/// Rollback plan window counters when an upstream request fails.
+/// RPM counters are NOT rolled back (DDoS protection).
+fn rollback_plan_quota(limiter: &Arc<boom_limiter::SlidingWindowLimiter>, rl_info: &RateLimitInfo) {
+    if let Some(ref rollback) = rl_info.plan_rollback {
+        tracing::debug!(
+            key = ?rollback.key,
+            windows = rollback.window_limits.len(),
+            weight = rollback.weight,
+            "Rolling back plan window counters (upstream failure)"
+        );
+        limiter.rollback_plan_windows(&rollback.key, &rollback.window_limits, rollback.weight);
+    }
 }
 
 /// Check plan-based limits if a plan is assigned, otherwise fall back to
@@ -975,6 +1002,14 @@ async fn check_plan_or_default_limits(
                 rpm_limit: decision.limit,
                 concurrency,
                 concurrency_limit,
+                plan_rollback: Some(PlanRollback {
+                    key: RateLimitKey {
+                        key_hash: key_hash.to_string(),
+                        model: "__plan__".to_string(),
+                    },
+                    window_limits: window_limits.clone(),
+                    weight,
+                }),
             }))
         }
         None => {
@@ -1005,6 +1040,18 @@ async fn check_plan_or_default_limits(
                 rpm_limit: decision.limit,
                 concurrency: 0,
                 concurrency_limit: None,
+                plan_rollback: if window_limits.is_empty() {
+                    None
+                } else {
+                    Some(PlanRollback {
+                        key: RateLimitKey {
+                            key_hash: key_hash.to_string(),
+                            model: model.to_string(),
+                        },
+                        window_limits: window_limits.to_vec(),
+                        weight,
+                    })
+                },
             }))
         }
     }
@@ -1162,6 +1209,7 @@ pub async fn messages(
         .ok_or_else(|| {
             let e = GatewayError::ModelNotFound(openai_req.model.clone());
             log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()), None);
+            rollback_plan_quota(&state.limiter, &rl_info);
             AnthropicErrorReply(e, is_stream)
         })?;
 
@@ -1193,6 +1241,7 @@ pub async fn messages(
         let stream = provider.chat_stream(openai_req).await.map_err(|e| {
             log_error(&state, &identity, &model, "/v1/messages", true, start, &e, Some(request_id.clone()), deployment_id.clone());
             record_deployment_failure(&state, &deployment_id, &model, &e);
+            rollback_plan_quota(&state.limiter, &rl_info);
             AnthropicErrorReply(e, true)
         })?;
         reset_deployment_failure(&state, &deployment_id);
@@ -1240,6 +1289,7 @@ pub async fn messages(
         let response = provider.chat(openai_req).await.map_err(|e| {
             log_error(&state, &identity, &model, "/v1/messages", false, start, &e, Some(request_id.clone()), deployment_id.clone());
             record_deployment_failure(&state, &deployment_id, &model, &e);
+            rollback_plan_quota(&state.limiter, &rl_info);
             AnthropicErrorReply(e, false)
         })?;
         reset_deployment_failure(&state, &deployment_id);

@@ -119,6 +119,32 @@ impl SlidingWindowLimiter {
             });
     }
 
+    /// Decrement a single window counter by `weight` (undo a previous record).
+    /// Used to rollback plan window counters when an upstream request fails
+    /// after the rate limit check passed.
+    fn unrecord_window(&self, cache_key: &str, weight: u64) {
+        self.windows
+            .entry(cache_key.to_string())
+            .and_modify(|c| {
+                c.count = c.count.saturating_sub(weight);
+            });
+    }
+
+    /// Rollback plan window counters for a rate limit key.
+    /// Call this when an upstream request fails after `check_and_record` already
+    /// incremented the counters. RPM counters are NOT rolled back (DDoS protection).
+    pub fn rollback_plan_windows(
+        &self,
+        key: &RateLimitKey,
+        window_limits: &[(u64, u64)],
+        weight: u64,
+    ) {
+        for &(_, window_secs) in window_limits {
+            let win_key = Self::cache_key(key, window_secs);
+            self.unrecord_window(&win_key, weight);
+        }
+    }
+
     // ── Read-only query methods (for dashboard) ────────────
 
     /// Read the current counter for a specific cache key.
