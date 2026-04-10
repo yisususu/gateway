@@ -1041,6 +1041,7 @@
 
   function showEditKeyModal(key) {
     const existingModels = Array.isArray(key.models) ? key.models : [];
+    const isVip = key.metadata && key.metadata.vip === true;
     showModal(`
       <h3>Edit Key</h3>
       <div class="form-group"><label>Alias ${tip("Human-readable name for this key.")}</label><input id="m-edit-alias" value="${esc(key.key_alias || "")}"></div>
@@ -1048,6 +1049,7 @@
       <div class="form-group"><label>Models ${tip("Select model access. Check 'all-team-models' for full access, or pick specific models.")}</label><div class="model-check-combo" id="m-edit-models-combo"></div></div>
       <div class="form-group"><label>Max Budget ${tip("Maximum budget in USD. Leave empty for unlimited.")}</label><input id="m-edit-budget" type="number" step="0.01" value="${key.max_budget != null ? key.max_budget : ""}"></div>
       <div class="form-group"><label>RPM Limit ${tip("Per-key RPM override. Leave empty to use plan limits.")}</label><input id="m-edit-rpm" type="number" value="${key.rpm_limit || ""}"></div>
+      <div class="form-group"><label>VIP ${tip("VIP keys get priority in flow control queues when deployments are at capacity.")}</label><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="m-edit-vip" ${isVip ? "checked" : ""}><span style="font-weight:600;color:#b45309">Priority queue access</span></label></div>
       <div class="modal-actions">
         <button class="btn-secondary" onclick="hideModal()" style="width:auto">Cancel</button>
         <button class="btn-primary" id="m-edit-submit">Save</button>
@@ -1063,12 +1065,16 @@
         const aliasVal = document.getElementById("m-edit-alias").value.trim();
         const userVal = document.getElementById("m-edit-user").value.trim();
         const modelsVal = getComboModels("m-edit-models-combo");
+        const vipChecked = document.getElementById("m-edit-vip").checked;
+        // Preserve existing metadata fields, only update vip flag.
+        const existingMeta = key.metadata && typeof key.metadata === "object" ? key.metadata : {};
         const body = {
           key_alias: aliasVal || null,
           user_id: userVal || null,
           models: modelsVal,
           max_budget: document.getElementById("m-edit-budget").value ? Number(document.getElementById("m-edit-budget").value) : null,
           rpm_limit: document.getElementById("m-edit-rpm").value ? Number(document.getElementById("m-edit-rpm").value) : null,
+          metadata: Object.assign({}, existingMeta, { vip: vipChecked }),
         };
         await api(`/admin/keys/${encodeURIComponent(key.token_hash)}`, {
           method: "PUT",
