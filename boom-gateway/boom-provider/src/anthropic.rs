@@ -1,4 +1,5 @@
 use crate::{generate_response_id, now_timestamp};
+use boom_core::normalize;
 use boom_core::provider::Provider;
 use boom_core::types::*;
 use boom_core::GatewayError;
@@ -19,6 +20,7 @@ pub struct AnthropicProvider {
     base_url: String,
     model: String,
     deployment_id: Option<String>,
+    api_version: String,
 }
 
 impl AnthropicProvider {
@@ -36,38 +38,77 @@ impl AnthropicProvider {
                 .unwrap_or_else(|| "https://api.anthropic.com/v1".to_string()),
             model: model.to_string(),
             deployment_id,
+            api_version: "2023-06-01".to_string(),
         }
+    }
+
+    pub fn with_api_version(mut self, version: String) -> Self {
+        self.api_version = version;
+        self
+    }
+
+    /// Whether the request includes extended thinking parameters.
+    fn has_thinking(&self, req: &ChatCompletionRequest) -> bool {
+        req.extra.contains_key("thinking")
+    }
+
+    /// Build the set of beta headers needed for the request.
+    fn beta_headers(&self, req: &ChatCompletionRequest) -> Vec<&'static str> {
+        let mut betas = Vec::new();
+        if self.has_thinking(req) {
+            betas.push("prompt-caching-2024-07-31");
+            betas.push("extended-thinking-2025-04-11");
+        }
+        betas
     }
 
     /// Convert our ChatCompletionRequest to Anthropic's format.
     fn to_anthropic_request(&self, req: &ChatCompletionRequest) -> serde_json::Value {
-        let mut system_prompt = String::new();
-        let system_blocks: Vec<serde_json::Value> = Vec::new();
-        let mut messages = Vec::new();
+        let mut system_blocks: Vec<serde_json::Value> = Vec::new();
+        let mut messages: Vec<serde_json::Value> = Vec::new();
 
-        for msg in &req.messages {
+        // Build a mutable copy of messages for role-alternation normalization.
+        let mut req_messages = req.messages.clone();
+
+        // Apply role alternation to ensure Anthropic-compatible alternating
+        // user/assistant roles (after system messages are extracted).
+        normalize::ensure_role_alternation(&mut req_messages);
+
+        for msg in &req_messages {
             match msg.role {
                 MessageRole::System => {
-                    // Anthropic puts system as a top-level field.
+                    // Anthropic puts system as a top-level field — always use
+                    // the array form to support cache_control.
                     match &msg.content {
-                        MessageContent::Text(t) => system_prompt = t.clone(),
-                        MessageContent::Parts(parts) => {
-                            system_prompt = parts
-                                .iter()
-                                .filter_map(|p| match p {
-                                    ContentPart::Text { text } => Some(text.as_str()),
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n");
+                        MessageContent::Text(t) if !t.is_empty() => {
+                            system_blocks.push(serde_json::json!({
+                                "type": "text",
+                                "text": t,
+                            }));
                         }
-                        MessageContent::Null => {}
+                        MessageContent::Parts(parts) => {
+                            for p in parts {
+                                match p {
+                                    ContentPart::Text { text } => {
+                                        system_blocks.push(serde_json::json!({
+                                            "type": "text",
+                                            "text": text,
+                                        }));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        _ => {}
                     }
+                    // Note: cache_control for system blocks can be carried via
+                    // extra fields on the request. The system block format already
+                    // supports cache_control at the Anthropic API level.
                 }
                 MessageRole::Assistant => {
                     let mut content_blocks: Vec<serde_json::Value> = Vec::new();
 
-                    // Text content.
+                    // Text and reasoning content.
                     match &msg.content {
                         MessageContent::Text(t) if !t.is_empty() => {
                             content_blocks
@@ -75,10 +116,19 @@ impl AnthropicProvider {
                         }
                         MessageContent::Parts(parts) => {
                             for p in parts {
-                                if let ContentPart::Text { text } = p {
-                                    content_blocks.push(
-                                        serde_json::json!({"type": "text", "text": text}),
-                                    );
+                                match p {
+                                    ContentPart::Text { text } => {
+                                        content_blocks.push(
+                                            serde_json::json!({"type": "text", "text": text}),
+                                        );
+                                    }
+                                    ContentPart::Reasoning { reasoning } => {
+                                        content_blocks.push(serde_json::json!({
+                                            "type": "thinking",
+                                            "thinking": reasoning,
+                                        }));
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -124,14 +174,24 @@ impl AnthropicProvider {
                             .join(""),
                         MessageContent::Null => String::new(),
                     };
+                    // Check if content starts with [ERROR] marker from our conversion.
+                    let (content_text, is_error) = if text.starts_with("[ERROR] ") {
+                        (text.trim_start_matches("[ERROR] ").to_string(), true)
+                    } else {
+                        (text, false)
+                    };
                     let tool_call_id = msg.tool_call_id.clone().unwrap_or_default();
+                    let mut result = serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": tool_call_id,
+                        "content": content_text,
+                    });
+                    if is_error {
+                        result["is_error"] = serde_json::json!(true);
+                    }
                     messages.push(serde_json::json!({
                         "role": "user",
-                        "content": [{
-                            "type": "tool_result",
-                            "tool_use_id": tool_call_id,
-                            "content": text,
-                        }],
+                        "content": [result],
                     }));
                 }
                 _ => {
@@ -140,7 +200,21 @@ impl AnthropicProvider {
                             serde_json::json!([{"type": "text", "text": t}])
                         }
                         MessageContent::Parts(parts) => {
-                            serde_json::json!(parts)
+                            let blocks: Vec<serde_json::Value> = parts
+                                .iter()
+                                .map(|p| match p {
+                                    ContentPart::Text { text } => {
+                                        serde_json::json!({"type": "text", "text": text})
+                                    }
+                                    ContentPart::ImageUrl { image_url } => {
+                                        serde_json::json!({"type": "text", "text": image_url.url})
+                                    }
+                                    ContentPart::Reasoning { reasoning } => {
+                                        serde_json::json!({"type": "text", "text": reasoning})
+                                    }
+                                })
+                                .collect();
+                            serde_json::json!(blocks)
                         }
                         MessageContent::Null => serde_json::json!([]),
                     };
@@ -158,10 +232,8 @@ impl AnthropicProvider {
             "max_tokens": req.max_completion_tokens.or(req.max_tokens).unwrap_or(4096),
         });
 
-        // System prompt.
-        if !system_prompt.is_empty() {
-            body["system"] = serde_json::json!(system_prompt);
-        } else if !system_blocks.is_empty() {
+        // System prompt — always use array form.
+        if !system_blocks.is_empty() {
             body["system"] = serde_json::json!(system_blocks);
         }
         if let Some(temp) = req.temperature {
@@ -169,9 +241,6 @@ impl AnthropicProvider {
         }
         if let Some(top_p) = req.top_p {
             body["top_p"] = serde_json::json!(top_p);
-        }
-        if let Some(n) = req.n {
-            body["n"] = serde_json::json!(n);
         }
 
         // Stop sequences.
@@ -184,27 +253,38 @@ impl AnthropicProvider {
         }
 
         // Tools: OpenAI format → Anthropic format.
-        if let Some(ref tools) = req.tools {
-            let anthropic_tools: Vec<serde_json::Value> = tools
-                .iter()
-                .map(|t| {
-                    let mut tool = serde_json::json!({
-                        "name": t.function.name,
-                        "input_schema": t.function.parameters,
-                    });
-                    if let Some(ref desc) = t.function.description {
-                        tool["description"] = serde_json::json!(desc);
-                    }
-                    tool
-                })
-                .collect();
-            body["tools"] = serde_json::json!(anthropic_tools);
-        }
+        // Check parallel_tool_calls from extra fields.
+        let parallel_tool_calls: Option<bool> = req
+            .extra
+            .get("parallel_tool_calls")
+            .and_then(|v| v.as_bool());
 
-        // Tool choice.
-        if let Some(ref tc) = req.tool_choice {
-            body["tool_choice"] = serde_json::json!(tc);
+        // Tool choice conversion.
+        let (tc_value, strip_tools) =
+            normalize::convert_tool_choice_for_anthropic(&req.tool_choice, parallel_tool_calls);
+
+        if !strip_tools {
+            if let Some(ref tools) = req.tools {
+                let anthropic_tools: Vec<serde_json::Value> = tools
+                    .iter()
+                    .map(|t| {
+                        let mut tool = serde_json::json!({
+                            "name": t.function.name,
+                            "input_schema": t.function.parameters,
+                        });
+                        if let Some(ref desc) = t.function.description {
+                            tool["description"] = serde_json::json!(desc);
+                        }
+                        tool
+                    })
+                    .collect();
+                body["tools"] = serde_json::json!(anthropic_tools);
+            }
+            if let Some(tc) = tc_value {
+                body["tool_choice"] = tc;
+            }
         }
+        // If strip_tools is true, we simply don't include tools or tool_choice.
 
         // Forward extra fields: thinking, metadata, etc.
         if let Some(thinking) = req.extra.get("thinking") {
@@ -223,7 +303,7 @@ impl AnthropicProvider {
         resp: serde_json::Value,
         requested_model: &str,
     ) -> ChatCompletionResponse {
-        let mut text_parts = Vec::new();
+        let mut content_parts: Vec<ContentPart> = Vec::new();
         let mut tool_calls = Vec::new();
 
         if let Some(blocks) = resp.get("content").and_then(|c| c.as_array()) {
@@ -232,8 +312,18 @@ impl AnthropicProvider {
                 match block_type {
                     "text" => {
                         if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                            text_parts.push(text.to_string());
+                            content_parts.push(ContentPart::Text { text: text.to_string() });
                         }
+                    }
+                    "thinking" => {
+                        if let Some(thinking) = block.get("thinking").and_then(|t| t.as_str()) {
+                            content_parts.push(ContentPart::Reasoning {
+                                reasoning: thinking.to_string(),
+                            });
+                        }
+                    }
+                    "redacted_thinking" => {
+                        // Intentionally opaque — skip.
                     }
                     "tool_use" => {
                         let id = block
@@ -273,6 +363,14 @@ impl AnthropicProvider {
             .and_then(|u| u.get("output_tokens"))
             .and_then(|t| t.as_u64())
             .unwrap_or(0) as u32;
+        let cache_creation = usage
+            .and_then(|u| u.get("cache_creation_input_tokens"))
+            .and_then(|t| t.as_u64())
+            .map(|v| v as u32);
+        let cache_read = usage
+            .and_then(|u| u.get("cache_read_input_tokens"))
+            .and_then(|t| t.as_u64())
+            .map(|v| v as u32);
 
         let finish_reason = stop_reason
             .map(|r| match r.as_str() {
@@ -282,6 +380,38 @@ impl AnthropicProvider {
                 other => other.to_string(),
             })
             .or_else(|| Some("stop".to_string()));
+
+        // Use Parts-based content when we have reasoning blocks,
+        // otherwise use simple Text for backward compatibility.
+        let message_content = if content_parts.iter().any(|p| matches!(p, ContentPart::Reasoning { .. })) {
+            if content_parts.is_empty() {
+                MessageContent::Text(String::new())
+            } else {
+                // Filter out empty text parts when reasoning is present
+                let filtered: Vec<ContentPart> = content_parts
+                    .into_iter()
+                    .filter(|p| match p {
+                        ContentPart::Text { text } => !text.is_empty(),
+                        _ => true,
+                    })
+                    .collect();
+                if filtered.is_empty() {
+                    MessageContent::Text(String::new())
+                } else {
+                    MessageContent::Parts(filtered)
+                }
+            }
+        } else {
+            let text: String = content_parts
+                .iter()
+                .filter_map(|p| match p {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            MessageContent::Text(text)
+        };
 
         ChatCompletionResponse {
             id: resp
@@ -296,7 +426,7 @@ impl AnthropicProvider {
                 index: 0,
                 message: Message {
                     role: MessageRole::Assistant,
-                    content: MessageContent::Text(text_parts.join("")),
+                    content: message_content,
                     name: None,
                     tool_calls: if tool_calls.is_empty() {
                         None
@@ -304,6 +434,7 @@ impl AnthropicProvider {
                         Some(tool_calls)
                     },
                     tool_call_id: None,
+                    reasoning_content: None,
                 },
                 finish_reason,
                 logprobs: None,
@@ -312,6 +443,8 @@ impl AnthropicProvider {
                 prompt_tokens: input_tokens,
                 completion_tokens: output_tokens,
                 total_tokens: input_tokens + output_tokens,
+                cache_creation_input_tokens: cache_creation,
+                cache_read_input_tokens: cache_read,
             },
             system_fingerprint: None,
         }
@@ -324,14 +457,18 @@ impl Provider for AnthropicProvider {
         let requested_model = req.model.clone();
         let body = self.to_anthropic_request(&req);
         let url = format!("{}/messages", self.base_url.trim_end_matches('/'));
+        let betas = self.beta_headers(&req);
 
         let mut builder = self.client.post(&url);
         if let Some(ref key) = self.api_key {
             builder = builder.header("x-api-key", key);
         }
         builder = builder
-            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-version", &self.api_version)
             .header("content-type", "application/json");
+        if !betas.is_empty() {
+            builder = builder.header("anthropic-beta", betas.join(","));
+        }
 
         // Non-streaming: upstream sends no data until the entire response is ready.
         let resp = builder
@@ -368,6 +505,7 @@ impl Provider for AnthropicProvider {
         let requested_model = req.model.clone();
         let mut body = self.to_anthropic_request(&req);
         body["stream"] = serde_json::json!(true);
+        let betas = self.beta_headers(&req);
 
         let url = format!("{}/messages", self.base_url.trim_end_matches('/'));
 
@@ -376,8 +514,11 @@ impl Provider for AnthropicProvider {
             builder = builder.header("x-api-key", key);
         }
         builder = builder
-            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-version", &self.api_version)
             .header("content-type", "application/json");
+        if !betas.is_empty() {
+            builder = builder.header("anthropic-beta", betas.join(","));
+        }
 
         let resp = builder
             .json(&body)
@@ -446,43 +587,51 @@ impl Provider for AnthropicProvider {
                                     let block = data.get("content_block").unwrap_or(&serde_json::Value::Null);
                                     let btype = block.get("type").and_then(|t| t.as_str()).unwrap_or("text").to_string();
 
-                                    // For tool_use blocks, record id and emit a tool_call delta.
-                                    if btype == "tool_use" {
-                                        let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
-                                        let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-                                        let openai_idx = next_tool_index;
-                                        tool_index_map.insert(idx, openai_idx);
-                                        next_tool_index += 1;
+                                    match btype.as_str() {
+                                        "tool_use" => {
+                                            let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                                            let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                                            let openai_idx = next_tool_index;
+                                            tool_index_map.insert(idx, openai_idx);
+                                            next_tool_index += 1;
 
-                                        let chunk = ChatStreamChunk {
-                                            id: response_id.clone(),
-                                            object: "chat.completion.chunk".to_string(),
-                                            created,
-                                            model: model.clone(),
-                                            choices: vec![StreamChoice {
-                                                index: 0,
-                                                delta: StreamDelta {
-                                                    role: None,
-                                                    content: None,
-                                                    tool_calls: Some(vec![ToolCallDelta {
-                                                        index: openai_idx,
-                                                        id: Some(id),
-                                                        call_type: Some("function".to_string()),
-                                                        function: Some(FunctionCallDelta {
-                                                            name: Some(name),
-                                                            arguments: Some(String::new()),
-                                                        }),
-                                                    }]),
-                                                },
-                                                finish_reason: None,
-                                            }],
-                                            usage: None,
-                                        };
-                                        if tx.send(Ok(Some(chunk))).await.is_err() {
-                                            return;
+                                            let chunk = ChatStreamChunk {
+                                                id: response_id.clone(),
+                                                object: "chat.completion.chunk".to_string(),
+                                                created,
+                                                model: model.clone(),
+                                                choices: vec![StreamChoice {
+                                                    index: 0,
+                                                    delta: StreamDelta {
+                                                        role: None,
+                                                        content: None,
+                                                        tool_calls: Some(vec![ToolCallDelta {
+                                                            index: openai_idx,
+                                                            id: Some(id),
+                                                            call_type: Some("function".to_string()),
+                                                            function: Some(FunctionCallDelta {
+                                                                name: Some(name),
+                                                                arguments: Some(String::new()),
+                                                            }),
+                                                        }]),
+                                                        reasoning_content: None,
+                                                    },
+                                                    finish_reason: None,
+                                                }],
+                                                usage: None,
+                                            };
+                                            if tx.send(Ok(Some(chunk))).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                        "thinking" => {
+                                            // Emit reasoning_content delta for thinking blocks.
+                                            // No initial content — thinking deltas come via content_block_delta.
+                                        }
+                                        _ => {
+                                            // Text blocks: nothing to emit on start.
                                         }
                                     }
-                                    // Text blocks: nothing to emit on start.
                                 }
                                 "content_block_delta" => {
                                     let idx = data.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
@@ -504,6 +653,7 @@ impl Provider for AnthropicProvider {
                                                             role: None,
                                                             content: Some(text.to_string()),
                                                             tool_calls: None,
+                                                            reasoning_content: None,
                                                         },
                                                         finish_reason: None,
                                                     }],
@@ -537,6 +687,7 @@ impl Provider for AnthropicProvider {
                                                                 arguments: Some(partial.to_string()),
                                                             }),
                                                         }]),
+                                                        reasoning_content: None,
                                                     },
                                                     finish_reason: None,
                                                 }],
@@ -544,6 +695,32 @@ impl Provider for AnthropicProvider {
                                             };
                                             if tx.send(Ok(Some(chunk))).await.is_err() {
                                                 return;
+                                            }
+                                        }
+                                        "thinking_delta" => {
+                                            // Extended thinking content.
+                                            let thinking = delta.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
+                                            if !thinking.is_empty() {
+                                                let chunk = ChatStreamChunk {
+                                                    id: response_id.clone(),
+                                                    object: "chat.completion.chunk".to_string(),
+                                                    created,
+                                                    model: model.clone(),
+                                                    choices: vec![StreamChoice {
+                                                        index: 0,
+                                                        delta: StreamDelta {
+                                                            role: None,
+                                                            content: None,
+                                                            tool_calls: None,
+                                                            reasoning_content: Some(thinking.to_string()),
+                                                        },
+                                                        finish_reason: None,
+                                                    }],
+                                                    usage: None,
+                                                };
+                                                if tx.send(Ok(Some(chunk))).await.is_err() {
+                                                    return;
+                                                }
                                             }
                                         }
                                         _ => {}
@@ -579,6 +756,7 @@ impl Provider for AnthropicProvider {
                                                 role: None,
                                                 content: None,
                                                 tool_calls: None,
+                                                reasoning_content: None,
                                             },
                                             finish_reason,
                                         }],
@@ -594,7 +772,7 @@ impl Provider for AnthropicProvider {
                                 }
                                 "message_start" => {
                                     // Extract input_tokens from message_start for usage tracking.
-                                    // No chunk emitted — role is set on first content.
+                                    // No chunk emitted — usage is tracked by the caller.
                                 }
                                 "message_stop" => {
                                     let _ = tx.send(Ok(None)).await;

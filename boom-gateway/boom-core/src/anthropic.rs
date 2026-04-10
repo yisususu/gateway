@@ -1,3 +1,4 @@
+use crate::normalize;
 use crate::types::*;
 use std::collections::HashMap;
 
@@ -19,6 +20,7 @@ pub fn anthropic_request_to_openai(req: &AnthropicMessagesRequest) -> ChatComple
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             });
         }
     }
@@ -37,6 +39,7 @@ pub fn anthropic_request_to_openai(req: &AnthropicMessagesRequest) -> ChatComple
                     name: None,
                     tool_calls: None,
                     tool_call_id: None,
+                reasoning_content: None,
                 });
             }
         }
@@ -110,21 +113,32 @@ pub fn openai_response_to_anthropic(resp: &ChatCompletionResponse) -> AnthropicM
     let mut content_blocks = Vec::new();
 
     if let Some(choice) = resp.choices.first() {
-        // Text content.
-        let text = match &choice.message.content {
-            MessageContent::Text(t) => t.clone(),
-            MessageContent::Parts(parts) => parts
-                .iter()
-                .filter_map(|p| match p {
-                    ContentPart::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join(""),
-            MessageContent::Null => String::new(),
-        };
-        if !text.is_empty() {
-            content_blocks.push(AnthropicResponseContentBlock::Text { text });
+        // Text and reasoning content.
+        match &choice.message.content {
+            MessageContent::Text(t) => {
+                if !t.is_empty() {
+                    content_blocks.push(AnthropicResponseContentBlock::Text { text: t.clone() });
+                }
+            }
+            MessageContent::Parts(parts) => {
+                for p in parts {
+                    match p {
+                        ContentPart::Text { text } => {
+                            if !text.is_empty() {
+                                content_blocks
+                                    .push(AnthropicResponseContentBlock::Text { text: text.clone() });
+                            }
+                        }
+                        ContentPart::Reasoning { reasoning } => {
+                            content_blocks.push(AnthropicResponseContentBlock::Thinking {
+                                thinking: reasoning.clone(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            MessageContent::Null => {}
         }
 
         // Tool calls.
@@ -163,8 +177,8 @@ pub fn openai_response_to_anthropic(resp: &ChatCompletionResponse) -> AnthropicM
         usage: AnthropicUsage {
             input_tokens: resp.usage.prompt_tokens,
             output_tokens: resp.usage.completion_tokens,
-            cache_creation_input_tokens: None,
-            cache_read_input_tokens: None,
+            cache_creation_input_tokens: resp.usage.cache_creation_input_tokens,
+            cache_read_input_tokens: resp.usage.cache_read_input_tokens,
         },
     }
 }
@@ -186,16 +200,16 @@ pub struct AnthropicStreamTranscoder {
     message_started: bool,
     content_block_index: u32,
     text_block_open: bool,
+    /// Whether a thinking block is currently open.
+    thinking_block_open: bool,
     /// Maps OpenAI tool_call index → Anthropic content block index.
     tool_block_map: HashMap<u32, u32>,
     /// Buffers argument fragments per OpenAI tool_call index.
-    /// Fragments are accumulated during streaming and flushed as a SINGLE
-    /// `input_json_delta` event right before `content_block_stop`.
-    /// This avoids depending on the client SDK to correctly concatenate
-    /// many small `partial_json` fragments — some SDK versions / clients
-    /// fail at this, producing `input: {}`.
     tool_arg_buf: HashMap<u32, String>,
+    input_tokens: u32,
     output_tokens: u32,
+    cache_creation_input_tokens: Option<u32>,
+    cache_read_input_tokens: Option<u32>,
 }
 
 impl AnthropicStreamTranscoder {
@@ -206,15 +220,49 @@ impl AnthropicStreamTranscoder {
             message_started: false,
             content_block_index: 0,
             text_block_open: false,
+            thinking_block_open: false,
             tool_block_map: HashMap::new(),
             tool_arg_buf: HashMap::new(),
+            input_tokens: 0,
             output_tokens: 0,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        }
+    }
+
+    /// Close the currently open content block (text or thinking) if any.
+    fn close_open_block(&mut self, events: &mut Vec<AnthropicSseEvent>) {
+        if self.thinking_block_open {
+            self.thinking_block_open = false;
+            let idx = self.content_block_index;
+            self.content_block_index += 1;
+            events.push(AnthropicSseEvent {
+                event: "content_block_stop".to_string(),
+                data: serde_json::json!({ "type": "content_block_stop", "index": idx })
+                    .to_string(),
+            });
+        } else if self.text_block_open {
+            self.text_block_open = false;
+            let idx = self.content_block_index;
+            self.content_block_index += 1;
+            events.push(AnthropicSseEvent {
+                event: "content_block_stop".to_string(),
+                data: serde_json::json!({ "type": "content_block_stop", "index": idx })
+                    .to_string(),
+            });
         }
     }
 
     /// Convert one OpenAI stream chunk into zero or more Anthropic SSE events.
     pub fn transcode(&mut self, chunk: &ChatStreamChunk) -> Vec<AnthropicSseEvent> {
         let mut events = Vec::new();
+
+        // Extract input_tokens from usage when available.
+        if let Some(ref usage) = chunk.usage {
+            if let Some(pt) = usage.prompt_tokens {
+                self.input_tokens = self.input_tokens.max(pt as u32);
+            }
+        }
 
         for choice in &chunk.choices {
             // First chunk: emit message_start.
@@ -232,19 +280,71 @@ impl AnthropicStreamTranscoder {
                             "model": self.model,
                             "stop_reason": null,
                             "stop_sequence": null,
-                            "usage": { "input_tokens": 0, "output_tokens": 0 }
+                            "usage": {
+                                "input_tokens": 0,
+                                "output_tokens": 0,
+                                "cache_creation_input_tokens": self.cache_creation_input_tokens,
+                                "cache_read_input_tokens": self.cache_read_input_tokens,
+                            }
                         }
                     })
                     .to_string(),
                 });
             }
 
+            // Reasoning content delta → thinking block.
+            if let Some(ref reasoning) = choice.delta.reasoning_content {
+                if !reasoning.is_empty() {
+                    // Close text block if open (thinking comes before text).
+                    if self.text_block_open {
+                        self.text_block_open = false;
+                        let idx = self.content_block_index;
+                        self.content_block_index += 1;
+                        events.push(AnthropicSseEvent {
+                            event: "content_block_stop".to_string(),
+                            data: serde_json::json!({ "type": "content_block_stop", "index": idx })
+                                .to_string(),
+                        });
+                    }
+                    if !self.thinking_block_open {
+                        self.thinking_block_open = true;
+                        let idx = self.content_block_index;
+                        events.push(AnthropicSseEvent {
+                            event: "content_block_start".to_string(),
+                            data: serde_json::json!({
+                                "type": "content_block_start",
+                                "index": idx,
+                                "content_block": { "type": "thinking", "thinking": "" }
+                            })
+                            .to_string(),
+                        });
+                    }
+                    events.push(AnthropicSseEvent {
+                        event: "content_block_delta".to_string(),
+                        data: serde_json::json!({
+                            "type": "content_block_delta",
+                            "index": self.content_block_index,
+                            "delta": { "type": "thinking_delta", "thinking": reasoning }
+                        })
+                        .to_string(),
+                    });
+                }
+            }
+
             // Text content delta — only open a text block when there's actual text.
-            // Some backends send content="" in tool_call chunks; opening a text block
-            // for empty content creates spurious content_block_start events that cause
-            // the Anthropic SDK to finalize tool_use blocks prematurely (input={}).
             if let Some(ref text) = choice.delta.content {
                 if !text.is_empty() {
+                    // Close thinking block before starting text.
+                    if self.thinking_block_open {
+                        self.thinking_block_open = false;
+                        let idx = self.content_block_index;
+                        self.content_block_index += 1;
+                        events.push(AnthropicSseEvent {
+                            event: "content_block_stop".to_string(),
+                            data: serde_json::json!({ "type": "content_block_stop", "index": idx })
+                                .to_string(),
+                        });
+                    }
                     if !self.text_block_open {
                         self.text_block_open = true;
                         let idx = self.content_block_index;
@@ -273,17 +373,8 @@ impl AnthropicStreamTranscoder {
 
             // Tool call deltas.
             if let Some(ref tool_calls) = choice.delta.tool_calls {
-                // Close text block if open before starting tool blocks.
-                if self.text_block_open {
-                    self.text_block_open = false;
-                    let idx = self.content_block_index;
-                    self.content_block_index += 1;
-                    events.push(AnthropicSseEvent {
-                        event: "content_block_stop".to_string(),
-                        data: serde_json::json!({ "type": "content_block_stop", "index": idx })
-                            .to_string(),
-                    });
-                }
+                // Close any open block before starting tool blocks.
+                self.close_open_block(&mut events);
 
                 for tc in tool_calls {
                     // New tool call: has id.
@@ -312,9 +403,6 @@ impl AnthropicStreamTranscoder {
                         });
                     }
                     // Argument delta — buffer instead of emitting immediately.
-                    // We flush all buffered args as a single input_json_delta right
-                    // before content_block_stop, so the client SDK only needs to
-                    // handle one partial_json per tool call.
                     if let Some(ref func) = tc.function {
                         if let Some(ref args) = func.arguments {
                             if !args.is_empty() {
@@ -330,17 +418,9 @@ impl AnthropicStreamTranscoder {
 
             // Finish.
             if choice.finish_reason.is_some() {
-                // Close text block.
-                if self.text_block_open {
-                    self.text_block_open = false;
-                    let idx = self.content_block_index;
-                    self.content_block_index += 1;
-                    events.push(AnthropicSseEvent {
-                        event: "content_block_stop".to_string(),
-                        data: serde_json::json!({ "type": "content_block_stop", "index": idx })
-                            .to_string(),
-                    });
-                }
+                // Close any open block (text or thinking).
+                self.close_open_block(&mut events);
+
                 // Close tool blocks — flush buffered args as a single partial_json first.
                 let mut tc_indices: Vec<u32> = self.tool_block_map.keys().copied().collect();
                 tc_indices.sort();
@@ -381,7 +461,9 @@ impl AnthropicStreamTranscoder {
                             "stop_reason": stop_reason,
                             "stop_sequence": null
                         },
-                        "usage": { "output_tokens": self.output_tokens.max(1) }
+                        "usage": {
+                            "output_tokens": self.output_tokens.max(1)
+                        }
                     })
                     .to_string(),
                 });
@@ -423,7 +505,8 @@ fn content_to_string(content: &AnthropicContent) -> String {
         AnthropicContent::Blocks(blocks) => blocks
             .iter()
             .filter_map(|b| match b {
-                AnthropicContentBlock::Text { text } => Some(text.as_str()),
+                AnthropicContentBlock::Text { text, .. } => Some(text.as_str()),
+                AnthropicContentBlock::Thinking { thinking } => Some(thinking.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -441,6 +524,7 @@ fn convert_user_message(content: &AnthropicContent, messages: &mut Vec<Message>)
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             });
         }
         AnthropicContent::Blocks(blocks) => {
@@ -449,35 +533,58 @@ fn convert_user_message(content: &AnthropicContent, messages: &mut Vec<Message>)
 
             for block in blocks {
                 match block {
-                    AnthropicContentBlock::Text { text } => {
+                    AnthropicContentBlock::Text { text, .. } => {
                         text_parts.push(ContentPart::Text { text: text.clone() });
                     }
                     AnthropicContentBlock::Image { source } => {
+                        let url = normalize::convert_image_source(source);
                         text_parts.push(ContentPart::ImageUrl {
-                            image_url: ImageUrl {
-                                url: serde_json::to_string(source).unwrap_or_default(),
-                                detail: None,
-                            },
+                            image_url: ImageUrl { url, detail: None },
                         });
                     }
                     AnthropicContentBlock::ToolResult {
                         tool_use_id,
                         content: result_content,
+                        is_error,
                         ..
                     } => {
-                        let text = match result_content {
+                        let mut text = match result_content {
                             Some(AnthropicContent::Text(t)) => t.clone(),
                             Some(AnthropicContent::Blocks(bs)) => bs
                                 .iter()
                                 .filter_map(|b| match b {
-                                    AnthropicContentBlock::Text { text } => Some(text.as_str()),
+                                    AnthropicContentBlock::Text { text, .. } => Some(text.as_str()),
                                     _ => None,
                                 })
                                 .collect::<Vec<_>>()
                                 .join(""),
                             None => String::new(),
                         };
+                        // Forward is_error flag to OpenAI consumers.
+                        if *is_error == Some(true) {
+                            text = format!("[ERROR] {}", text);
+                        }
                         tool_results.push((tool_use_id.clone(), text));
+                    }
+                    AnthropicContentBlock::Document {
+                        source,
+                        title,
+                        ..
+                    } => {
+                        // Extract text from document source if possible.
+                        let mut doc_text = String::new();
+                        if let Some(t) = title {
+                            if !t.is_empty() {
+                                doc_text = format!("{}\n", t);
+                            }
+                        }
+                        // For text-type sources, extract the content.
+                        if let Some(data) = source.get("data").and_then(|d| d.as_str()) {
+                            doc_text.push_str(data);
+                        }
+                        if !doc_text.is_empty() {
+                            text_parts.push(ContentPart::Text { text: doc_text });
+                        }
                     }
                     _ => {}
                 }
@@ -491,6 +598,7 @@ fn convert_user_message(content: &AnthropicContent, messages: &mut Vec<Message>)
                     name: None,
                     tool_calls: None,
                     tool_call_id: None,
+                reasoning_content: None,
                 });
             }
 
@@ -502,6 +610,7 @@ fn convert_user_message(content: &AnthropicContent, messages: &mut Vec<Message>)
                     name: None,
                     tool_calls: None,
                     tool_call_id: Some(tool_use_id),
+                    reasoning_content: None,
                 });
             }
         }
@@ -518,18 +627,19 @@ fn convert_assistant_message(content: &AnthropicContent, messages: &mut Vec<Mess
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             });
         }
         AnthropicContent::Blocks(blocks) => {
-            let mut text_parts = Vec::new();
+            let mut text_parts: Vec<String> = Vec::new();
             let mut tool_calls = Vec::new();
 
             for block in blocks {
                 match block {
-                    AnthropicContentBlock::Text { text } => {
-                        text_parts.push(text.as_str());
+                    AnthropicContentBlock::Text { text, .. } => {
+                        text_parts.push(text.clone());
                     }
-                    AnthropicContentBlock::ToolUse { id, name, input } => {
+                    AnthropicContentBlock::ToolUse { id, name, input, .. } => {
                         tool_calls.push(ToolCall {
                             id: id.clone(),
                             call_type: "function".to_string(),
@@ -539,22 +649,96 @@ fn convert_assistant_message(content: &AnthropicContent, messages: &mut Vec<Mess
                             },
                         });
                     }
+                    AnthropicContentBlock::Thinking { thinking } => {
+                        // Carry thinking content through the pipeline.
+                        text_parts.push(thinking.clone());
+                    }
+                    AnthropicContentBlock::RedactedThinking { .. } => {
+                        // Intentionally opaque — no meaningful content to forward.
+                    }
+                    AnthropicContentBlock::Document { source, title, .. } => {
+                        let mut doc_text = String::new();
+                        if let Some(t) = title {
+                            if !t.is_empty() {
+                                doc_text = format!("{}\n", t);
+                            }
+                        }
+                        if let Some(data) = source.get("data").and_then(|d| d.as_str()) {
+                            doc_text.push_str(data);
+                        }
+                        if !doc_text.is_empty() {
+                            text_parts.push(doc_text);
+                        }
+                    }
                     _ => {}
                 }
             }
 
+            // If we have thinking blocks, use Parts-based content so that
+            // Reasoning parts can be preserved for Anthropic round-tripping.
+            let has_thinking = blocks.iter().any(|b| {
+                        matches!(b, AnthropicContentBlock::Thinking { .. })
+                    });
             let text = text_parts.join("");
-            messages.push(Message {
-                role: MessageRole::Assistant,
-                content: MessageContent::Text(text),
-                name: None,
-                tool_calls: if tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(tool_calls)
-                },
-                tool_call_id: None,
-            });
+
+            if has_thinking {
+                let mut parts = Vec::new();
+                for block in blocks {
+                    match block {
+                        AnthropicContentBlock::Thinking { thinking } => {
+                            parts.push(ContentPart::Reasoning { reasoning: thinking.clone() });
+                        }
+                        AnthropicContentBlock::Text { text: t, .. } => {
+                            if !t.is_empty() {
+                                parts.push(ContentPart::Text { text: t.clone() });
+                            }
+                        }
+                        AnthropicContentBlock::Document { source, title, .. } => {
+                            let mut doc_text = String::new();
+                            if let Some(t) = title {
+                                if !t.is_empty() {
+                                    doc_text = format!("{}\n", t);
+                                }
+                            }
+                            if let Some(data) = source.get("data").and_then(|d| d.as_str()) {
+                                doc_text.push_str(data);
+                            }
+                            if !doc_text.is_empty() {
+                                parts.push(ContentPart::Text { text: doc_text });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if parts.is_empty() {
+                    parts.push(ContentPart::Text { text: String::new() });
+                }
+                messages.push(Message {
+                    role: MessageRole::Assistant,
+                    content: MessageContent::Parts(parts),
+                    name: None,
+                    tool_calls: if tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(tool_calls)
+                    },
+                    tool_call_id: None,
+                reasoning_content: None,
+                });
+            } else {
+                messages.push(Message {
+                    role: MessageRole::Assistant,
+                    content: MessageContent::Text(text),
+                    name: None,
+                    tool_calls: if tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(tool_calls)
+                    },
+                    tool_call_id: None,
+                reasoning_content: None,
+                });
+            }
         }
     }
 }
@@ -573,4 +757,155 @@ fn finish_reason_to_stop_reason(reason: &Option<String>) -> Option<String> {
 fn generate_anthropic_message_id() -> String {
     let id = uuid::Uuid::new_v4();
     format!("msg_{}", id.simple())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_convert_user_message_image_url() {
+        let content = AnthropicContent::Blocks(vec![AnthropicContentBlock::Image {
+            source: serde_json::json!({
+                "type": "url",
+                "url": "https://example.com/img.png"
+            }),
+        }]);
+        let mut messages = Vec::new();
+        convert_user_message(&content, &mut messages);
+        assert_eq!(messages.len(), 1);
+        match &messages[0].content {
+            MessageContent::Parts(parts) => {
+                assert_eq!(parts.len(), 1);
+                match &parts[0] {
+                    ContentPart::ImageUrl { image_url } => {
+                        assert_eq!(image_url.url, "https://example.com/img.png");
+                    }
+                    _ => panic!("Expected ImageUrl"),
+                }
+            }
+            _ => panic!("Expected Parts"),
+        }
+    }
+
+    #[test]
+    fn test_convert_user_message_image_base64() {
+        let content = AnthropicContent::Blocks(vec![AnthropicContentBlock::Image {
+            source: serde_json::json!({
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": "SGVsbG8="
+            }),
+        }]);
+        let mut messages = Vec::new();
+        convert_user_message(&content, &mut messages);
+        match &messages[0].content {
+            MessageContent::Parts(parts) => match &parts[0] {
+                ContentPart::ImageUrl { image_url } => {
+                    assert!(image_url.url.starts_with("data:image/jpeg;base64,"));
+                }
+                _ => panic!("Expected ImageUrl"),
+            },
+            _ => panic!("Expected Parts"),
+        }
+    }
+
+    #[test]
+    fn test_convert_user_message_tool_result_error() {
+        let content = AnthropicContent::Blocks(vec![AnthropicContentBlock::ToolResult {
+            tool_use_id: "tool_123".to_string(),
+            content: Some(AnthropicContent::Text("something failed".to_string())),
+            is_error: Some(true),
+        }]);
+        let mut messages = Vec::new();
+        convert_user_message(&content, &mut messages);
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(messages[0].role, MessageRole::Tool));
+        match &messages[0].content {
+            MessageContent::Text(t) => {
+                assert!(t.starts_with("[ERROR]"));
+            }
+            _ => panic!("Expected Text"),
+        }
+    }
+
+    #[test]
+    fn test_convert_assistant_thinking() {
+        let content = AnthropicContent::Blocks(vec![
+            AnthropicContentBlock::Thinking {
+                thinking: "Let me think...".to_string(),
+            },
+            AnthropicContentBlock::Text {
+                text: "Here is the answer.".to_string(),
+                cache_control: None,
+            },
+        ]);
+        let mut messages = Vec::new();
+        convert_assistant_message(&content, &mut messages);
+        assert_eq!(messages.len(), 1);
+        match &messages[0].content {
+            MessageContent::Parts(parts) => {
+                // Should have Reasoning + Text
+                assert!(parts.iter().any(|p| matches!(p, ContentPart::Reasoning { .. })));
+                assert!(parts.iter().any(|p| matches!(p, ContentPart::Text { .. })));
+            }
+            _ => panic!("Expected Parts for thinking content"),
+        }
+    }
+
+    #[test]
+    fn test_response_thinking_roundtrip() {
+        let resp = ChatCompletionResponse {
+            id: "chatcmpl-123".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "test".to_string(),
+            choices: vec![Choice {
+                index: 0,
+                message: Message {
+                    role: MessageRole::Assistant,
+                    content: MessageContent::Parts(vec![
+                        ContentPart::Reasoning {
+                            reasoning: "hmm".to_string(),
+                        },
+                        ContentPart::Text {
+                            text: "answer".to_string(),
+                        },
+                    ]),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                reasoning_content: None,
+                },
+                finish_reason: Some("stop".to_string()),
+                logprobs: None,
+            }],
+            usage: Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+                cache_creation_input_tokens: Some(3),
+                cache_read_input_tokens: Some(7),
+            },
+            system_fingerprint: None,
+        };
+        let anthro = openai_response_to_anthropic(&resp);
+        assert_eq!(anthro.content.len(), 2);
+        // First block should be thinking
+        match &anthro.content[0] {
+            AnthropicResponseContentBlock::Thinking { thinking } => {
+                assert_eq!(thinking, "hmm");
+            }
+            _ => panic!("Expected Thinking block"),
+        }
+        // Second block should be text
+        match &anthro.content[1] {
+            AnthropicResponseContentBlock::Text { text } => {
+                assert_eq!(text, "answer");
+            }
+            _ => panic!("Expected Text block"),
+        }
+        assert_eq!(anthro.usage.cache_creation_input_tokens, Some(3));
+        assert_eq!(anthro.usage.cache_read_input_tokens, Some(7));
+    }
 }

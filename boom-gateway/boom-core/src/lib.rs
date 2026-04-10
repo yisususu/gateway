@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod error;
+pub mod normalize;
 pub mod provider;
 pub mod types;
 

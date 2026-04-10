@@ -77,13 +77,19 @@ pub fn create_provider(
                 deployment_id,
             )))
         }
-        "anthropic" => Ok(Arc::new(anthropic::AnthropicProvider::new(
-            client,
-            api_key,
-            api_base,
-            &actual_model,
-            deployment_id,
-        ))),
+        "anthropic" => {
+            let mut provider = anthropic::AnthropicProvider::new(
+                client,
+                api_key,
+                api_base,
+                &actual_model,
+                deployment_id,
+            );
+            if let Some(version) = extra.get("anthropic_version") {
+                provider = provider.with_api_version(version.clone());
+            }
+            Ok(Arc::new(provider))
+        }
         "azure" => {
             let api_version = extra.get("api_version").cloned().unwrap_or_default();
             Ok(Arc::new(azure::AzureProvider::new(

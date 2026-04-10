@@ -1193,7 +1193,7 @@ pub async fn messages(
     let input_chars: usize = req.messages.iter().map(|m| match &m.content {
         boom_core::types::AnthropicContent::Text(t) => t.len(),
         boom_core::types::AnthropicContent::Blocks(blocks) => blocks.iter().map(|b| match b {
-            boom_core::types::AnthropicContentBlock::Text { text } => text.len(),
+            boom_core::types::AnthropicContentBlock::Text { text, .. } => text.len(),
             _ => 0,
         }).sum(),
     }).sum();

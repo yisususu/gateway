@@ -37,6 +37,11 @@ pub enum ContentPart {
     Text { text: String },
     #[serde(rename = "image_url")]
     ImageUrl { image_url: ImageUrl },
+    /// Carries Anthropic "thinking" content through the internal OpenAI-format pipeline.
+    /// Non-Anthropic providers concatenate this as regular text; the Anthropic provider
+    /// converts it back to a `{"type":"thinking"}` block.
+    #[serde(rename = "reasoning")]
+    Reasoning { reasoning: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +62,10 @@ pub struct Message {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Reasoning content from models like OpenAI o1/o3 (non-streaming).
+    /// Carried through the internal format for Anthropic round-tripping.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +184,7 @@ impl CompletionRequest {
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             }],
             temperature: self.temperature,
             top_p: self.top_p,
@@ -250,6 +260,10 @@ pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u32>,
 }
 
 // ============================================================
@@ -293,6 +307,9 @@ pub struct StreamDelta {
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallDelta>>,
+    /// Reasoning content (OpenAI o1/o3 `reasoning_content`, Anthropic `thinking`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -442,13 +459,19 @@ pub struct AnthropicSystemBlock {
     #[serde(rename = "type")]
     pub block_type: String,
     pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AnthropicContentBlock {
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<serde_json::Value>,
+    },
     #[serde(rename = "image")]
     Image { source: serde_json::Value },
     #[serde(rename = "tool_use")]
@@ -456,6 +479,8 @@ pub enum AnthropicContentBlock {
         id: String,
         name: String,
         input: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<serde_json::Value>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
