@@ -75,7 +75,7 @@ fn new_request_id() -> String {
 // Debug logging — dump full request/response for specific keys
 // ═══════════════════════════════════════════════════════════
 
-const DEBUG_KEY_PATTERN: &str = "l00882395";
+const DEBUG_KEY_PATTERN: &str = "fortest";
 
 fn is_debug_key(key_alias: Option<&str>) -> bool {
     key_alias.map(|a| a.contains(DEBUG_KEY_PATTERN)).unwrap_or(false)
