@@ -406,6 +406,20 @@ impl AnthropicStreamTranscoder {
                     if let Some(ref func) = tc.function {
                         if let Some(ref args) = func.arguments {
                             if !args.is_empty() {
+                                // vLLM quirk: the finish chunk may contain the COMPLETE
+                                // JSON arguments after already sending all fragments.
+                                // Detect this: if we already have buffered content AND
+                                // the new args look like a complete JSON object (starts
+                                // with '{' and is parseable), skip it to avoid doubling.
+                                if let Some(existing) = self.tool_arg_buf.get(&tc.index) {
+                                    if !existing.is_empty()
+                                        && args.starts_with('{')
+                                        && serde_json::from_str::<serde_json::Value>(args).is_ok()
+                                    {
+                                        // Skip duplicate complete JSON from vLLM finish chunk.
+                                        continue;
+                                    }
+                                }
                                 self.tool_arg_buf
                                     .entry(tc.index)
                                     .or_default()
