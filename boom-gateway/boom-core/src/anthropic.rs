@@ -1,5 +1,5 @@
 use crate::types::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ============================================================
 // Request Conversion: Anthropic → OpenAI
@@ -188,6 +188,10 @@ pub struct AnthropicStreamTranscoder {
     text_block_open: bool,
     /// Maps OpenAI tool_call index → Anthropic content block index.
     tool_block_map: HashMap<u32, u32>,
+    /// Tracks which tool calls have already had partial_json emitted.
+    /// Used to detect and skip duplicate complete-JSON arguments that some
+    /// backends (e.g. vLLM) send in the finish_reason chunk.
+    tool_has_fragments: HashSet<u32>,
     output_tokens: u32,
 }
 
@@ -200,6 +204,7 @@ impl AnthropicStreamTranscoder {
             content_block_index: 0,
             text_block_open: false,
             tool_block_map: HashMap::new(),
+            tool_has_fragments: HashSet::new(),
             output_tokens: 0,
         }
     }
@@ -307,20 +312,32 @@ impl AnthropicStreamTranscoder {
                     if let Some(ref func) = tc.function {
                         if let Some(ref args) = func.arguments {
                             if !args.is_empty() {
-                                let content_idx =
-                                    self.tool_block_map.get(&tc.index).copied().unwrap_or(0);
-                                events.push(AnthropicSseEvent {
-                                    event: "content_block_delta".to_string(),
-                                    data: serde_json::json!({
-                                        "type": "content_block_delta",
-                                        "index": content_idx,
-                                        "delta": {
-                                            "type": "input_json_delta",
-                                            "partial_json": args
-                                        }
-                                    })
-                                    .to_string(),
-                                });
+                                // Some backends (e.g. vLLM) send the COMPLETE tool-call
+                                // arguments in the chunk that also carries finish_reason.
+                                // If we've already emitted partial_json fragments, appending
+                                // the complete JSON would produce invalid concatenated JSON
+                                // (fragments + complete = garbage).  Detect and skip.
+                                let is_duplicate_complete = choice.finish_reason.is_some()
+                                    && self.tool_has_fragments.contains(&tc.index)
+                                    && args.starts_with('{');
+
+                                if !is_duplicate_complete {
+                                    self.tool_has_fragments.insert(tc.index);
+                                    let content_idx =
+                                        self.tool_block_map.get(&tc.index).copied().unwrap_or(0);
+                                    events.push(AnthropicSseEvent {
+                                        event: "content_block_delta".to_string(),
+                                        data: serde_json::json!({
+                                            "type": "content_block_delta",
+                                            "index": content_idx,
+                                            "delta": {
+                                                "type": "input_json_delta",
+                                                "partial_json": args
+                                            }
+                                        })
+                                        .to_string(),
+                                    });
+                                }
                             }
                         }
                     }
