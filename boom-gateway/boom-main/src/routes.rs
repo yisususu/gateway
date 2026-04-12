@@ -382,7 +382,14 @@ async fn chat_completions_inner(
             },
         );
 
-        Ok(Json(response).into_response())
+        // Normalize internal ContentPart::Reasoning to standard OpenAI `reasoning_content`
+        // field so clients receive {"reasoning_content": "..."} instead of non-standard
+        // content parts with type "reasoning".
+        let mut resp = response;
+        for choice in &mut resp.choices {
+            choice.message.normalize_reasoning_for_openai();
+        }
+        Ok(Json(resp).into_response())
     }
 }
 

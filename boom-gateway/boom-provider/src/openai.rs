@@ -36,6 +36,17 @@ impl OpenAIProvider {
     fn build_request(&self, mut req: ChatCompletionRequest) -> serde_json::Value {
         // Replace model name with the actual provider model ID.
         req.model = self.model.clone();
+        // Convert internal ContentPart::Reasoning to ContentPart::Text so that
+        // upstream OpenAI-compatible APIs don't reject the unknown "reasoning" type.
+        for msg in &mut req.messages {
+            if let MessageContent::Parts(parts) = &mut msg.content {
+                for part in parts.iter_mut() {
+                    if let ContentPart::Reasoning { reasoning } = part {
+                        *part = ContentPart::Text { text: std::mem::take(reasoning) };
+                    }
+                }
+            }
+        }
         // Serialize — skip_serializing on `extra` ensures non-standard fields
         // (service_tier, store, etc.) are NOT forwarded to upstream providers.
         serde_json::to_value(&req).unwrap_or_default()

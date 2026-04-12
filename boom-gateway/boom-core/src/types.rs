@@ -68,6 +68,42 @@ pub struct Message {
     pub reasoning_content: Option<String>,
 }
 
+impl Message {
+    /// Extract `ContentPart::Reasoning` from content parts into `reasoning_content`.
+    /// Ensures OpenAI-format responses use the standard `reasoning_content` field
+    /// instead of the internal `{"type": "reasoning"}` content part type.
+    pub fn normalize_reasoning_for_openai(&mut self) {
+        let parts = match &mut self.content {
+            MessageContent::Parts(parts) => std::mem::take(parts),
+            _ => return,
+        };
+
+        let mut reasoning = String::new();
+        let mut other = Vec::new();
+        for p in parts {
+            match p {
+                ContentPart::Reasoning { reasoning: r } => reasoning.push_str(&r),
+                p => other.push(p),
+            }
+        }
+
+        if !reasoning.is_empty() {
+            self.reasoning_content = Some(reasoning);
+        }
+
+        self.content = if other.is_empty() {
+            MessageContent::Text(String::new())
+        } else if other.len() == 1 && matches!(&other[0], ContentPart::Text { .. }) {
+            match other.into_iter().next() {
+                Some(ContentPart::Text { text }) => MessageContent::Text(text),
+                _ => unreachable!(),
+            }
+        } else {
+            MessageContent::Parts(other)
+        };
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
