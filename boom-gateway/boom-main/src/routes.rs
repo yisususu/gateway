@@ -1131,58 +1131,46 @@ fn sse_stream_from_chat_stream(
 
                     let has_finish = chunk.choices.iter().any(|c| c.finish_reason.is_some());
 
-                    // Buffer tool_call arguments, suppressing incremental deltas.
-                    // vLLM quirk: incremental fragments may be incomplete (missing
-                    // closing '}'), and the finish chunk repeats the complete JSON.
-                    // By buffering and flushing the canonical complete version at
-                    // finish, we ensure the client always receives valid JSON.
+                    // Buffer tool_call arguments via take() — zero-copy, no clone.
                     for choice in &mut chunk.choices {
                         if let Some(ref mut tool_calls) = choice.delta.tool_calls {
                             for tc in tool_calls.iter_mut() {
-                                if let Some(ref mut func) = tc.function {
-                                    if let Some(ref args) = func.arguments.clone() {
-                                        if !args.is_empty() {
-                                            let is_complete = args.starts_with('{')
-                                                && serde_json::from_str::<serde_json::Value>(args).is_ok();
-                                            let has_existing = tool_arg_buf.get(&tc.index).map_or(false, |e| !e.is_empty());
+                                let args_taken = tc.function.as_mut().and_then(|f| f.arguments.take());
+                                if let Some(args) = args_taken {
+                                    if !args.is_empty() {
+                                        // Fast path: incremental fragments almost never end with '}'.
+                                        // Skip the expensive JSON parse when the string clearly isn't
+                                        // a complete object.
+                                        let is_complete = args.starts_with('{')
+                                            && args.ends_with('}')
+                                            && serde_json::from_str::<serde_json::Value>(&args).is_ok();
+                                        let has_existing = tool_arg_buf.get(&tc.index).map_or(false, |e| !e.is_empty());
 
-                                            if is_complete && has_existing {
-                                                // vLLM duplicate: replace buffer with canonical complete JSON.
-                                                tool_arg_buf.insert(tc.index, args.clone());
-                                            } else {
-                                                // Normal incremental fragment: append to buffer.
-                                                tool_arg_buf
-                                                    .entry(tc.index)
-                                                    .or_default()
-                                                    .push_str(&args);
-                                            }
-                                            // Suppress this delta — we'll flush the buffer at finish.
-                                            func.arguments = None;
+                                        if is_complete && has_existing {
+                                            tool_arg_buf.insert(tc.index, args); // move, no clone
+                                        } else {
+                                            tool_arg_buf.entry(tc.index).or_default().push_str(&args);
                                         }
                                     }
+                                    // arguments already taken — chunk emits without them
                                 }
                             }
                         }
                     }
 
-                    // Emit the chunk (argument deltas suppressed).
-                    let data = serde_json::to_string(&chunk).unwrap_or_default();
-                    if tx.send(Event::default().data(data)).await.is_err() {
-                        return;
-                    }
-
-                    // At finish, flush buffered arguments as a single delta per tool call.
+                    // At finish, flush buffered arguments BEFORE the finish chunk
+                    // so the client accumulates complete args before seeing finish_reason.
                     if has_finish {
                         let mut indices: Vec<u32> = tool_arg_buf.keys().copied().collect();
                         indices.sort();
                         for idx in indices {
-                            if let Some(buf) = tool_arg_buf.get(&idx) {
+                            if let Some(buf) = tool_arg_buf.remove(&idx) {
                                 if !buf.is_empty() {
                                     let flush_chunk = ChatStreamChunk {
-                                        id: chunk.id.clone(),
+                                        id: String::new(), // client ignores id on intermediate chunks
                                         object: "chat.completion.chunk".to_string(),
-                                        created: chunk.created,
-                                        model: chunk.model.clone(),
+                                        created: 0,
+                                        model: String::new(),
                                         choices: vec![StreamChoice {
                                             index: 0,
                                             delta: StreamDelta {
@@ -1194,7 +1182,7 @@ fn sse_stream_from_chat_stream(
                                                     call_type: None,
                                                     function: Some(FunctionCallDelta {
                                                         name: None,
-                                                        arguments: Some(buf.clone()),
+                                                        arguments: Some(buf), // move, no clone
                                                     }),
                                                 }]),
                                                 reasoning_content: None,
@@ -1210,7 +1198,12 @@ fn sse_stream_from_chat_stream(
                                 }
                             }
                         }
-                        tool_arg_buf.clear();
+                    }
+
+                    // Emit the original chunk (arguments already taken).
+                    let data = serde_json::to_string(&chunk).unwrap_or_default();
+                    if tx.send(Event::default().data(data)).await.is_err() {
+                        return;
                     }
                 }
                 Err(e) => {

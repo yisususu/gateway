@@ -411,11 +411,8 @@ impl AnthropicStreamTranscoder {
                                 // fragments. When we detect a complete JSON object AND the
                                 // buffer already has content, REPLACE the buffer with the
                                 // canonical complete version rather than concatenating.
-                                // This handles both:
-                                //   a) fragments are complete → replace with same value (no-op)
-                                //   b) fragments are incomplete (e.g. missing closing '}')
-                                //      → replace with correct complete JSON
                                 let is_vllm_complete = args.starts_with('{')
+                                    && args.ends_with('}')
                                     && serde_json::from_str::<serde_json::Value>(args).is_ok();
                                 let has_existing = self
                                     .tool_arg_buf
