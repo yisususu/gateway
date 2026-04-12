@@ -142,6 +142,11 @@ impl PlanStore {
         Some(plan.value().clone())
     }
 
+    /// Get the plan name assigned to a key (for display purposes).
+    pub fn get_plan_name(&self, key_hash: &str) -> Option<String> {
+        self.key_assignments.get(key_hash).map(|n| n.value().clone())
+    }
+
     /// Try to acquire a concurrency slot for a key.
     /// Returns a guard that decrements on drop, or None if limit exceeded.
     pub fn try_acquire(&self, key_hash: &str, limit: u32) -> Option<ConcurrencyGuard> {

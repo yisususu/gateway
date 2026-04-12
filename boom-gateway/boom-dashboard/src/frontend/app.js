@@ -534,6 +534,7 @@
   let keysPage = 1;
   let keysSearch = "";
   let keysSearchTimer = null;
+  let keysVipOnly = false;
   let keysDataCache = [];
 
   function setupKeysSearch() {
@@ -555,6 +556,7 @@
     try {
       let url = `/admin/keys?page=${keysPage}&per_page=50`;
       if (keysSearch) url += `&search=${encodeURIComponent(keysSearch)}`;
+      if (keysVipOnly) url += "&vip_only=true";
       const data = await api(url);
       keysDataCache = data.keys || [];
       renderKeysTable(keysDataCache);
@@ -570,11 +572,12 @@
     const wrap = document.getElementById("keys-table-wrap");
     if (keys.length === 0) { wrap.innerHTML = "<p>No keys found.</p>"; return; }
     wrap.innerHTML = `<table>
-      <tr><th>Token</th><th>Alias</th><th>User</th><th>Usage</th><th>Reset</th><th>Spend</th><th>Budget</th><th>Status</th><th>Actions</th></tr>
+      <tr><th>Token</th><th>Alias</th><th>User</th><th>Plan</th><th>Usage</th><th>Reset</th><th>Spend</th><th>Budget</th><th>Status</th><th>Actions</th></tr>
       ${keys.map((k) => `<tr>
         <td class="mono">${esc(k.token_prefix)}</td>
         <td>${esc(k.key_alias || "-")}</td>
         <td>${esc(k.user_id || "-")}</td>
+        <td>${esc(k.plan_name || "-")}</td>
         <td>${k.usage_count || 0}</td>
         <td>${formatCountdown(k.usage_reset_secs || 0)}</td>
         <td>$${(k.spend || 0).toFixed(4)}</td>
@@ -922,6 +925,14 @@
       alert(r.message || "Done");
     });
     document.getElementById("btn-new-key").addEventListener("click", showNewKeyModal);
+    const btnVipFilter = document.getElementById("btn-vip-filter");
+    if (btnVipFilter) btnVipFilter.addEventListener("click", () => {
+      keysVipOnly = !keysVipOnly;
+      btnVipFilter.style.background = keysVipOnly ? "var(--primary)" : "";
+      btnVipFilter.style.color = keysVipOnly ? "#fff" : "";
+      keysPage = 1;
+      loadKeys();
+    });
     document.getElementById("btn-new-assignment").addEventListener("click", showNewAssignmentModal);
     const btnModel = document.getElementById("btn-new-model");
     if (btnModel) btnModel.addEventListener("click", showNewModelModal);
@@ -1046,12 +1057,13 @@
     const isVip = key.metadata && key.metadata.vip === true;
     showModal(`
       <h3>Edit Key</h3>
-      <div class="form-group"><label>Alias ${tip("Human-readable name for this key.")}</label><input id="m-edit-alias" value="${esc(key.key_alias || "")}"></div>
+      <div class="form-group"><label>Alias ${tip("Short unique identifier for this key, e.g. 'alice'. Used for dashboard display and debug logging.")}</label><input id="m-edit-alias" value="${esc(key.key_alias || "")}"></div>
       <div class="form-group"><label>User ID ${tip("Optional user identifier.")}</label><input id="m-edit-user" value="${esc(key.user_id || "")}"></div>
       <div class="form-group"><label>Models ${tip("Select model access. Check 'all-team-models' for full access, or pick specific models.")}</label><div class="model-check-combo" id="m-edit-models-combo"></div></div>
       <div class="form-group"><label>Max Budget ${tip("Maximum budget in USD. Leave empty for unlimited.")}</label><input id="m-edit-budget" type="number" step="0.01" value="${key.max_budget != null ? key.max_budget : ""}"></div>
       <div class="form-group"><label>RPM Limit ${tip("Per-key RPM override. Leave empty to use plan limits.")}</label><input id="m-edit-rpm" type="number" value="${key.rpm_limit || ""}"></div>
-      <div class="form-group"><label>VIP ${tip("VIP keys get priority in flow control queues when deployments are at capacity.")}</label><div style="display:flex;align-items:center;gap:8px;margin-top:4px"><input type="checkbox" id="m-edit-vip" ${isVip ? "checked" : ""}><span style="font-weight:600;color:#b45309">Priority queue access</span></div></div>
+      <div class="form-group"><label>Plan ${tip("Rate limit plan assigned to this key. Change via Assignments page.")}</label><input value="${esc(key.plan_name || "Default")}" readonly style="background:var(--surface3);cursor:not-allowed"></div>
+      <div class="form-group"><label>VIP ${tip("VIP keys get priority in flow control queues when deployments are at capacity.")}</label><div style="display:flex;align-items:center;gap:8px;padding-top:4px"><input type="checkbox" id="m-edit-vip" ${isVip ? "checked" : ""}><span style="font-weight:600;color:#b45309;white-space:nowrap">Priority queue access</span></div></div>
       <div class="modal-actions">
         <button class="btn-secondary" onclick="hideModal()" style="width:auto">Cancel</button>
         <button class="btn-primary" id="m-edit-submit">Save</button>

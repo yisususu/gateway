@@ -158,6 +158,8 @@ pub struct ListKeysQuery {
     #[serde(default = "default_per_page")]
     pub per_page: i64,
     pub search: Option<String>,
+    #[serde(default)]
+    pub vip_only: Option<String>,
 }
 
 fn default_page() -> i64 {
@@ -229,7 +231,7 @@ pub async fn list_keys(
         }
     };
 
-    let total = rows.len() as i64;
+    let _total_before_filter = rows.len() as i64;
 
     // Single-pass limiter scan: aggregate usage for all keys at once.
     let all_usage = state.limiter.get_all_key_usage();
@@ -239,6 +241,7 @@ pub async fn list_keys(
         .map(|r| {
             let token_prefix = format!("{}...", &r.token[..8.min(r.token.len())]);
             let (usage_count, usage_reset_secs) = all_usage.get(&r.token).copied().unwrap_or((0, 0));
+            let plan_name = state.plan_store.get_plan_name(&r.token);
 
             json!({
                 "token_prefix": token_prefix,
@@ -259,6 +262,7 @@ pub async fn list_keys(
                 "created_at": r.created_at.map(|d| d.to_string()),
                 "usage_count": usage_count,
                 "usage_reset_secs": usage_reset_secs,
+                "plan_name": plan_name,
             })
         })
         .collect();
@@ -270,6 +274,17 @@ pub async fn list_keys(
         cb.cmp(&ca)
     });
 
+    // Filter VIP-only if requested.
+    if query.vip_only.as_deref() == Some("true") || query.vip_only.as_deref() == Some("1") {
+        keys.retain(|k| {
+            k.get("metadata")
+                .and_then(|m| m.get("vip"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        });
+    }
+    let filtered_total = keys.len() as i64;
+
     // In-memory pagination.
     let offset = ((query.page - 1).max(0) * query.per_page) as usize;
     let per_page = query.per_page as usize;
@@ -279,7 +294,7 @@ pub async fn list_keys(
         "keys": page_keys,
         "page": query.page,
         "per_page": query.per_page,
-        "total": total,
+        "total": filtered_total,
     }))
     .into_response()
 }
