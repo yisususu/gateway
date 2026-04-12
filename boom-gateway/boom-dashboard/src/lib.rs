@@ -138,6 +138,19 @@ pub fn build_router<S: Clone + Send + Sync + 'static>(state: DashboardState) -> 
             "/dashboard/api/admin/teams",
             get(handlers_admin::list_teams),
         )
+        // Admin — Debug error recording.
+        .route(
+            "/dashboard/api/admin/debug/status",
+            get(handlers_admin::get_debug_status),
+        )
+        .route(
+            "/dashboard/api/admin/debug/toggle",
+            post(handlers_admin::toggle_debug),
+        )
+        .route(
+            "/dashboard/api/admin/debug/errors/{request_id}",
+            get(handlers_admin::get_debug_error),
+        )
         // SPA fallback — must be last.
         .route("/dashboard/{*path}", get(handlers_static::spa_fallback))
         // Inject state via Extension layer.

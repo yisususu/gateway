@@ -1812,3 +1812,50 @@ pub async fn reset_limits_all(
         "message": format!("Cleared all {} window counter(s)", removed)
     }))
 }
+
+// ═══════════════════════════════════════════════════════════
+// Debug Error Recording
+// ═══════════════════════════════════════════════════════════
+
+pub async fn get_debug_status(
+    _session: AdminSession,
+    Extension(state): Extension<Arc<DashboardState>>,
+) -> Json<Value> {
+    Json(json!({
+        "enabled": state.debug_store.is_enabled(),
+        "entries": state.debug_store.len(),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DebugToggleRequest {
+    pub enabled: bool,
+}
+
+pub async fn toggle_debug(
+    _session: AdminSession,
+    Extension(state): Extension<Arc<DashboardState>>,
+    Json(req): Json<DebugToggleRequest>,
+) -> Json<Value> {
+    state.debug_store.set_enabled(req.enabled);
+    tracing::info!(enabled = req.enabled, "Debug error recording toggled");
+    Json(json!({
+        "ok": true,
+        "enabled": req.enabled,
+    }))
+}
+
+pub async fn get_debug_error(
+    _session: AdminSession,
+    Extension(state): Extension<Arc<DashboardState>>,
+    Path(request_id): Path<String>,
+) -> Response {
+    match state.debug_store.get(&request_id) {
+        Some(entry) => Json(json!({"debug_error": entry})).into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            "Debug entry not found (not recorded or expired)",
+        )
+            .into_response(),
+    }
+}

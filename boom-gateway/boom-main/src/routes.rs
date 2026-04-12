@@ -206,7 +206,7 @@ async fn chat_completions_inner(
     // 1. Model access check (deployment-aware, alias-aware).
     check_model_access(identity, &req.model, &state.router)
         .map_err(|e| {
-            log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()), None);
+            log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()), None, None);
             GatewayErrorReply(e, false)
         })?;
 
@@ -237,7 +237,7 @@ async fn chat_completions_inner(
     )
     .await
     .map_err(|e| {
-        log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()), None);
+        log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()), None, None);
         GatewayErrorReply(e, false)
     })?;
 
@@ -260,7 +260,7 @@ async fn chat_completions_inner(
         .select_provider(&req.model, Some(&identity.key_hash), input_chars as u64)
         .ok_or_else(|| {
             let e = GatewayError::ModelNotFound(req.model.clone());
-            log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()), None);
+            log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()), None, None);
             rollback_plan_quota(&state.limiter, &rl_info);
             GatewayErrorReply(e, false)
         })?;
@@ -280,7 +280,7 @@ async fn chat_completions_inner(
                     waiters,
                     message: format!("Deployment '{}' flow control queue timeout — too many concurrent requests", did),
                 };
-                log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()), deployment_id.clone());
+                log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()), deployment_id.clone(), None);
                 return Err(GatewayErrorReply(e, is_stream));
             }
             Err(FlowControlError::NoSlot) => None,
@@ -289,10 +289,17 @@ async fn chat_completions_inner(
         None
     };
 
+    // Capture request body for debug recording if debug mode is enabled.
+    let debug_req_body = if state.debug_store.is_enabled() {
+        serde_json::to_string(&req).ok()
+    } else {
+        None
+    };
+
     // 4. Route to provider (streaming or non-streaming).
     if is_stream {
         let stream = provider.chat_stream(req).await.map_err(|e| {
-            log_error(&state, &identity, &model, api_path, true, start, &e, Some(request_id.clone()), deployment_id.clone());
+            log_error(&state, &identity, &model, api_path, true, start, &e, Some(request_id.clone()), deployment_id.clone(), debug_req_body.clone());
             record_deployment_failure(&state, &deployment_id, &model, &e);
             rollback_plan_quota(&state.limiter, &rl_info);
             GatewayErrorReply(e, true)
@@ -342,7 +349,7 @@ async fn chat_completions_inner(
             InFlightGuard::new(state.inflight.clone(), &inflight_model, input_chars as u64)
         };
         let response = provider.chat(req).await.map_err(|e| {
-            log_error(&state, &identity, &model, api_path, false, start, &e, Some(request_id.clone()), deployment_id.clone());
+            log_error(&state, &identity, &model, api_path, false, start, &e, Some(request_id.clone()), deployment_id.clone(), debug_req_body.clone());
             record_deployment_failure(&state, &deployment_id, &model, &e);
             rollback_plan_quota(&state.limiter, &rl_info);
             GatewayErrorReply(e, false)
@@ -1249,7 +1256,7 @@ pub async fn messages(
     // 1. Model access check (deployment-aware, alias-aware).
     check_model_access(identity, &openai_req.model, &state.router)
         .map_err(|e| {
-            log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()), None);
+            log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()), None, None);
             AnthropicErrorReply(e, is_stream)
         })?;
 
@@ -1280,7 +1287,7 @@ pub async fn messages(
     )
     .await
     .map_err(|e| {
-        log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()), None);
+        log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()), None, None);
         AnthropicErrorReply(e, is_stream)
     })?;
 
@@ -1302,7 +1309,7 @@ pub async fn messages(
         .select_provider(&openai_req.model, Some(&identity.key_hash), input_chars as u64)
         .ok_or_else(|| {
             let e = GatewayError::ModelNotFound(openai_req.model.clone());
-            log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()), None);
+            log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()), None, None);
             rollback_plan_quota(&state.limiter, &rl_info);
             AnthropicErrorReply(e, is_stream)
         })?;
@@ -1322,7 +1329,7 @@ pub async fn messages(
                     waiters,
                     message: format!("Deployment '{}' flow control queue timeout — too many concurrent requests", did),
                 };
-                log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()), deployment_id.clone());
+                log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()), deployment_id.clone(), None);
                 return Err(AnthropicErrorReply(e, is_stream));
             }
             Err(FlowControlError::NoSlot) => None,
@@ -1331,10 +1338,17 @@ pub async fn messages(
         None
     };
 
+    // Capture request body for debug recording if debug mode is enabled.
+    let debug_req_body = if state.debug_store.is_enabled() {
+        serde_json::to_string(&req).ok()
+    } else {
+        None
+    };
+
     // 4. Route to provider.
     if is_stream {
         let stream = provider.chat_stream(openai_req).await.map_err(|e| {
-            log_error(&state, &identity, &model, "/v1/messages", true, start, &e, Some(request_id.clone()), deployment_id.clone());
+            log_error(&state, &identity, &model, "/v1/messages", true, start, &e, Some(request_id.clone()), deployment_id.clone(), debug_req_body.clone());
             record_deployment_failure(&state, &deployment_id, &model, &e);
             rollback_plan_quota(&state.limiter, &rl_info);
             AnthropicErrorReply(e, true)
@@ -1383,7 +1397,7 @@ pub async fn messages(
             InFlightGuard::new(state.inflight.clone(), &inflight_model, input_chars as u64)
         };
         let response = provider.chat(openai_req).await.map_err(|e| {
-            log_error(&state, &identity, &model, "/v1/messages", false, start, &e, Some(request_id.clone()), deployment_id.clone());
+            log_error(&state, &identity, &model, "/v1/messages", false, start, &e, Some(request_id.clone()), deployment_id.clone(), debug_req_body.clone());
             record_deployment_failure(&state, &deployment_id, &model, &e);
             rollback_plan_quota(&state.limiter, &rl_info);
             AnthropicErrorReply(e, false)

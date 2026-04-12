@@ -1,3 +1,4 @@
+use boom_core::DebugErrorStore;
 use boom_flowcontrol::FlowController;
 use boom_limiter::{PlanStore, SlidingWindowLimiter};
 use boom_routing::{AliasStore, DeploymentStore, InFlightTracker};
@@ -71,6 +72,8 @@ pub struct DashboardState {
     pub master_key: Option<String>,
     /// Login rate-limit state per client IP.
     pub login_attempts: Arc<DashMap<String, LoginAttempt>>,
+    /// Debug error store — shared with boom-main for recording upstream errors.
+    pub debug_store: Arc<DebugErrorStore>,
 }
 
 impl DashboardState {
@@ -84,6 +87,7 @@ impl DashboardState {
         flow_controller: Arc<FlowController>,
         admin_tx: AdminTx,
         master_key: Option<String>,
+        debug_store: Arc<DebugErrorStore>,
     ) -> Self {
         // Derive JWT secret from master_key, or use a random fallback.
         let jwt_secret = master_key
@@ -102,6 +106,7 @@ impl DashboardState {
             jwt_secret,
             master_key,
             login_attempts: Arc::new(DashMap::new()),
+            debug_store,
         }
     }
 }

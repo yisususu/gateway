@@ -2,7 +2,7 @@ use sqlx::PgPool;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use boom_core::types::AuthIdentity;
-use boom_core::GatewayError;
+use boom_core::{DebugErrorEntry, GatewayError};
 use crate::state::AppState;
 
 /// Dedup cache for expected rejections (rate-limit, concurrency, budget).
@@ -80,6 +80,7 @@ pub fn log_request(pool: Option<PgPool>, log: RequestLog) {
 }
 
 /// Helper to log an error from a route handler. Call this before returning the error.
+/// `request_body` is an optional serialized request JSON for debug recording.
 pub fn log_error(
     state: &AppState,
     identity: &AuthIdentity,
@@ -90,6 +91,7 @@ pub fn log_error(
     error: &GatewayError,
     request_id: Option<String>,
     deployment_id: Option<String>,
+    request_body: Option<String>,
 ) {
     if !error.should_log_to_db() {
         let dedup_key = format!("{}:{}:{}", error.error_type(), identity.key_hash, model);
@@ -108,7 +110,7 @@ pub fn log_error(
     log_request(
         state.db_pool.clone(),
         RequestLog {
-            request_id,
+            request_id: request_id.clone(),
             key_hash: identity.key_hash.clone(),
             key_name: identity.key_name.clone(),
             key_alias: identity.key_alias.clone(),
@@ -126,4 +128,36 @@ pub fn log_error(
             deployment_id,
         },
     );
+
+    // Debug recording — capture upstream errors with full request body.
+    if state.debug_store.is_enabled() && error.should_log_to_db() {
+        let error_type = error.error_type();
+        if error_type == "upstream_error" || error_type == "provider_error" || error_type == "timeout" {
+            let (upstream_status, upstream_body) = match error {
+                GatewayError::UpstreamError { status, message } => {
+                    (Some(*status), Some(message.clone()))
+                }
+                _ => (None, None),
+            };
+
+            let rid = request_id.unwrap_or_default();
+            if !rid.is_empty() {
+                state.debug_store.record(DebugErrorEntry {
+                    request_id: rid,
+                    key_hash: identity.key_hash.clone(),
+                    key_alias: identity.key_alias.clone(),
+                    model: model.to_string(),
+                    api_path: api_path.to_string(),
+                    is_stream,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    status_code: error.status_code(),
+                    error_type: error_type.to_string(),
+                    error_message: error.to_string(),
+                    upstream_status,
+                    upstream_body,
+                    request_body,
+                });
+            }
+        }
+    }
 }

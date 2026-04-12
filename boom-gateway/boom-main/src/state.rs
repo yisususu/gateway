@@ -2,6 +2,7 @@ use arc_swap::ArcSwap;
 use boom_auth::DbAuthenticator;
 use boom_config::Config;
 use boom_core::provider::Authenticator;
+use boom_core::DebugErrorStore;
 use boom_limiter::{PlanStore, RateLimitPlan, ScheduleSlot, SlidingWindowLimiter};
 use boom_flowcontrol::{FlowControlConfig, FlowController};
 use boom_routing::{AliasStore, DeploymentStore, InFlightTracker, KeyAffinityPolicy, Router, RoundRobinPolicy, SchedulePolicy};
@@ -47,6 +48,8 @@ pub struct AppState {
     pub failure_counter: Arc<DashMap<String, Arc<AtomicU32>>>,
     /// Per-deployment flow controller (survives reloads).
     pub flow_controller: Arc<FlowController>,
+    /// Debug error store — captures upstream error details on demand.
+    pub debug_store: Arc<DebugErrorStore>,
 }
 
 /// The state that gets swapped on config reload.
@@ -110,6 +113,9 @@ impl AppState {
         // Flow controller survives across reloads.
         let flow_controller = Arc::new(FlowController::new());
 
+        // Debug error store survives across reloads.
+        let debug_store = Arc::new(DebugErrorStore::new());
+
         // Create scheduling policy from config (may reference inflight).
         let policy = create_policy(&config, &inflight, &flow_controller);
 
@@ -159,6 +165,7 @@ impl AppState {
             request_count: Arc::new(AtomicU64::new(0)),
             failure_counter: Arc::new(DashMap::new()),
             flow_controller,
+            debug_store,
         })
     }
 

@@ -392,3 +392,28 @@ input[list] {
   background-position: right 12px center;
   padding-right: 28px;
 }
+
+/* ── Debug Error Modal ────────────────────────────────── */
+.debug-section {
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.debug-section h4 {
+  margin-bottom: 6px;
+  color: var(--text2);
+}
+.debug-json {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-family: var(--font);
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 400px;
+  overflow-y: auto;
+  line-height: 1.4;
+  color: var(--text1);
+}

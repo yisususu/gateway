@@ -915,6 +915,93 @@
     } catch (err) { alert("Error: " + err.message); }
   };
 
+  // ── Admin: Debug Error Recording ─────────────────────
+  let debugEnabled = false;
+
+  async function loadDebugStatus() {
+    const btn = document.getElementById("btn-debug-toggle");
+    if (!btn) return;
+    try {
+      const data = await api("/admin/debug/status");
+      debugEnabled = data.enabled;
+      updateDebugButton(btn);
+    } catch {}
+  }
+
+  function updateDebugButton(btn) {
+    if (!btn) return;
+    btn.textContent = debugEnabled ? "Debug: ON" : "Debug: OFF";
+    btn.style.background = debugEnabled ? "var(--danger)" : "";
+    btn.style.color = debugEnabled ? "#fff" : "";
+  }
+
+  async function toggleDebug() {
+    const btn = document.getElementById("btn-debug-toggle");
+    if (!btn) return;
+    try {
+      const data = await api("/admin/debug/toggle", {
+        method: "POST",
+        body: JSON.stringify({ enabled: !debugEnabled }),
+      });
+      debugEnabled = data.enabled;
+      updateDebugButton(btn);
+    } catch (err) { alert("Error: " + err.message); }
+  }
+
+  async function showDebugError(requestId) {
+    try {
+      const data = await api("/admin/debug/errors/" + encodeURIComponent(requestId));
+      const e = data.debug_error;
+      if (!e) { alert("Debug entry not found"); return; }
+
+      let upstreamHtml = "";
+      if (e.upstream_status != null) {
+        upstreamHtml = `
+          <div class="debug-section">
+            <h4>Upstream Response</h4>
+            <table>
+              <tr><td style="width:120px">Status</td><td>${e.upstream_status}</td></tr>
+              <tr><td>Body</td><td><pre class="debug-json">${esc(formatJson(e.upstream_body || "-"))}</pre></td></tr>
+            </table>
+          </div>`;
+      }
+
+      let requestHtml = "";
+      if (e.request_body) {
+        requestHtml = `
+          <div class="debug-section">
+            <h4>Original Request</h4>
+            <pre class="debug-json">${esc(formatJson(e.request_body))}</pre>
+          </div>`;
+      }
+
+      showModal(`
+        <h3>Debug: ${esc(e.error_type)}</h3>
+        <table>
+          <tr><td style="width:120px">Request ID</td><td class="mono">${esc(e.request_id)}</td></tr>
+          <tr><td>Key</td><td>${esc(e.key_alias || e.key_hash.substring(0, 12) + "...")}</td></tr>
+          <tr><td>Model</td><td class="mono">${esc(e.model)}</td></tr>
+          <tr><td>Path</td><td class="mono">${esc(e.api_path)}</td></tr>
+          <tr><td>Stream</td><td>${e.is_stream ? "Yes" : "No"}</td></tr>
+          <tr><td>Time</td><td>${formatTimestamp(e.created_at)}</td></tr>
+          <tr><td>Status</td><td>${e.status_code}</td></tr>
+          <tr><td>Error</td><td>${esc(e.error_message)}</td></tr>
+        </table>
+        ${upstreamHtml}
+        ${requestHtml}
+        <div class="modal-actions">
+          <button class="btn-secondary" onclick="hideModal()" style="width:auto">Close</button>
+        </div>
+      `);
+    } catch (err) { alert("Error: " + err.message); }
+  }
+
+  window._showDebugError = showDebugError;
+
+  function formatJson(str) {
+    try { return JSON.stringify(JSON.parse(str), null, 2); } catch { return str; }
+  }
+
   // ── Admin: Modals ─────────────────────────────────────
   function setupAdminButtons() {
     document.getElementById("btn-new-plan").addEventListener("click", showNewPlanModal);
@@ -940,6 +1027,9 @@
     if (btnAlias) btnAlias.addEventListener("click", showNewAliasModal);
     const btnConfig = document.getElementById("btn-new-config");
     if (btnConfig) btnConfig.addEventListener("click", showNewConfigModal);
+    const btnDebug = document.getElementById("btn-debug-toggle");
+    if (btnDebug) btnDebug.addEventListener("click", toggleDebug);
+    loadDebugStatus();
   }
 
   function showModal(html) {
@@ -1229,7 +1319,17 @@
       tbody.innerHTML = '<tr><td colspan="11" class="no-results">No matching logs found.</td></tr>';
       return;
     }
-    tbody.innerHTML = logs.map((l) => `<tr>
+    tbody.innerHTML = logs.map((l) => {
+        const etype = l.error_type || "";
+        const isDebuggable = debugEnabled && l.request_id && (
+          etype === "upstream_error" || etype === "provider_error" || etype === "timeout"
+        );
+        const errorCell = l.error_message
+          ? (isDebuggable
+            ? '<a href="#" onclick="event.preventDefault();window._showDebugError(\'' + esc(l.request_id) + '\')" style="color:var(--primary);text-decoration:underline;cursor:pointer" title="' + esc(l.error_message) + '">' + esc(etype.substring(0, 20)) + '</a>'
+            : '<span style="color:var(--danger)" title="' + esc(l.error_message) + '">' + esc(etype.substring(0, 20)) + '</span>')
+          : "-";
+        return `<tr>
         <td class="mono">${formatTimestamp(l.created_at)}</td>
         <td>${esc(l.team_alias || l.team_id || "-")}</td>
         <td>${esc(l.key_alias || l.key_name || "-")}</td>
@@ -1240,8 +1340,9 @@
         <td>${l.input_tokens != null ? formatNumber(l.input_tokens) : "-"}</td>
         <td>${l.output_tokens != null ? formatNumber(l.output_tokens) : "-"}</td>
         <td>${l.duration_ms != null ? l.duration_ms + "ms" : "-"}</td>
-        <td>${l.error_message ? '<span style="color:var(--danger)" title="' + esc(l.error_message) + '">' + esc((l.error_type || "").substring(0, 20)) + '</span>' : "-"}</td>
-      </tr>`).join("");
+        <td>${errorCell}</td>
+      </tr>`;
+    }).join("");
   }
 
   function renderLogsPagination(data) {
