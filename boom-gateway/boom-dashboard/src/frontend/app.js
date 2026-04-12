@@ -989,6 +989,7 @@
   function showNewKeyModal() {
     showModal(`
       <h3>Create API Key</h3>
+      <div class="form-group"><label>Key Alias ${tip("Short unique identifier for this key, e.g. 'alice' or 'team-api'. Used for display in dashboard and debug logging.")}</label><input id="m-key-alias"></div>
       <div class="form-group"><label>Key Name ${tip("Human-readable name for this key.")}</label><input id="m-key-name"></div>
       <div class="form-group"><label>User ID ${tip("Optional user identifier for tracking.")}</label><input id="m-key-user"></div>
       <div class="form-group"><label>Team ID ${tip("Optional team identifier.")}</label><input id="m-key-team"></div>
@@ -1016,6 +1017,7 @@
         const data = await api("/admin/keys", {
           method: "POST",
           body: JSON.stringify({
+            key_alias: document.getElementById("m-key-alias").value.trim() || null,
             key_name: document.getElementById("m-key-name").value || null,
             user_id: document.getElementById("m-key-user").value || null,
             team_id: document.getElementById("m-key-team").value || null,
