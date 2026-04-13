@@ -849,37 +849,6 @@ fn default_true_val() -> bool {
     true
 }
 
-/// Row from boom_model_deployment (for list queries).
-#[derive(Debug, FromRow)]
-#[allow(dead_code)]
-struct DeploymentRow {
-    id: Uuid,
-    model_name: String,
-    litellm_model: String,
-    api_key: Option<String>,
-    api_key_env: Option<bool>,
-    api_base: Option<String>,
-    api_version: Option<String>,
-    aws_region_name: Option<String>,
-    aws_access_key_id: Option<String>,
-    aws_secret_access_key: Option<String>,
-    rpm: Option<i64>,
-    tpm: Option<i64>,
-    timeout: i64,
-    headers: serde_json::Value,
-    temperature: Option<f64>,
-    max_tokens: Option<i32>,
-    enabled: Option<bool>,
-    auto_disabled: Option<bool>,
-    source: Option<String>,
-    deployment_id: Option<String>,
-    quota_count_ratio: Option<i64>,
-    max_inflight_queue_len: Option<i32>,
-    max_context_len: Option<i64>,
-    created_at: Option<chrono::DateTime<chrono::Utc>>,
-    updated_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
 pub async fn list_models(
     _session: AdminSession,
     Extension(state): Extension<std::sync::Arc<DashboardState>>,
@@ -891,19 +860,7 @@ pub async fn list_models(
         }
     };
 
-    let rows: Vec<DeploymentRow> = match sqlx::query_as(
-        r#"SELECT id, model_name, litellm_model, api_key, api_key_env, api_base, api_version,
-                  aws_region_name, aws_access_key_id, aws_secret_access_key,
-                  rpm, tpm, timeout, headers, temperature, max_tokens, enabled, auto_disabled,
-                  source, deployment_id, quota_count_ratio,
-                  max_inflight_queue_len, max_context_len,
-                  created_at, updated_at
-           FROM boom_model_deployment
-           ORDER BY model_name, created_at"#,
-    )
-    .fetch_all(db_pool)
-    .await
-    {
+    let rows = match boom_routing::DeploymentStore::list_all_db(db_pool).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Dashboard list_models query failed: {}", e);
@@ -1046,23 +1003,7 @@ pub async fn list_aliases(
         }
     };
 
-    #[derive(Debug, FromRow)]
-    struct AliasRow {
-        alias_name: String,
-        target_model: String,
-        hidden: Option<bool>,
-        source: Option<String>,
-        updated_at: Option<chrono::DateTime<chrono::Utc>>,
-    }
-
-    let rows: Vec<AliasRow> = match sqlx::query_as(
-        r#"SELECT alias_name, target_model, hidden, source, updated_at
-           FROM boom_model_alias
-           ORDER BY alias_name"#,
-    )
-    .fetch_all(db_pool)
-    .await
-    {
+    let rows = match boom_routing::AliasStore::list_all_db(db_pool).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Dashboard list_aliases query failed: {}", e);
@@ -1098,32 +1039,16 @@ pub async fn create_alias(
         }
     };
 
-    let result = sqlx::query(
-        r#"INSERT INTO boom_model_alias (alias_name, target_model, hidden, source)
-           VALUES ($1, $2, $3, 'db')
-           ON CONFLICT (alias_name) DO UPDATE
-           SET target_model = EXCLUDED.target_model,
-               hidden = EXCLUDED.hidden,
-               source = 'db',
-               updated_at = NOW()"#,
-    )
-    .bind(&req.alias_name)
-    .bind(&req.target_model)
-    .bind(req.hidden)
-    .execute(db_pool)
-    .await;
+    let input = boom_routing::AliasInput {
+        alias_name: req.alias_name.clone(),
+        target_model: req.target_model.clone(),
+        hidden: req.hidden,
+    };
 
-    if let Err(e) = result {
+    if let Err(e) = state.alias_store.create_db(db_pool, &input).await {
         tracing::error!("Dashboard create_alias failed: {}", e);
         return Json(json!({"error": "Internal error"})).into_response();
     }
-
-    // Update in-memory alias store.
-    state.alias_store.set_alias(
-        req.alias_name.clone(),
-        req.target_model.clone(),
-        req.hidden,
-    );
 
     tracing::info!(alias = %req.alias_name, target = %req.target_model, "Alias created");
     let _ = state.admin_tx.send(crate::state::AdminCommand::ConfigChanged).await;
@@ -1143,30 +1068,18 @@ pub async fn update_alias(
         }
     };
 
-    let result = sqlx::query(
-        r#"UPDATE boom_model_alias
-           SET target_model = $2, hidden = $3, updated_at = NOW()
-           WHERE alias_name = $1"#,
-    )
-    .bind(&alias_name)
-    .bind(&req.target_model)
-    .bind(req.hidden)
-    .execute(db_pool)
-    .await;
+    let input = boom_routing::AliasInput {
+        alias_name: req.alias_name.clone(),
+        target_model: req.target_model.clone(),
+        hidden: req.hidden,
+    };
 
-    match result {
-        Ok(r) if r.rows_affected() > 0 => {
-            // Remove old alias and set new one.
-            state.alias_store.remove_alias(&alias_name);
-            state.alias_store.set_alias(
-                alias_name.clone(),
-                req.target_model.clone(),
-                req.hidden,
-            );
+    match state.alias_store.update_db(db_pool, &alias_name, &input).await {
+        Ok(true) => {
             let _ = state.admin_tx.send(crate::state::AdminCommand::ConfigChanged).await;
             Json(json!({"ok": true})).into_response()
         }
-        Ok(_) => Json(json!({"error": "Alias not found"})).into_response(),
+        Ok(false) => Json(json!({"error": "Alias not found"})).into_response(),
         Err(e) => {
             tracing::error!("Dashboard update_alias failed: {}", e);
             Json(json!({"error": "Internal error"})).into_response()
@@ -1186,21 +1099,13 @@ pub async fn delete_alias(
         }
     };
 
-    let result = sqlx::query(
-        r#"DELETE FROM boom_model_alias WHERE alias_name = $1"#,
-    )
-    .bind(&alias_name)
-    .execute(db_pool)
-    .await;
-
-    match result {
-        Ok(r) if r.rows_affected() > 0 => {
-            state.alias_store.remove_alias(&alias_name);
+    match state.alias_store.delete_db(db_pool, &alias_name).await {
+        Ok(true) => {
             tracing::info!(alias = %alias_name, "Alias deleted");
             let _ = state.admin_tx.send(crate::state::AdminCommand::ConfigChanged).await;
             Json(json!({"ok": true, "alias_name": alias_name})).into_response()
         }
-        Ok(_) => Json(json!({"error": "Alias not found"})).into_response(),
+        Ok(false) => Json(json!({"error": "Alias not found"})).into_response(),
         Err(e) => {
             tracing::error!("Dashboard delete_alias failed: {}", e);
             Json(json!({"error": "Internal error"})).into_response()

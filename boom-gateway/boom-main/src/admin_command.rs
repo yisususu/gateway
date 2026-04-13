@@ -3,7 +3,6 @@ use boom_dashboard::state::AdminCommand;
 use boom_flowcontrol::{FlowControlConfig, FlowController};
 use boom_routing::DeploymentStore;
 use serde_json::{json, Value};
-use sqlx::Row;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -46,42 +45,32 @@ async fn handle_create_model(
     let db_pool = state.db_pool.as_ref().ok_or("Database not available")?;
     let headers_json = serde_json::to_value(&req.headers).unwrap_or(json!({}));
 
-    // Insert into DB.
-    let result = sqlx::query(
-        r#"INSERT INTO boom_model_deployment
-           (model_name, litellm_model, api_key, api_key_env, api_base, api_version,
-            aws_region_name, aws_access_key_id, aws_secret_access_key,
-            rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source, deployment_id,
-            quota_count_ratio, max_inflight_queue_len, max_context_len)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'db', $17,
-            $18, $19, $20)
-           RETURNING id"#,
-    )
-    .bind(&req.model_name)
-    .bind(&req.litellm_model)
-    .bind(&req.api_key)
-    .bind(req.api_key_env.unwrap_or(false))
-    .bind(&req.api_base)
-    .bind(&req.api_version)
-    .bind(&req.aws_region_name)
-    .bind(&req.aws_access_key_id)
-    .bind(&req.aws_secret_access_key)
-    .bind(req.rpm)
-    .bind(req.tpm)
-    .bind(req.timeout)
-    .bind(&headers_json)
-    .bind(req.temperature)
-    .bind(req.max_tokens)
-    .bind(req.enabled)
-    .bind(&req.deployment_id)
-    .bind(req.quota_count_ratio.unwrap_or(1))
-    .bind(req.max_inflight_queue_len)
-    .bind(req.max_context_len)
-    .fetch_one(db_pool)
-    .await
-    .map_err(|e| format!("DB insert failed: {}", e))?;
+    let input = boom_routing::DeploymentInput {
+        model_name: req.model_name.clone(),
+        litellm_model: req.litellm_model.clone(),
+        api_key: req.api_key.clone(),
+        api_key_env: req.api_key_env,
+        api_base: req.api_base.clone(),
+        api_version: req.api_version.clone(),
+        aws_region_name: req.aws_region_name.clone(),
+        aws_access_key_id: req.aws_access_key_id.clone(),
+        aws_secret_access_key: req.aws_secret_access_key.clone(),
+        rpm: req.rpm,
+        tpm: req.tpm,
+        timeout: req.timeout,
+        headers: headers_json,
+        temperature: req.temperature,
+        max_tokens: req.max_tokens,
+        enabled: req.enabled,
+        deployment_id: req.deployment_id.clone(),
+        quota_count_ratio: req.quota_count_ratio.unwrap_or(1),
+        max_inflight_queue_len: req.max_inflight_queue_len,
+        max_context_len: req.max_context_len,
+    };
 
-    let id: Uuid = result.get("id");
+    let id = DeploymentStore::create_db(db_pool, &input)
+        .await
+        .map_err(|e| format!("DB insert failed: {}", e))?;
 
     // Build provider and add to memory (if enabled).
     if req.enabled {
@@ -107,51 +96,34 @@ async fn handle_update_model(
     let db_pool = state.db_pool.as_ref().ok_or("Database not available")?;
     let headers_json = serde_json::to_value(&req.headers).unwrap_or(json!({}));
 
-    let result = sqlx::query(
-        r#"UPDATE boom_model_deployment
-           SET model_name = $2, litellm_model = $3,
-               api_key = COALESCE($4, api_key),
-               api_key_env = $5,
-               api_base = COALESCE($6, api_base),
-               api_version = COALESCE($7, api_version),
-               aws_region_name = COALESCE($8, aws_region_name),
-               aws_access_key_id = COALESCE($9, aws_access_key_id),
-               aws_secret_access_key = COALESCE($10, aws_secret_access_key),
-               rpm = $11, tpm = $12, timeout = $13, headers = $14,
-               temperature = $15, max_tokens = $16, enabled = $17,
-               auto_disabled = CASE WHEN $17 = true THEN false ELSE auto_disabled END,
-               deployment_id = COALESCE($18, deployment_id),
-               quota_count_ratio = $19,
-               max_inflight_queue_len = $20, max_context_len = $21,
-               updated_at = NOW()
-           WHERE id = $1"#,
-    )
-    .bind(id)
-    .bind(&req.model_name)
-    .bind(&req.litellm_model)
-    .bind(&req.api_key)
-    .bind(req.api_key_env.unwrap_or(false))
-    .bind(&req.api_base)
-    .bind(&req.api_version)
-    .bind(&req.aws_region_name)
-    .bind(&req.aws_access_key_id)
-    .bind(&req.aws_secret_access_key)
-    .bind(req.rpm)
-    .bind(req.tpm)
-    .bind(req.timeout)
-    .bind(&headers_json)
-    .bind(req.temperature)
-    .bind(req.max_tokens)
-    .bind(req.enabled)
-    .bind(&req.deployment_id)
-    .bind(req.quota_count_ratio.unwrap_or(1))
-    .bind(req.max_inflight_queue_len)
-    .bind(req.max_context_len)
-    .execute(db_pool)
-    .await
-    .map_err(|e| format!("DB update failed: {}", e))?;
+    let input = boom_routing::DeploymentInput {
+        model_name: req.model_name.clone(),
+        litellm_model: req.litellm_model.clone(),
+        api_key: req.api_key.clone(),
+        api_key_env: req.api_key_env,
+        api_base: req.api_base.clone(),
+        api_version: req.api_version.clone(),
+        aws_region_name: req.aws_region_name.clone(),
+        aws_access_key_id: req.aws_access_key_id.clone(),
+        aws_secret_access_key: req.aws_secret_access_key.clone(),
+        rpm: req.rpm,
+        tpm: req.tpm,
+        timeout: req.timeout,
+        headers: headers_json,
+        temperature: req.temperature,
+        max_tokens: req.max_tokens,
+        enabled: req.enabled,
+        deployment_id: req.deployment_id.clone(),
+        quota_count_ratio: req.quota_count_ratio.unwrap_or(1),
+        max_inflight_queue_len: req.max_inflight_queue_len,
+        max_context_len: req.max_context_len,
+    };
 
-    if result.rows_affected() == 0 {
+    let updated = DeploymentStore::update_db(db_pool, id, &input)
+        .await
+        .map_err(|e| format!("DB update failed: {}", e))?;
+
+    if !updated {
         return Err("Model deployment not found".to_string());
     }
 
@@ -175,34 +147,16 @@ async fn handle_delete_model(
 ) -> Result<Value, String> {
     let db_pool = state.db_pool.as_ref().ok_or("Database not available")?;
 
-    // Get model_name + deployment_id before deleting.
-    let row_info: Option<(String, Option<String>)> = sqlx::query_as(
-        r#"SELECT model_name, deployment_id FROM boom_model_deployment WHERE id = $1"#,
-    )
-    .bind(id)
-    .fetch_optional(db_pool)
-    .await
-    .map_err(|e| format!("DB lookup failed: {}", e))?;
+    let info = DeploymentStore::delete_db(db_pool, id)
+        .await
+        .map_err(|e| format!("DB delete failed: {}", e))?;
 
-    let (model_name, old_deployment_id) = match row_info {
-        Some((n, d)) => (n, d),
+    let (model_name, old_deployment_id) = match info {
+        Some(t) => t,
         None => return Err("Model deployment not found".to_string()),
     };
 
-    let result = sqlx::query(
-        r#"DELETE FROM boom_model_deployment WHERE id = $1"#,
-    )
-    .bind(id)
-    .execute(db_pool)
-    .await
-    .map_err(|e| format!("DB delete failed: {}", e))?;
-
-    if result.rows_affected() == 0 {
-        return Err("Model deployment not found".to_string());
-    }
-
     // Reload deployments for this model_name from DB to keep memory in sync.
-    // This handles the case where multiple deployments exist for the same model.
     reload_model_deployments(db_pool, &state.deployment_store, &model_name).await;
 
     // Remove flow control slot (in-flight requests drain naturally).
@@ -220,17 +174,7 @@ pub async fn reload_model_deployments(
     deployment_store: &Arc<DeploymentStore>,
     model_name: &str,
 ) {
-    let rows: Vec<DeploymentRow> = match sqlx::query_as::<_, DeploymentRow>(
-        r#"SELECT model_name, litellm_model, api_key, api_key_env, api_base, api_version,
-                  aws_region_name, timeout, headers, deployment_id
-           FROM boom_model_deployment
-           WHERE model_name = $1 AND enabled IS NOT FALSE
-           ORDER BY created_at"#,
-    )
-    .bind(model_name)
-    .fetch_all(pool)
-    .await
-    {
+    let rows = match DeploymentStore::load_model_rows(pool, model_name).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Failed to reload deployments for '{}': {}", model_name, e);
@@ -266,36 +210,19 @@ pub async fn auto_disable_deployment(
         "Auto-disabling deployment due to consecutive failures"
     );
 
-    // 1. UPDATE DB: set enabled = false, auto_disabled = true.
-    let result = sqlx::query(
-        r#"UPDATE boom_model_deployment
-           SET enabled = false, auto_disabled = true, updated_at = NOW()
-           WHERE deployment_id = $1"#,
-    )
-    .bind(deployment_id)
-    .execute(pool)
-    .await;
-
-    match result {
-        Ok(r) => {
-            if r.rows_affected() == 0 {
-                tracing::warn!(
-                    deployment_id = %deployment_id,
-                    "No rows updated — deployment_id may not exist in DB"
-                );
-                return;
-            }
+    match DeploymentStore::auto_disable_db(pool, deployment_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!(deployment_id = %deployment_id, "No rows updated — deployment_id may not exist in DB");
+            return;
         }
         Err(e) => {
-            tracing::error!(
-                deployment_id = %deployment_id,
-                "Failed to auto-disable deployment in DB: {}", e
-            );
+            tracing::error!(deployment_id = %deployment_id, "Failed to auto-disable deployment in DB: {}", e);
             return;
         }
     }
 
-    // 2. Reload deployments for this model from DB (removes the disabled one from memory).
+    // Reload deployments for this model from DB (removes the disabled one from memory).
     reload_model_deployments(pool, deployment_store, model_name).await;
 
     tracing::warn!(
@@ -305,22 +232,8 @@ pub async fn auto_disable_deployment(
     );
 }
 
-#[derive(Debug, sqlx::FromRow)]
-struct DeploymentRow {
-    model_name: String,
-    litellm_model: String,
-    api_key: Option<String>,
-    api_key_env: Option<bool>,
-    api_base: Option<String>,
-    api_version: Option<String>,
-    aws_region_name: Option<String>,
-    timeout: i64,
-    headers: serde_json::Value,
-    deployment_id: Option<String>,
-}
-
-/// Build a Provider from a DB deployment row.
-fn build_provider_from_row(row: &DeploymentRow) -> Option<Arc<dyn Provider>> {
+/// Build a Provider from a DB deployment row (from DeploymentStore::load_model_rows).
+fn build_provider_from_row(row: &boom_routing::DeploymentProviderRow) -> Option<Arc<dyn Provider>> {
     let mut extra = HashMap::new();
     if let Some(obj) = row.headers.as_object() {
         for (k, v) in obj {

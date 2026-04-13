@@ -322,118 +322,54 @@ impl AppState {
 }
 
 // ═══════════════════════════════════════════════════════════
-// YAML → DB sync (replaces seed_from_yaml + reseed_yaml_in_db)
+// YAML → DB sync (delegates to owning modules' Store methods)
 // ═══════════════════════════════════════════════════════════
 
 /// Sync YAML config to DB: replace source='yaml' rows, handle same-name conflicts.
 ///
-/// For each table (deployments, aliases, plans):
-///   1. DELETE source='yaml' rows → INSERT from current YAML
-///   2. DELETE source='db' rows that conflict with YAML names (aliases & plans)
-///   3. Clean up orphaned assignments
+/// Delegates SQL to owning modules (boom-routing, boom-limiter).
+/// Only plan sync remains here (will move to boom-limiter in Phase 1b).
 async fn sync_yaml_to_db(pool: &PgPool, config: &Config) -> Result<(), sqlx::Error> {
-    // ── Deployments ──
-    sqlx::query(r#"DELETE FROM boom_model_deployment WHERE source = 'yaml'"#)
-        .execute(pool)
-        .await?;
+    // ── Deployments (delegated to DeploymentStore) ──
+    let yaml_model_names: Vec<String> = config.model_list.iter()
+        .map(|e| e.model_name.clone()).collect();
+    let yaml_deployments: Vec<boom_routing::YamlDeploymentData> = config.model_list.iter()
+        .map(|entry| {
+            let p = &entry.litellm_params;
+            boom_routing::YamlDeploymentData {
+                model_name: entry.model_name.clone(),
+                litellm_model: p.model.clone(),
+                api_key: p.api_key.clone(),
+                api_base: p.api_base.clone(),
+                api_version: p.api_version.clone(),
+                aws_region_name: p.aws_region_name.clone(),
+                aws_access_key_id: p.aws_access_key_id.clone(),
+                aws_secret_access_key: p.aws_secret_access_key.clone(),
+                rpm: p.rpm.map(|v| v as i64),
+                tpm: p.tpm.map(|v| v as i64),
+                timeout: p.timeout as i64,
+                headers: serde_json::to_value(&p.headers).unwrap_or(serde_json::json!({})),
+                temperature: p.temperature,
+                max_tokens: p.max_tokens.map(|v| v as i32),
+                deployment_id: entry.model_info.as_ref().and_then(|mi| mi.id.clone()),
+                quota_count_ratio: entry.model_info.as_ref()
+                    .and_then(|mi| mi.quota_count_ratio)
+                    .map(|v| v as i64)
+                    .unwrap_or(1),
+                max_inflight_queue_len: entry.flow_control.as_ref()
+                    .and_then(|fc| fc.model_queue_limit).map(|v| v as i32),
+                max_context_len: entry.flow_control.as_ref()
+                    .and_then(|fc| fc.model_context_limit).map(|v| v as i64),
+            }
+        })
+        .collect();
+    DeploymentStore::sync_yaml_to_db(pool, &yaml_model_names, &yaml_deployments).await?;
 
-    // Delete source='db' deployments that conflict with YAML model_names.
-    if !config.model_list.is_empty() {
-        let yaml_model_names: Vec<String> = config.model_list.iter()
-            .map(|e| e.model_name.clone()).collect();
-        let result = sqlx::query(
-            r#"DELETE FROM boom_model_deployment WHERE source = 'db' AND model_name = ANY($1)"#,
-        )
-        .bind(&yaml_model_names)
-        .execute(pool)
-        .await?;
-        if result.rows_affected() > 0 {
-            tracing::info!(
-                "Removed {} conflicting source='db' deployment(s)",
-                result.rows_affected()
-            );
-        }
-    }
-
-    for entry in &config.model_list {
-        let p = &entry.litellm_params;
-        let headers_json = serde_json::to_value(&p.headers).unwrap_or(serde_json::json!({}));
-        let deployment_id = entry.model_info.as_ref().and_then(|mi| mi.id.clone());
-        let quota_ratio = entry.model_info.as_ref()
-            .and_then(|mi| mi.quota_count_ratio)
-            .map(|v| v as i64)
-            .unwrap_or(1);
-        sqlx::query(
-            r#"INSERT INTO boom_model_deployment
-               (model_name, litellm_model, api_key, api_key_env, api_base, api_version,
-                aws_region_name, aws_access_key_id, aws_secret_access_key,
-                rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source, deployment_id,
-                quota_count_ratio, max_inflight_queue_len, max_context_len)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, true, 'yaml', $16,
-                $17, $18, $19)"#,
-        )
-        .bind(&entry.model_name)
-        .bind(&p.model)
-        .bind(&p.api_key)
-        .bind(false) // api_key already resolved by load_config
-        .bind(&p.api_base)
-        .bind(&p.api_version)
-        .bind(&p.aws_region_name)
-        .bind(&p.aws_access_key_id)
-        .bind(&p.aws_secret_access_key)
-        .bind(p.rpm.map(|v| v as i64))
-        .bind(p.tpm.map(|v| v as i64))
-        .bind(p.timeout as i64)
-        .bind(&headers_json)
-        .bind(p.temperature)
-        .bind(p.max_tokens.map(|v| v as i32))
-        .bind(&deployment_id)
-        .bind(quota_ratio)
-        .bind(entry.flow_control.as_ref().and_then(|fc| fc.model_queue_limit).map(|v| v as i32))
-        .bind(entry.flow_control.as_ref().and_then(|fc| fc.model_context_limit).map(|v| v as i64))
-        .execute(pool)
-        .await?;
-    }
-    tracing::info!("Synced {} deployment(s) from YAML to DB", config.model_list.len());
-
-    // ── Aliases ──
-    sqlx::query(r#"DELETE FROM boom_model_alias WHERE source = 'yaml'"#)
-        .execute(pool)
-        .await?;
-
-    for (alias, alias_cfg) in &config.router_settings.model_group_alias {
-        sqlx::query(
-            r#"INSERT INTO boom_model_alias (alias_name, target_model, hidden, source)
-               VALUES ($1, $2, $3, 'yaml')"#,
-        )
-        .bind(alias)
-        .bind(alias_cfg.target_model())
-        .bind(alias_cfg.is_hidden())
-        .execute(pool)
-        .await?;
-    }
-
-    // Delete source='db' aliases that conflict with YAML alias names.
-    if !config.router_settings.model_group_alias.is_empty() {
-        let yaml_alias_names: Vec<String> =
-            config.router_settings.model_group_alias.keys().cloned().collect();
-        let result = sqlx::query(
-            r#"DELETE FROM boom_model_alias WHERE source = 'db' AND alias_name = ANY($1)"#,
-        )
-        .bind(&yaml_alias_names)
-        .execute(pool)
-        .await?;
-        if result.rows_affected() > 0 {
-            tracing::info!(
-                "Removed {} conflicting source='db' alias(es)",
-                result.rows_affected()
-            );
-        }
-    }
-    tracing::info!(
-        "Synced {} alias(es) from YAML to DB",
-        config.router_settings.model_group_alias.len()
-    );
+    // ── Aliases (delegated to AliasStore) ──
+    let yaml_aliases: Vec<(String, String, bool)> = config.router_settings.model_group_alias.iter()
+        .map(|(alias, cfg)| (alias.clone(), cfg.target_model().to_string(), cfg.is_hidden()))
+        .collect();
+    AliasStore::sync_yaml_to_db(pool, &yaml_aliases).await?;
 
     // ── Plans ──
     // 1. Delete all source='yaml' rows (stale YAML plans from previous run).
@@ -510,49 +446,16 @@ async fn sync_yaml_to_db(pool: &PgPool, config: &Config) -> Result<(), sqlx::Err
 // DB-only loading (source='db' records on top of YAML stores)
 // ═══════════════════════════════════════════════════════════
 
-/// Row from boom_model_deployment.
-#[derive(Debug, sqlx::FromRow)]
-#[allow(dead_code)]
-struct DeploymentRow {
-    id: uuid::Uuid,
-    model_name: String,
-    litellm_model: String,
-    api_key: Option<String>,
-    api_key_env: Option<bool>,
-    api_base: Option<String>,
-    api_version: Option<String>,
-    aws_region_name: Option<String>,
-    aws_access_key_id: Option<String>,
-    aws_secret_access_key: Option<String>,
-    rpm: Option<i64>,
-    tpm: Option<i64>,
-    timeout: i64,
-    headers: serde_json::Value,
-    temperature: Option<f64>,
-    max_tokens: Option<i32>,
-    enabled: Option<bool>,
-    source: Option<String>,
-    deployment_id: Option<String>,
-    max_inflight_queue_len: Option<i32>,
-    max_context_len: Option<i64>,
-}
 
-/// Load source='db' model deployments from DB and add providers to DeploymentStore.
-/// Uses add_deployment (not set_deployments) so YAML providers for the same model are preserved.
-async fn load_db_only_deployments(pool: &PgPool, deployment_store: &Arc<DeploymentStore>,
-                                   flow_controller: &Arc<FlowController>) {
-    let rows: Vec<DeploymentRow> = match sqlx::query_as::<_, DeploymentRow>(
-        r#"SELECT id, model_name, litellm_model, api_key, api_key_env, api_base, api_version,
-                  aws_region_name, aws_access_key_id, aws_secret_access_key,
-                  rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source, deployment_id,
-                  max_inflight_queue_len, max_context_len
-           FROM boom_model_deployment
-           WHERE source = 'db' AND enabled IS NOT FALSE
-           ORDER BY model_name, created_at"#,
-    )
-    .fetch_all(pool)
-    .await
-    {
+/// Build providers from DB deployment rows and add to DeploymentStore.
+/// Uses DeploymentStore::load_db_only_rows() for SQL, creates providers here
+/// (because creating Arc<dyn Provider> requires boom-provider which boom-routing doesn't depend on).
+async fn load_db_only_deployments(
+    pool: &PgPool,
+    deployment_store: &Arc<DeploymentStore>,
+    flow_controller: &Arc<FlowController>,
+) {
+    let rows = match DeploymentStore::load_db_only_rows(pool).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Failed to load DB-only deployments: {}", e);
@@ -561,7 +464,6 @@ async fn load_db_only_deployments(pool: &PgPool, deployment_store: &Arc<Deployme
     };
 
     let mut deployment_count = 0;
-
     for row in &rows {
         let mut extra = std::collections::HashMap::new();
         if let Some(obj) = row.headers.as_object() {
@@ -597,25 +499,34 @@ async fn load_db_only_deployments(pool: &PgPool, deployment_store: &Arc<Deployme
             Ok(provider) => {
                 deployment_store.add_deployment(&row.model_name, provider);
                 deployment_count += 1;
-
-                // Seed flow control for DB deployments.
-                if let Some(ref did) = row.deployment_id {
-                    let max_inflight = row.max_inflight_queue_len.unwrap_or(0) as u32;
-                    let max_context = row.max_context_len.unwrap_or(0) as u64;
-                    if max_inflight > 0 || max_context > 0 {
-                        flow_controller.ensure_slot(did, &FlowControlConfig {
-                            max_inflight,
-                            max_context,
-                        });
-                    }
-                }
             }
             Err(e) => {
-                tracing::error!(
-                    "Failed to create provider for model '{}': {}",
-                    row.model_name,
-                    e
-                );
+                tracing::error!("Failed to create provider for model '{}': {}", row.model_name, e);
+            }
+        }
+    }
+
+    // Seed flow control for DB-only deployments using full rows.
+    let fc_rows = match DeploymentStore::list_all_db(pool).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Failed to load DB deployments for flow control: {}", e);
+            tracing::info!("Loaded {} DB-only deployment(s)", deployment_count);
+            return;
+        }
+    };
+    for row in &fc_rows {
+        if row.source.as_deref() != Some("db") {
+            continue;
+        }
+        if let Some(ref did) = row.deployment_id {
+            let max_inflight = row.max_inflight_queue_len.unwrap_or(0) as u32;
+            let max_context = row.max_context_len.unwrap_or(0) as u64;
+            if max_inflight > 0 || max_context > 0 {
+                flow_controller.ensure_slot(did, &FlowControlConfig {
+                    max_inflight,
+                    max_context,
+                });
             }
         }
     }
@@ -623,38 +534,9 @@ async fn load_db_only_deployments(pool: &PgPool, deployment_store: &Arc<Deployme
     tracing::info!("Loaded {} DB-only deployment(s)", deployment_count);
 }
 
-/// Row from boom_model_alias.
-#[derive(Debug, sqlx::FromRow)]
-struct AliasRow {
-    alias_name: String,
-    target_model: String,
-    hidden: Option<bool>,
-}
-
-/// Load source='db' model aliases from DB → AliasStore.
+/// Load source='db' aliases from DB (delegated to AliasStore).
 async fn load_db_only_aliases(pool: &PgPool, alias_store: &Arc<AliasStore>) {
-    let rows: Vec<AliasRow> = match sqlx::query_as::<_, AliasRow>(
-        r#"SELECT alias_name, target_model, hidden FROM boom_model_alias WHERE source = 'db'"#,
-    )
-    .fetch_all(pool)
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!("Failed to load DB-only aliases: {}", e);
-            return;
-        }
-    };
-
-    for row in &rows {
-        alias_store.set_alias(
-            row.alias_name.clone(),
-            row.target_model.clone(),
-            row.hidden.unwrap_or(false),
-        );
-    }
-
-    tracing::info!("Loaded {} DB-only alias(es)", rows.len());
+    alias_store.load_db_only(pool).await;
 }
 
 /// Row from boom_rate_limit_plan.
@@ -1026,33 +908,6 @@ fn parse_schedule(value: &serde_json::Value) -> Vec<ScheduleSlot> {
 // Config snapshot (DB → YAML)
 // ═══════════════════════════════════════════════════════════
 
-/// Row for snapshot: only fields needed for config.yaml export.
-#[derive(Debug, sqlx::FromRow)]
-struct SnapshotDeploymentRow {
-    model_name: String,
-    litellm_model: String,
-    api_key: Option<String>,
-    api_base: Option<String>,
-    api_version: Option<String>,
-    aws_region_name: Option<String>,
-    aws_access_key_id: Option<String>,
-    aws_secret_access_key: Option<String>,
-    rpm: Option<i64>,
-    tpm: Option<i64>,
-    timeout: i64,
-    headers: serde_json::Value,
-    temperature: Option<f64>,
-    max_tokens: Option<i32>,
-    deployment_id: Option<String>,
-    max_inflight_queue_len: Option<i32>,
-    max_context_len: Option<i64>,
-}
-#[derive(Debug, sqlx::FromRow)]
-struct SnapshotAliasRow {
-    alias_name: String,
-    target_model: String,
-}
-
 /// Row for snapshot: plan + is_default.
 #[derive(Debug, sqlx::FromRow)]
 struct SnapshotPlanRow {
@@ -1067,18 +922,8 @@ struct SnapshotPlanRow {
 /// Build a serde_json::Value representing the current runtime config
 /// (model_list, router_settings.model_group_alias, plan_settings).
 async fn build_config_snapshot_value(pool: &PgPool) -> Result<serde_json::Value, sqlx::Error> {
-    // ── Model list ──
-    let model_rows: Vec<SnapshotDeploymentRow> = sqlx::query_as::<_, SnapshotDeploymentRow>(
-        r#"SELECT model_name, litellm_model, api_key, api_base, api_version,
-                  aws_region_name, aws_access_key_id, aws_secret_access_key,
-                  rpm, tpm, timeout, headers, temperature, max_tokens, deployment_id,
-                  max_inflight_queue_len, max_context_len
-           FROM boom_model_deployment
-           WHERE enabled IS NOT FALSE
-           ORDER BY model_name, created_at"#,
-    )
-    .fetch_all(pool)
-    .await?;
+    // ── Model list (delegated to DeploymentStore) ──
+    let model_rows = DeploymentStore::snapshot_db(pool).await?;
 
     let model_list: Vec<serde_json::Value> = model_rows
         .into_iter()
@@ -1153,16 +998,12 @@ async fn build_config_snapshot_value(pool: &PgPool) -> Result<serde_json::Value,
         })
         .collect();
 
-    // ── Aliases ──
-    let alias_rows: Vec<SnapshotAliasRow> = sqlx::query_as::<_, SnapshotAliasRow>(
-        r#"SELECT alias_name, target_model FROM boom_model_alias ORDER BY alias_name"#,
-    )
-    .fetch_all(pool)
-    .await?;
+    // ── Aliases (delegated to AliasStore) ──
+    let alias_rows = AliasStore::snapshot_db(pool).await?;
 
     let model_group_alias: serde_json::Map<String, serde_json::Value> = alias_rows
         .into_iter()
-        .map(|r| (r.alias_name, serde_json::Value::String(r.target_model)))
+        .map(|(alias_name, target_model)| (alias_name, serde_json::Value::String(target_model)))
         .collect();
 
     // ── Plans ──

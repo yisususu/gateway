@@ -397,7 +397,13 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "boom-core",
+ "chrono",
  "dashmap",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
