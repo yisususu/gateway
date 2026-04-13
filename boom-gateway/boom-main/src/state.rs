@@ -135,18 +135,18 @@ impl AppState {
             }
 
             // Sync YAML config to DB (upsert source='yaml', handle conflicts).
-            if let Err(e) = sync_yaml_to_db(pool, &config).await {
+            if let Err(e) = sync_yaml_to_db(pool, &config, &plan_store).await {
                 tracing::error!("Failed to sync YAML to DB: {}", e);
             }
 
             // Load source='db' records on top of YAML-built stores.
             load_db_only_deployments(pool, &deployment_store, &flow_controller).await;
             load_db_only_aliases(pool, &alias_store).await;
-            load_db_only_plans(pool, &plan_store).await;
+            plan_store.load_db_only_plans(pool).await;
 
             // Restore runtime state.
-            restore_assignments_from_db(pool, &plan_store).await;
-            restore_counters_from_db(pool, &limiter).await;
+            plan_store.restore_assignments_from_db(pool).await;
+            limiter.restore_counters_from_db(pool).await;
         }
 
         // 6. Build inner state (config + auth + health).
@@ -227,14 +227,14 @@ impl AppState {
 
         if let Some(ref pool) = db_pool {
             // Sync YAML config to DB (upsert source='yaml', handle conflicts).
-            if let Err(e) = sync_yaml_to_db(pool, &new_config).await {
+            if let Err(e) = sync_yaml_to_db(pool, &new_config, &self.plan_store).await {
                 tracing::error!("Failed to sync YAML to DB: {}", e);
             }
 
             // Load source='db' records on top of YAML-built stores.
             load_db_only_deployments(pool, &self.deployment_store, &self.flow_controller).await;
             load_db_only_aliases(pool, &self.alias_store).await;
-            load_db_only_plans(pool, &self.plan_store).await;
+            self.plan_store.load_db_only_plans(pool).await;
         }
 
         // Clean up assignments pointing to plans that no longer exist.
@@ -329,7 +329,7 @@ impl AppState {
 ///
 /// Delegates SQL to owning modules (boom-routing, boom-limiter).
 /// Only plan sync remains here (will move to boom-limiter in Phase 1b).
-async fn sync_yaml_to_db(pool: &PgPool, config: &Config) -> Result<(), sqlx::Error> {
+async fn sync_yaml_to_db(pool: &PgPool, config: &Config, plan_store: &Arc<PlanStore>) -> Result<(), sqlx::Error> {
     // ── Deployments (delegated to DeploymentStore) ──
     let yaml_model_names: Vec<String> = config.model_list.iter()
         .map(|e| e.model_name.clone()).collect();
@@ -371,73 +371,14 @@ async fn sync_yaml_to_db(pool: &PgPool, config: &Config) -> Result<(), sqlx::Err
         .collect();
     AliasStore::sync_yaml_to_db(pool, &yaml_aliases).await?;
 
-    // ── Plans ──
-    // 1. Delete all source='yaml' rows (stale YAML plans from previous run).
-    sqlx::query(r#"DELETE FROM boom_rate_limit_plan WHERE source = 'yaml'"#)
-        .execute(pool)
-        .await?;
-
-    // 2. Delete source='db' plans that conflict with YAML names BEFORE inserting.
-    //    This prevents unique-key conflicts on the next INSERT.
-    if !config.plan_settings.plans.is_empty() {
-        let yaml_plan_names: Vec<String> = config.plan_settings.plans.keys().cloned().collect();
-        let result = sqlx::query(
-            r#"DELETE FROM boom_rate_limit_plan WHERE source = 'db' AND name = ANY($1)"#,
-        )
-        .bind(&yaml_plan_names)
-        .execute(pool)
-        .await?;
-        if result.rows_affected() > 0 {
-            tracing::info!(
-                "Removed {} conflicting source='db' plan(s)",
-                result.rows_affected()
-            );
-        }
-    }
-
-    // 3. Insert current YAML plans as source='yaml'.
-    for (name, pc) in &config.plan_settings.plans {
-        let window_limits_json = serde_json::to_value(&pc.window_limits).unwrap_or(serde_json::json!([]));
-        let schedule_json = serde_json::to_value(
-            pc.schedule
-                .iter()
-                .map(|s| serde_json::json!({
-                    "hours": s.hours,
-                    "concurrency_limit": s.concurrency_limit,
-                    "rpm_limit": s.rpm_limit,
-                    "window_limits": s.window_limits,
-                }))
-                .collect::<Vec<_>>(),
-        )
-        .unwrap_or(serde_json::json!([]));
-
-        let is_default = config.plan_settings.default_plan.as_deref() == Some(name.as_str());
-
-        sqlx::query(
-            r#"INSERT INTO boom_rate_limit_plan
-               (name, concurrency_limit, rpm_limit, window_limits, schedule, is_default, source)
-               VALUES ($1, $2, $3, $4, $5, $6, 'yaml')"#,
-        )
-        .bind(name)
-        .bind(pc.concurrency_limit.map(|v| v as i32))
-        .bind(pc.rpm_limit.map(|v| v as i64))
-        .bind(&window_limits_json)
-        .bind(&schedule_json)
-        .bind(is_default)
-        .execute(pool)
-        .await?;
-    }
-
-    tracing::info!("Synced {} plan(s) from YAML to DB", config.plan_settings.plans.len());
-
-    // ── Clean up orphaned assignments ──
-    // Delete assignments pointing to plans that no longer exist in DB.
-    sqlx::query(
-        r#"DELETE FROM boom_key_plan_assignment
-           WHERE plan_name NOT IN (SELECT name FROM boom_rate_limit_plan)"#,
-    )
-    .execute(pool)
-    .await?;
+    // ── Plans (delegated to PlanStore) ──
+    // plan_store already has RateLimitPlan objects loaded by load_plans_from_config.
+    let all_plans = plan_store.list_plans();
+    let yaml_plans: Vec<(String, &RateLimitPlan)> = all_plans.iter()
+        .map(|p| (p.name.clone(), p))
+        .collect();
+    let default_plan = config.plan_settings.default_plan.as_deref();
+    PlanStore::sync_yaml_to_db(pool, &yaml_plans, default_plan).await?;
 
     Ok(())
 }
@@ -539,96 +480,6 @@ async fn load_db_only_aliases(pool: &PgPool, alias_store: &Arc<AliasStore>) {
     alias_store.load_db_only(pool).await;
 }
 
-/// Row from boom_rate_limit_plan.
-#[derive(Debug, sqlx::FromRow)]
-struct PlanRow {
-    name: String,
-    concurrency_limit: Option<i32>,
-    rpm_limit: Option<i64>,
-    window_limits: serde_json::Value,
-    schedule: serde_json::Value,
-    #[allow(dead_code)]
-    is_default: Option<bool>,
-}
-
-/// Load source='db' plans from DB → PlanStore.
-async fn load_db_only_plans(pool: &PgPool, plan_store: &Arc<PlanStore>) {
-    let rows: Vec<PlanRow> = match sqlx::query_as::<_, PlanRow>(
-        r#"SELECT name, concurrency_limit, rpm_limit, window_limits, schedule, is_default
-           FROM boom_rate_limit_plan
-           WHERE source = 'db'"#,
-    )
-    .fetch_all(pool)
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!("Failed to load DB-only plans: {}", e);
-            return;
-        }
-    };
-
-    for row in &rows {
-        let window_limits = parse_window_limits(&row.window_limits);
-        let schedule = parse_schedule(&row.schedule);
-
-        let plan = RateLimitPlan {
-            name: row.name.clone(),
-            concurrency_limit: row.concurrency_limit.map(|v| v as u32),
-            rpm_limit: row.rpm_limit.map(|v| v as u64),
-            window_limits,
-            schedule,
-        };
-
-        plan_store.upsert_plan(plan);
-    }
-
-    tracing::info!("Loaded {} DB-only plan(s)", rows.len());
-}
-
-/// Restore key→plan assignments from DB.
-async fn restore_assignments_from_db(pool: &PgPool, plan_store: &Arc<PlanStore>) {
-    match sqlx::query_as::<_, (String, String)>(
-        r#"SELECT key_hash, plan_name FROM boom_key_plan_assignment"#,
-    )
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => {
-            let count = rows.len();
-            for (key_hash, plan_name) in rows {
-                plan_store.restore_assignment(&key_hash, &plan_name);
-            }
-            tracing::info!("Restored {} key→plan assignment(s) from DB", count);
-        }
-        Err(e) => {
-            tracing::error!("Failed to restore assignments: {}", e);
-        }
-    }
-}
-
-/// Restore rate limit counters from DB.
-async fn restore_counters_from_db(pool: &PgPool, limiter: &Arc<SlidingWindowLimiter>) {
-    match sqlx::query_as::<_, (String, i64, i64, i64)>(
-        r#"SELECT cache_key, count, window_start, window_secs
-           FROM boom_rate_limit_state
-           WHERE window_start + window_secs > EXTRACT(EPOCH FROM NOW())::BIGINT"#,
-    )
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => {
-            let count = rows.len();
-            for (cache_key, count_val, window_start, window_secs) in rows {
-                limiter.restore_counter(cache_key, count_val as u64, window_start as u64, window_secs as u64);
-            }
-            tracing::info!("Restored {} rate limit counter(s) from DB", count);
-        }
-        Err(e) => {
-            tracing::error!("Failed to restore rate limit state: {}", e);
-        }
-    }
-}
 
 // ═══════════════════════════════════════════════════════════
 // YAML → Memory (no-DB fallback)
@@ -862,62 +713,9 @@ fn convert_schedule(slots: &[boom_config::ScheduleSlotConfig]) -> Vec<ScheduleSl
         .collect()
 }
 
-/// Parse window_limits from JSONB (array of [count, window_secs]).
-fn parse_window_limits(value: &serde_json::Value) -> Vec<(u64, u64)> {
-    value
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|item| {
-                    let a = item.as_array()?;
-                    if a.len() >= 2 {
-                        Some((a[0].as_u64()?, a[1].as_u64()?))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Parse schedule from JSONB.
-fn parse_schedule(value: &serde_json::Value) -> Vec<ScheduleSlot> {
-    value
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|item| {
-                    let obj = item.as_object()?;
-                    Some(ScheduleSlot {
-                        hours: obj.get("hours")?.as_str()?.to_string(),
-                        concurrency_limit: obj
-                            .get("concurrency_limit")
-                            .and_then(|v| v.as_u64())
-                            .map(|v| v as u32),
-                        rpm_limit: obj.get("rpm_limit").and_then(|v| v.as_u64()),
-                        window_limits: parse_window_limits(obj.get("window_limits")?),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 // ═══════════════════════════════════════════════════════════
 // Config snapshot (DB → YAML)
 // ═══════════════════════════════════════════════════════════
-
-/// Row for snapshot: plan + is_default.
-#[derive(Debug, sqlx::FromRow)]
-struct SnapshotPlanRow {
-    name: String,
-    concurrency_limit: Option<i32>,
-    rpm_limit: Option<i64>,
-    window_limits: serde_json::Value,
-    schedule: serde_json::Value,
-    is_default: Option<bool>,
-}
 
 /// Build a serde_json::Value representing the current runtime config
 /// (model_list, router_settings.model_group_alias, plan_settings).
@@ -1006,13 +804,8 @@ async fn build_config_snapshot_value(pool: &PgPool) -> Result<serde_json::Value,
         .map(|(alias_name, target_model)| (alias_name, serde_json::Value::String(target_model)))
         .collect();
 
-    // ── Plans ──
-    let plan_rows: Vec<SnapshotPlanRow> = sqlx::query_as::<_, SnapshotPlanRow>(
-        r#"SELECT name, concurrency_limit, rpm_limit, window_limits, schedule, is_default
-           FROM boom_rate_limit_plan ORDER BY name"#,
-    )
-    .fetch_all(pool)
-    .await?;
+    // ── Plans (delegated to PlanStore) ──
+    let plan_rows = PlanStore::snapshot_plans_db(pool).await?;
 
     let mut default_plan: Option<String> = None;
     let mut plans_map = serde_json::Map::new();

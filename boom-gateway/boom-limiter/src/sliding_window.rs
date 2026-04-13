@@ -272,6 +272,58 @@ impl Default for SlidingWindowLimiter {
     }
 }
 
+// ═══════════════════════════════════════════════════════════
+// DB operations (boom_limiter owns boom_rate_limit_state table)
+// ═══════════════════════════════════════════════════════════
+
+impl SlidingWindowLimiter {
+    /// Restore active rate limit counters from DB.
+    pub async fn restore_counters_from_db(&self, pool: &sqlx::PgPool) {
+        match sqlx::query_as::<_, (String, i64, i64, i64)>(
+            r#"SELECT cache_key, count, window_start, window_secs
+               FROM boom_rate_limit_state
+               WHERE window_start + window_secs > EXTRACT(EPOCH FROM NOW())::BIGINT"#,
+        )
+        .fetch_all(pool)
+        .await
+        {
+            Ok(rows) => {
+                let count = rows.len();
+                for (cache_key, count_val, window_start, window_secs) in rows {
+                    self.restore_counter(cache_key, count_val as u64, window_start as u64, window_secs as u64);
+                }
+                tracing::info!("Restored {} rate limit counter(s) from DB", count);
+            }
+            Err(e) => {
+                tracing::error!("Failed to restore rate limit state: {}", e);
+            }
+        }
+    }
+
+    /// Sync in-memory counters to DB (periodic background task).
+    pub async fn sync_counters_to_db(&self, pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
+        let entries = self.snapshot();
+        for (cache_key, count, window_start, window_secs) in &entries {
+            sqlx::query(
+                r#"INSERT INTO boom_rate_limit_state (cache_key, count, window_start, window_secs, updated_at)
+                   VALUES ($1, $2, $3, $4, NOW())
+                   ON CONFLICT (cache_key) DO UPDATE
+                   SET count = EXCLUDED.count,
+                       window_start = EXCLUDED.window_start,
+                       window_secs = EXCLUDED.window_secs,
+                       updated_at = NOW()"#,
+            )
+            .bind(cache_key)
+            .bind(*count as i64)
+            .bind(*window_start as i64)
+            .bind(*window_secs as i64)
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl RateLimiter for SlidingWindowLimiter {
     async fn check_and_record(

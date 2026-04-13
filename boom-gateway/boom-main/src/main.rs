@@ -302,28 +302,7 @@ fn spawn_sync_task(state: AppState, mut shutdown: tokio::sync::broadcast::Receiv
                 let count = entries.len();
                 let batch_result = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
-                    async {
-                        for (cache_key, count, window_start, window_secs) in &entries {
-                            if let Err(e) = sqlx::query(
-                                r#"INSERT INTO boom_rate_limit_state (cache_key, count, window_start, window_secs, updated_at)
-                                   VALUES ($1, $2, $3, $4, NOW())
-                                   ON CONFLICT (cache_key) DO UPDATE
-                                   SET count = EXCLUDED.count,
-                                       window_start = EXCLUDED.window_start,
-                                       window_secs = EXCLUDED.window_secs,
-                                       updated_at = NOW()"#,
-                            )
-                            .bind(cache_key)
-                            .bind(*count as i64)
-                            .bind(*window_start as i64)
-                            .bind(*window_secs as i64)
-                            .execute(&pool)
-                            .await
-                            {
-                                tracing::error!("Failed to upsert rate limit state: {}", e);
-                            }
-                        }
-                    },
+                    limiter.sync_counters_to_db(&pool),
                 )
                 .await;
                 if batch_result.is_err() {
@@ -339,23 +318,7 @@ fn spawn_sync_task(state: AppState, mut shutdown: tokio::sync::broadcast::Receiv
                 let assign_count = assignments.len();
                 let batch_result = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
-                    async {
-                        for (key_hash, plan_name) in &assignments {
-                            if let Err(e) = sqlx::query(
-                                r#"INSERT INTO boom_key_plan_assignment (key_hash, plan_name, assigned_at)
-                                   VALUES ($1, $2, NOW())
-                                   ON CONFLICT (key_hash) DO UPDATE
-                                   SET plan_name = EXCLUDED.plan_name"#,
-                            )
-                            .bind(key_hash)
-                            .bind(plan_name)
-                            .execute(&pool)
-                            .await
-                            {
-                                tracing::error!("Failed to upsert assignment: {}", e);
-                            }
-                        }
-                    },
+                    plan_store.sync_assignments_to_db(&pool),
                 )
                 .await;
                 if batch_result.is_err() {

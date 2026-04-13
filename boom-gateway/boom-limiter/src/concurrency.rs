@@ -276,6 +276,284 @@ impl Default for PlanStore {
     }
 }
 
+// ═══════════════════════════════════════════════════════════
+// DB operations (boom_limiter owns plan + assignment tables)
+// ═══════════════════════════════════════════════════════════
+
+/// Row for plan snapshot queries.
+#[derive(Debug, sqlx::FromRow)]
+pub struct PlanRow {
+    pub name: String,
+    pub concurrency_limit: Option<i32>,
+    pub rpm_limit: Option<i64>,
+    pub window_limits: serde_json::Value,
+    pub schedule: serde_json::Value,
+    pub is_default: Option<bool>,
+}
+
+impl PlanStore {
+    /// Sync YAML plans to DB: delete source='yaml', delete conflicts, insert, cleanup orphans.
+    pub async fn sync_yaml_to_db(
+        pool: &sqlx::PgPool,
+        yaml_plans: &[(String, &RateLimitPlan)],
+        default_plan_name: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        // 1. Delete all source='yaml' rows.
+        sqlx::query(r#"DELETE FROM boom_rate_limit_plan WHERE source = 'yaml'"#)
+            .execute(pool)
+            .await?;
+
+        // 2. Delete source='db' plans that conflict with YAML names.
+        if !yaml_plans.is_empty() {
+            let yaml_names: Vec<String> = yaml_plans.iter().map(|(n, _)| n.clone()).collect();
+            let result = sqlx::query(
+                r#"DELETE FROM boom_rate_limit_plan WHERE source = 'db' AND name = ANY($1)"#,
+            )
+            .bind(&yaml_names)
+            .execute(pool)
+            .await?;
+            if result.rows_affected() > 0 {
+                tracing::info!("Removed {} conflicting source='db' plan(s)", result.rows_affected());
+            }
+        }
+
+        // 3. Insert YAML plans.
+        for (name, pc) in yaml_plans {
+            let window_limits_json = serde_json::to_value(&pc.window_limits).unwrap_or(serde_json::json!([]));
+            let schedule_json = serde_json::to_value(
+                pc.schedule.iter().map(|s| serde_json::json!({
+                    "hours": s.hours,
+                    "concurrency_limit": s.concurrency_limit,
+                    "rpm_limit": s.rpm_limit,
+                    "window_limits": s.window_limits,
+                })).collect::<Vec<_>>(),
+            ).unwrap_or(serde_json::json!([]));
+            let is_default = default_plan_name == Some(name.as_str());
+
+            sqlx::query(
+                r#"INSERT INTO boom_rate_limit_plan
+                   (name, concurrency_limit, rpm_limit, window_limits, schedule, is_default, source)
+                   VALUES ($1, $2, $3, $4, $5, $6, 'yaml')"#,
+            )
+            .bind(name)
+            .bind(pc.concurrency_limit.map(|v| v as i32))
+            .bind(pc.rpm_limit.map(|v| v as i64))
+            .bind(&window_limits_json)
+            .bind(&schedule_json)
+            .bind(is_default)
+            .execute(pool)
+            .await?;
+        }
+
+        tracing::info!("Synced {} plan(s) from YAML to DB", yaml_plans.len());
+
+        // 4. Clean up orphaned assignments.
+        sqlx::query(
+            r#"DELETE FROM boom_key_plan_assignment
+               WHERE plan_name NOT IN (SELECT name FROM boom_rate_limit_plan)"#,
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Load source='db' plans from DB into memory.
+    pub async fn load_db_only_plans(&self, pool: &sqlx::PgPool) {
+        let rows: Vec<PlanRow> = match sqlx::query_as::<_, PlanRow>(
+            r#"SELECT name, concurrency_limit, rpm_limit, window_limits, schedule, is_default
+               FROM boom_rate_limit_plan WHERE source = 'db'"#,
+        )
+        .fetch_all(pool)
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Failed to load DB-only plans: {}", e);
+                return;
+            }
+        };
+
+        for row in &rows {
+            let plan = row_to_plan(row);
+            self.upsert_plan(plan);
+        }
+
+        tracing::info!("Loaded {} DB-only plan(s)", rows.len());
+    }
+
+    /// Restore key→plan assignments from DB.
+    pub async fn restore_assignments_from_db(&self, pool: &sqlx::PgPool) {
+        match sqlx::query_as::<_, (String, String)>(
+            r#"SELECT key_hash, plan_name FROM boom_key_plan_assignment"#,
+        )
+        .fetch_all(pool)
+        .await
+        {
+            Ok(rows) => {
+                let count = rows.len();
+                for (key_hash, plan_name) in rows {
+                    self.restore_assignment(&key_hash, &plan_name);
+                }
+                tracing::info!("Restored {} key→plan assignment(s) from DB", count);
+            }
+            Err(e) => {
+                tracing::error!("Failed to restore assignments: {}", e);
+            }
+        }
+    }
+
+    /// Upsert a plan in DB (source='db') and update memory.
+    pub async fn upsert_plan_db(&self, pool: &sqlx::PgPool, plan: &RateLimitPlan) -> Result<(), sqlx::Error> {
+        let window_limits_json = serde_json::to_value(&plan.window_limits).unwrap_or(serde_json::json!([]));
+        let schedule_json = serde_json::to_value(
+            plan.schedule.iter().map(|s| serde_json::json!({
+                "hours": s.hours,
+                "concurrency_limit": s.concurrency_limit,
+                "rpm_limit": s.rpm_limit,
+                "window_limits": s.window_limits,
+            })).collect::<Vec<_>>(),
+        ).unwrap_or(serde_json::json!([]));
+
+        sqlx::query(
+            r#"INSERT INTO boom_rate_limit_plan (name, concurrency_limit, rpm_limit, window_limits, schedule, is_default, source)
+               VALUES ($1, $2, $3, $4, $5, false, 'db')
+               ON CONFLICT (name) DO UPDATE
+               SET concurrency_limit = EXCLUDED.concurrency_limit,
+                   rpm_limit = EXCLUDED.rpm_limit,
+                   window_limits = EXCLUDED.window_limits,
+                   schedule = EXCLUDED.schedule,
+                   source = 'db',
+                   updated_at = NOW()"#,
+        )
+        .bind(&plan.name)
+        .bind(plan.concurrency_limit.map(|v| v as i32))
+        .bind(plan.rpm_limit.map(|v| v as i64))
+        .bind(&window_limits_json)
+        .bind(&schedule_json)
+        .execute(pool)
+        .await?;
+
+        self.upsert_plan(plan.clone());
+        Ok(())
+    }
+
+    /// Delete a plan from DB and memory.
+    pub async fn delete_plan_db(&self, pool: &sqlx::PgPool, name: &str) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(r#"DELETE FROM boom_rate_limit_plan WHERE name = $1"#)
+            .bind(name)
+            .execute(pool)
+            .await?;
+
+        if result.rows_affected() > 0 {
+            self.delete_plan(name);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Assign a key to a plan in DB and memory.
+    pub async fn assign_key_db(&self, pool: &sqlx::PgPool, key_hash: &str, plan_name: &str) -> Result<(), String> {
+        self.assign_key(key_hash, plan_name)?;
+
+        if let Err(e) = sqlx::query(
+            r#"INSERT INTO boom_key_plan_assignment (key_hash, plan_name, assigned_at)
+               VALUES ($1, $2, NOW())
+               ON CONFLICT (key_hash) DO UPDATE
+               SET plan_name = EXCLUDED.plan_name"#,
+        )
+        .bind(key_hash)
+        .bind(plan_name)
+        .execute(pool)
+        .await
+        {
+            // Roll back memory on DB failure.
+            self.unassign_key(key_hash);
+            return Err(format!("DB error: {}", e));
+        }
+        Ok(())
+    }
+
+    /// Unassign a key from its plan in DB and memory.
+    pub async fn unassign_key_db(&self, pool: &sqlx::PgPool, key_hash: &str) -> Result<bool, String> {
+        let result = sqlx::query(r#"DELETE FROM boom_key_plan_assignment WHERE key_hash = $1"#)
+            .bind(key_hash)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("DB error: {}", e))?;
+
+        if result.rows_affected() > 0 {
+            self.unassign_key(key_hash);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Sync in-memory assignments to DB (periodic background task).
+    pub async fn sync_assignments_to_db(&self, pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
+        let assignments = self.snapshot_assignments();
+        for (key_hash, plan_name) in &assignments {
+            sqlx::query(
+                r#"INSERT INTO boom_key_plan_assignment (key_hash, plan_name, assigned_at)
+                   VALUES ($1, $2, NOW())
+                   ON CONFLICT (key_hash) DO UPDATE
+                   SET plan_name = EXCLUDED.plan_name"#,
+            )
+            .bind(key_hash)
+            .bind(plan_name)
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Snapshot all plans from DB (for config export).
+    pub async fn snapshot_plans_db(pool: &sqlx::PgPool) -> Result<Vec<PlanRow>, sqlx::Error> {
+        sqlx::query_as::<_, PlanRow>(
+            r#"SELECT name, concurrency_limit, rpm_limit, window_limits, schedule, is_default
+               FROM boom_rate_limit_plan ORDER BY name"#,
+        )
+        .fetch_all(pool)
+        .await
+    }
+}
+
+/// Convert a DB plan row to a RateLimitPlan.
+fn row_to_plan(row: &PlanRow) -> RateLimitPlan {
+    RateLimitPlan {
+        name: row.name.clone(),
+        concurrency_limit: row.concurrency_limit.map(|v| v as u32),
+        rpm_limit: row.rpm_limit.map(|v| v as u64),
+        window_limits: parse_window_limits(&row.window_limits),
+        schedule: parse_schedule(&row.schedule),
+    }
+}
+
+fn parse_window_limits(value: &serde_json::Value) -> Vec<(u64, u64)> {
+    value.as_array().map(|arr| {
+        arr.iter().filter_map(|item| {
+            let a = item.as_array()?;
+            if a.len() >= 2 { Some((a[0].as_u64()?, a[1].as_u64()?)) } else { None }
+        }).collect()
+    }).unwrap_or_default()
+}
+
+fn parse_schedule(value: &serde_json::Value) -> Vec<ScheduleSlot> {
+    value.as_array().map(|arr| {
+        arr.iter().filter_map(|item| {
+            let obj = item.as_object()?;
+            Some(ScheduleSlot {
+                hours: obj.get("hours")?.as_str()?.to_string(),
+                concurrency_limit: obj.get("concurrency_limit").and_then(|v| v.as_u64()).map(|v| v as u32),
+                rpm_limit: obj.get("rpm_limit").and_then(|v| v.as_u64()),
+                window_limits: parse_window_limits(obj.get("window_limits")?),
+            })
+        }).collect()
+    }).unwrap_or_default()
+}
+
 // ────────────────────────────────────────────────────────────
 // ConcurrencyGuard — RAII auto-decrement
 // ────────────────────────────────────────────────────────────

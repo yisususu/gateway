@@ -50,50 +50,15 @@ pub async fn upsert_plan(
         schedule: req.schedule.clone(),
     };
 
-    // Persist to DB.
+    // Persist to DB via PlanStore.
     if let Some(ref pool) = state.db_pool {
-        let window_limits_json =
-            serde_json::to_value(&plan.window_limits).unwrap_or(json!([]));
-        let schedule_json = serde_json::to_value(
-            plan.schedule
-                .iter()
-                .map(|s| {
-                    json!({
-                        "hours": s.hours,
-                        "concurrency_limit": s.concurrency_limit,
-                        "rpm_limit": s.rpm_limit,
-                        "window_limits": s.window_limits,
-                    })
-                })
-                .collect::<Vec<_>>(),
-        )
-        .unwrap_or(json!([]));
-
-        if let Err(e) = sqlx::query(
-            r#"INSERT INTO boom_rate_limit_plan
-               (name, concurrency_limit, rpm_limit, window_limits, schedule, is_default, source)
-               VALUES ($1, $2, $3, $4, $5, false, 'db')
-               ON CONFLICT (name) DO UPDATE
-               SET concurrency_limit = EXCLUDED.concurrency_limit,
-                   rpm_limit = EXCLUDED.rpm_limit,
-                   window_limits = EXCLUDED.window_limits,
-                   schedule = EXCLUDED.schedule,
-                   source = 'db',
-                   updated_at = NOW()"#,
-        )
-        .bind(&req.name)
-        .bind(req.concurrency_limit.map(|v| v as i32))
-        .bind(req.rpm_limit.map(|v| v as i64))
-        .bind(&window_limits_json)
-        .bind(&schedule_json)
-        .execute(pool)
-        .await
-        {
+        if let Err(e) = state.plan_store.upsert_plan_db(pool, &plan).await {
             tracing::error!("Failed to persist plan to DB: {}", e);
         }
+    } else {
+        state.plan_store.upsert_plan(plan);
     }
 
-    state.plan_store.upsert_plan(plan);
     let _ = state.admin_tx.send(crate::state::AdminCommand::ConfigChanged).await;
     Json(json!({"ok": true, "plan_name": req.name}))
 }
@@ -103,21 +68,19 @@ pub async fn delete_plan(
     Extension(state): Extension<std::sync::Arc<DashboardState>>,
     Path(name): Path<String>,
 ) -> Json<Value> {
-    let deleted = state.plan_store.delete_plan(&name);
-
-    // Delete from DB.
-    if deleted {
-        if let Some(ref pool) = state.db_pool {
-            if let Err(e) = sqlx::query(
-                r#"DELETE FROM boom_rate_limit_plan WHERE name = $1"#,
-            )
-            .bind(&name)
-            .execute(pool)
-            .await
-            {
+    let deleted = if let Some(ref pool) = state.db_pool {
+        match state.plan_store.delete_plan_db(pool, &name).await {
+            Ok(d) => d,
+            Err(e) => {
                 tracing::error!("Failed to delete plan from DB: {}", e);
+                false
             }
         }
+    } else {
+        state.plan_store.delete_plan(&name)
+    };
+
+    if deleted {
         let _ = state.admin_tx.send(crate::state::AdminCommand::ConfigChanged).await;
     }
 
@@ -617,28 +580,22 @@ pub async fn assign_key(
     Extension(state): Extension<std::sync::Arc<DashboardState>>,
     Json(req): Json<AssignRequest>,
 ) -> Response {
-    match state.plan_store.assign_key(&req.key_hash, &req.plan_name) {
-        Ok(()) => {
-            // Persist assignment to DB.
-            if let Some(ref pool) = state.db_pool {
-                if let Err(e) = sqlx::query(
-                    r#"INSERT INTO boom_key_plan_assignment (key_hash, plan_name, assigned_at)
-                       VALUES ($1, $2, NOW())
-                       ON CONFLICT (key_hash) DO UPDATE
-                       SET plan_name = EXCLUDED.plan_name"#,
-                )
-                .bind(&req.key_hash)
-                .bind(&req.plan_name)
-                .execute(pool)
-                .await
-                {
-                    tracing::error!("Failed to persist assignment to DB: {}", e);
-                }
+    if let Some(ref pool) = state.db_pool {
+        match state.plan_store.assign_key_db(pool, &req.key_hash, &req.plan_name).await {
+            Ok(()) => {
+                let _ = state.admin_tx.send(crate::state::AdminCommand::ConfigChanged).await;
+                Json(json!({"ok": true})).into_response()
             }
-            let _ = state.admin_tx.send(crate::state::AdminCommand::ConfigChanged).await;
-            Json(json!({"ok": true})).into_response()
+            Err(e) => (axum::http::StatusCode::BAD_REQUEST, e).into_response(),
         }
-        Err(e) => (axum::http::StatusCode::BAD_REQUEST, e).into_response(),
+    } else {
+        match state.plan_store.assign_key(&req.key_hash, &req.plan_name) {
+            Ok(()) => {
+                let _ = state.admin_tx.send(crate::state::AdminCommand::ConfigChanged).await;
+                Json(json!({"ok": true})).into_response()
+            }
+            Err(e) => (axum::http::StatusCode::BAD_REQUEST, e).into_response(),
+        }
     }
 }
 
@@ -647,21 +604,19 @@ pub async fn unassign_key(
     Extension(state): Extension<std::sync::Arc<DashboardState>>,
     Path(key_hash): Path<String>,
 ) -> Json<Value> {
-    let removed = state.plan_store.unassign_key(&key_hash);
-
-    // Remove from DB.
-    if removed {
-        if let Some(ref pool) = state.db_pool {
-            if let Err(e) = sqlx::query(
-                r#"DELETE FROM boom_key_plan_assignment WHERE key_hash = $1"#,
-            )
-            .bind(&key_hash)
-            .execute(pool)
-            .await
-            {
+    let removed = if let Some(ref pool) = state.db_pool {
+        match state.plan_store.unassign_key_db(pool, &key_hash).await {
+            Ok(r) => r,
+            Err(e) => {
                 tracing::error!("Failed to delete assignment from DB: {}", e);
+                false
             }
         }
+    } else {
+        state.plan_store.unassign_key(&key_hash)
+    };
+
+    if removed {
         let _ = state.admin_tx.send(crate::state::AdminCommand::ConfigChanged).await;
     }
 
