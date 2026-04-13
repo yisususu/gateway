@@ -152,7 +152,12 @@ impl FlowControlSlot {
                 let req = queue.pop_front().unwrap();
                 inner.current_inflight += 1;
                 inner.current_context += req.context_chars;
-                let _ = req.grant.send(());
+                if req.grant.send(()).is_err() {
+                    // Waiter cancelled (client disconnected / future dropped).
+                    // Roll back counters — otherwise they leak and block all future dispatch.
+                    inner.current_inflight -= 1;
+                    inner.current_context -= req.context_chars;
+                }
                 true
             }
             None => false,
