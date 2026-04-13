@@ -206,6 +206,28 @@ impl FlowController {
             slot.waiters.fetch_add(1, Ordering::Relaxed);
         }
 
+        // Retry acquire AFTER registering as waiter.
+        // This closes the race window where a guard drops between the initial
+        // try_acquire_slot failure and waiter registration — the guard would see
+        // waiters=0 and skip notify_one(), leaving us stuck.
+        if try_acquire_slot(&slot, context_chars) {
+            // Got it — clean up waiter tracking and return.
+            if is_vip {
+                slot.vip_waiters.fetch_sub(1, Ordering::Relaxed);
+            } else {
+                slot.waiters.fetch_sub(1, Ordering::Relaxed);
+            }
+            {
+                let mut q = slot.queued_waiters.lock().unwrap();
+                q.retain(|w| !(w.key_alias == key_alias && w.is_vip == is_vip));
+            }
+            return Ok(FlowControlGuard {
+                slots: self.slots.clone(),
+                deployment_id: deployment_id.to_string(),
+                context_chars,
+            });
+        }
+
         let deadline = tokio::time::Instant::now() + timeout;
         let notify_ref = if is_vip {
             &slot.vip_notify
