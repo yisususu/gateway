@@ -51,6 +51,12 @@ pub enum FlowControlError {
     },
     /// No slot configured for this deployment (pass-through).
     NoSlot,
+    /// Request context alone exceeds max_context — can never be dispatched.
+    ContextExceeded {
+        deployment_id: String,
+        context_chars: u64,
+        max_context: u64,
+    },
 }
 
 /// Per-deployment queued waiter info for dashboard visibility.
@@ -156,8 +162,9 @@ impl FlowControlSlot {
 
     /// Greedily dispatch waiting requests to fill available capacity.
     ///
-    /// Scans each queue for the first non-dispatched request that fits,
-    /// skipping oversized entries (head-of-line avoidance for context).
+    /// Strict FIFO within each queue: only dispatch the FIRST waiting request.
+    /// If the head doesn't fit (context limit), stop — don't scan past it.
+    /// This prevents starvation of large-context requests.
     /// VIP queue always tried first.
     fn dispatch(inner: &mut SlotInner) {
         loop {
@@ -166,20 +173,36 @@ impl FlowControlSlot {
                 break;
             }
 
-            if Self::try_dispatch_fitting(inner, used_ctx, true) {
+            // Clean up cancelled entries at queue heads, then try to dispatch.
+            Self::drain_cancelled(&mut inner.vip_queue);
+            if Self::try_dispatch_head(inner, used_ctx, true) {
                 continue;
             }
-            if Self::try_dispatch_fitting(inner, used_ctx, false) {
+            Self::drain_cancelled(&mut inner.normal_queue);
+            if Self::try_dispatch_head(inner, used_ctx, false) {
                 continue;
             }
             break;
         }
     }
 
-    /// Scan a queue and dispatch the first waiting request that fits.
-    /// Also cleans up cancelled requests (grant sender already dropped)
-    /// encountered along the way.
-    fn try_dispatch_fitting(
+    /// Remove cancelled requests (grant sender already dropped) from queue head.
+    fn drain_cancelled(queue: &mut VecDeque<QueuedRequest>) {
+        while let Some(front) = queue.front() {
+            if front.dispatched {
+                break;
+            }
+            if front.grant.is_none() {
+                queue.pop_front();
+                continue;
+            }
+            break;
+        }
+    }
+
+    /// Try to dispatch the first waiting request in the queue (strict FIFO).
+    /// Returns true if dispatched, false if queue empty or head can't fit.
+    fn try_dispatch_head(
         inner: &mut SlotInner,
         used_ctx: u64,
         vip: bool,
@@ -190,40 +213,25 @@ impl FlowControlSlot {
             &mut inner.normal_queue
         };
 
-        let mut idx = 0;
-        while idx < queue.len() {
-            let req = &queue[idx];
+        // Find the first non-dispatched entry (should be near the front).
+        let idx = match queue.iter().position(|r| !r.dispatched) {
+            Some(i) => i,
+            None => return false,
+        };
 
-            if req.dispatched {
-                idx += 1;
-                continue;
-            }
-
-            // Check if grant sender is still alive (client connected).
-            if req.grant.is_none() {
-                // Cancelled — remove and continue.
-                queue.remove(idx);
-                continue;
-            }
-
-            // Context check.
-            if inner.max_context > 0 && used_ctx + req.context_chars > inner.max_context {
-                idx += 1;
-                continue; // Oversized — skip.
-            }
-
-            // Dispatch: mark in-flight and notify waiter.
-            queue[idx].dispatched = true;
-            let sender = queue[idx].grant.take().unwrap();
-            if sender.send(()).is_err() {
-                // Receiver gone — un-dispatch and remove.
-                queue.remove(idx);
-                continue;
-            }
-            return true;
+        // Context check — strict FIFO: if head doesn't fit, don't skip.
+        if inner.max_context > 0 && used_ctx + queue[idx].context_chars > inner.max_context {
+            return false;
         }
 
-        false
+        // Dispatch: mark in-flight and notify waiter.
+        queue[idx].dispatched = true;
+        let sender = queue[idx].grant.take().unwrap();
+        if sender.send(()).is_err() {
+            queue.remove(idx);
+            return false;
+        }
+        true
     }
 }
 
@@ -298,6 +306,16 @@ impl FlowController {
 
         {
             let mut inner = slot.inner.lock().unwrap();
+
+            // Reject immediately if request alone exceeds max_context (can never fit).
+            if inner.max_context > 0 && context_chars > inner.max_context {
+                return Err(FlowControlError::ContextExceeded {
+                    deployment_id: deployment_id.to_string(),
+                    context_chars,
+                    max_context: inner.max_context,
+                });
+            }
+
             request_id = inner.next_id;
             inner.next_id += 1;
 

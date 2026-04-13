@@ -284,6 +284,15 @@ async fn chat_completions_inner(
                 return Err(GatewayErrorReply(e, is_stream));
             }
             Err(FlowControlError::NoSlot) => None,
+            Err(FlowControlError::ContextExceeded { deployment_id: _, context_chars, max_context }) => {
+                let e = GatewayError::RateLimitExceeded {
+                    retry_after_secs: None,
+                    message: format!("Request context ({} chars) exceeds deployment max_context limit ({} chars)", context_chars, max_context),
+                    limit_type: "flow_control_context",
+                };
+                log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()), deployment_id.clone(), None);
+                return Err(GatewayErrorReply(e, is_stream));
+            }
         }
     } else {
         None
@@ -1340,6 +1349,15 @@ pub async fn messages(
                 return Err(AnthropicErrorReply(e, is_stream));
             }
             Err(FlowControlError::NoSlot) => None,
+            Err(FlowControlError::ContextExceeded { deployment_id: _, context_chars, max_context }) => {
+                let e = GatewayError::RateLimitExceeded {
+                    retry_after_secs: None,
+                    message: format!("Request context ({} chars) exceeds deployment max_context limit ({} chars)", context_chars, max_context),
+                    limit_type: "flow_control_context",
+                };
+                log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()), deployment_id.clone(), None);
+                return Err(AnthropicErrorReply(e, is_stream));
+            }
         }
     } else {
         None
