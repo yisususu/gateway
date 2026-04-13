@@ -100,6 +100,67 @@ struct QueuedRequest {
 }
 
 // ═══════════════════════════════════════════════════════════
+// AcquireCleanup — RAII guard against counter leaks
+// ═══════════════════════════════════════════════════════════
+
+/// RAII cleanup for `acquire()`.  When the acquire future is dropped
+/// (client disconnect / task cancellation), this Drop impl detects
+/// whether the request was already dispatched (popped + counters
+/// incremented) or still in the queue, and rolls back accordingly.
+///
+/// This is the ONLY reliable way to prevent counter leaks: the
+/// oneshot send might succeed (value buffered) but the waiter
+/// never runs — no `send().is_err()` path can catch that.
+struct AcquireCleanup {
+    request_id: u64,
+    deployment_id: String,
+    is_vip: bool,
+    context_chars: u64,
+    slots: Arc<DashMap<String, FlowControlSlot>>,
+    /// Set to true when the guard is consumed (FlowControlGuard created)
+    /// or when the function handles cleanup itself (timeout path).
+    consumed: bool,
+}
+
+impl Drop for AcquireCleanup {
+    fn drop(&mut self) {
+        if self.consumed {
+            return;
+        }
+
+        // Future was cancelled (client disconnect, task abort, etc).
+        // Lock mutex and determine if we were dispatched or still queued.
+        let slot = match self.slots.get(&self.deployment_id) {
+            Some(s) => s,
+            None => return, // Slot gone — nothing to clean up.
+        };
+        let mut inner = slot.inner.lock().unwrap();
+
+        let queue = if self.is_vip {
+            &mut inner.vip_queue
+        } else {
+            &mut inner.normal_queue
+        };
+
+        match queue.iter().position(|r| r.id == self.request_id) {
+            Some(idx) => {
+                // Still in queue — not yet dispatched. Just remove.
+                queue.remove(idx);
+            }
+            None => {
+                // Not in queue — dispatch already popped us and incremented
+                // counters, but we were cancelled before creating FlowControlGuard.
+                // Roll back to prevent permanent counter leak.
+                inner.current_inflight = inner.current_inflight.saturating_sub(1);
+                inner.current_context = inner.current_context.saturating_sub(self.context_chars);
+                // Re-dispatch to fill the freed capacity.
+                FlowControlSlot::dispatch(&mut inner);
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
 // FlowControlSlot
 // ═══════════════════════════════════════════════════════════
 
@@ -133,7 +194,7 @@ impl FlowControlSlot {
     }
 
     /// Try to dispatch the head of the specified queue.
-    /// Returns true if a request was dispatched.
+    /// Returns true if a request was dispatched (or popped as cancelled).
     fn try_dispatch_one(inner: &mut SlotInner, vip: bool) -> bool {
         let queue = if vip {
             &mut inner.vip_queue
@@ -153,8 +214,8 @@ impl FlowControlSlot {
                 inner.current_inflight += 1;
                 inner.current_context += req.context_chars;
                 if req.grant.send(()).is_err() {
-                    // Waiter cancelled (client disconnected / future dropped).
-                    // Roll back counters — otherwise they leak and block all future dispatch.
+                    // Receiver already dropped (rare fast path — waiter
+                    // cancelled between enqueue and dispatch).  Roll back.
                     inner.current_inflight -= 1;
                     inner.current_context -= req.context_chars;
                 }
@@ -178,6 +239,10 @@ impl FlowControlSlot {
 ///   1. `acquire()` — enqueue then dispatch
 ///   2. `FlowControlGuard::drop()` — decrement then dispatch
 ///   3. `periodic_dispatch()` — 1s timer, iterate all slots
+///
+/// Counter leak prevention:
+///   `AcquireCleanup` RAII guard rolls back counters when the acquire
+///   future is cancelled after dispatch but before FlowControlGuard creation.
 pub struct FlowController {
     slots: Arc<DashMap<String, FlowControlSlot>>,
 }
@@ -242,6 +307,10 @@ impl FlowController {
     /// 2. Immediately trigger dispatch — may grant this request or others ahead.
     /// 3. Await grant signal (oneshot) or timeout.
     /// 4. On timeout, check if already dispatched (race with guard drop).
+    ///
+    /// `AcquireCleanup` RAII guard handles cancellation at any point:
+    /// if the future is dropped after dispatch sent the grant but before
+    /// we could create FlowControlGuard, it rolls back the counters.
     pub async fn acquire(
         &self,
         deployment_id: &str,
@@ -279,12 +348,25 @@ impl FlowController {
 
             FlowControlSlot::dispatch(&mut inner);
         }
-        // Mutex released, DashMap ref dropped — safe to await.
+        // Mutex released — drop DashMap ref before awaiting.
+        drop(slot);
+
+        // RAII cleanup — rolls back counters if future is cancelled
+        // after dispatch but before FlowControlGuard creation.
+        let mut cleanup = AcquireCleanup {
+            request_id,
+            deployment_id: deployment_id.to_string(),
+            is_vip,
+            context_chars,
+            slots: self.slots.clone(),
+            consumed: false,
+        };
 
         // ── Wait for grant or timeout ──
         match tokio::time::timeout(timeout, grant_rx).await {
             Ok(Ok(())) => {
-                // Granted — create guard.
+                // Granted — mark consumed so cleanup is a no-op.
+                cleanup.consumed = true;
                 Ok(FlowControlGuard {
                     slots: self.slots.clone(),
                     deployment_id: deployment_id.to_string(),
@@ -293,6 +375,8 @@ impl FlowController {
             }
             Ok(Err(_)) => {
                 // Slot removed while waiting (sender dropped).
+                // AcquireCleanup handles queue removal (if still queued).
+                cleanup.consumed = true; // Slot gone, nothing to roll back.
                 Err(FlowControlError::NoSlot)
             }
             Err(_) => {
@@ -321,12 +405,16 @@ impl FlowController {
 
                 if already_dispatched {
                     // Counters already incremented — must create guard for cleanup.
+                    // Mark consumed so AcquireCleanup doesn't double-roll-back.
+                    cleanup.consumed = true;
                     Ok(FlowControlGuard {
                         slots: self.slots.clone(),
                         deployment_id: deployment_id.to_string(),
                         context_chars,
                     })
                 } else {
+                    // Not dispatched — removed from queue by us.
+                    cleanup.consumed = true; // Already removed, nothing for cleanup.
                     Err(FlowControlError::Timeout {
                         deployment_id: deployment_id.to_string(),
                         waiters: self.total_waiters_for(deployment_id),
