@@ -355,30 +355,60 @@ fn total_waiters(slot: &FlowControlSlot) -> usize {
     (slot.waiters.load(Ordering::Relaxed) + slot.vip_waiters.load(Ordering::Relaxed)) as usize
 }
 
-/// Attempt to acquire a slot. Returns true if successful.
+/// Attempt to acquire a slot atomically. Returns true if successful.
+///
+/// Uses CAS loops to atomically check-and-increment, preventing TOCTOU races
+/// that could permanently over-count `current_inflight` under high concurrency.
 fn try_acquire_slot(slot: &FlowControlSlot, context_chars: u64) -> bool {
-    let max_inflight = slot.max_inflight.load(Ordering::Relaxed);
-    let max_context = slot.max_context.load(Ordering::Relaxed);
+    let max_inflight = slot.max_inflight.load(Ordering::Acquire);
+    let max_context = slot.max_context.load(Ordering::Acquire);
 
-    // Check inflight limit.
+    // Atomically reserve an inflight slot via CAS loop.
     if max_inflight > 0 {
-        let current = slot.current_inflight.load(Ordering::Relaxed);
-        if current >= max_inflight {
-            return false;
+        let mut current = slot.current_inflight.load(Ordering::Acquire);
+        loop {
+            if current >= max_inflight {
+                return false;
+            }
+            match slot.current_inflight.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
         }
+    } else {
+        // Unlimited — just increment (no contention risk).
+        slot.current_inflight.fetch_add(1, Ordering::Relaxed);
     }
 
-    // Check context limit.
+    // Atomically reserve context budget via CAS loop.
+    // If context check fails, roll back the inflight increment above.
     if max_context > 0 {
-        let current_ctx = slot.current_context.load(Ordering::Relaxed);
-        if current_ctx + context_chars > max_context {
-            return false;
+        let mut current_ctx = slot.current_context.load(Ordering::Acquire);
+        loop {
+            if current_ctx + context_chars > max_context {
+                // Roll back inflight.
+                slot.current_inflight.fetch_sub(1, Ordering::Relaxed);
+                return false;
+            }
+            match slot.current_context.compare_exchange_weak(
+                current_ctx,
+                current_ctx + context_chars,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current_ctx = actual,
+            }
         }
+    } else {
+        slot.current_context.fetch_add(context_chars, Ordering::Relaxed);
     }
 
-    // Both checks passed — increment counters.
-    slot.current_inflight.fetch_add(1, Ordering::Relaxed);
-    slot.current_context.fetch_add(context_chars, Ordering::Relaxed);
     true
 }
 
