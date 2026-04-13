@@ -206,28 +206,6 @@ impl FlowController {
             slot.waiters.fetch_add(1, Ordering::Relaxed);
         }
 
-        // Retry acquire AFTER registering as waiter.
-        // This closes the race window where a guard drops between the initial
-        // try_acquire_slot failure and waiter registration — the guard would see
-        // waiters=0 and skip notify_one(), leaving us stuck.
-        if try_acquire_slot(&slot, context_chars) {
-            // Got it — clean up waiter tracking and return.
-            if is_vip {
-                slot.vip_waiters.fetch_sub(1, Ordering::Relaxed);
-            } else {
-                slot.waiters.fetch_sub(1, Ordering::Relaxed);
-            }
-            {
-                let mut q = slot.queued_waiters.lock().unwrap();
-                q.retain(|w| !(w.key_alias == key_alias && w.is_vip == is_vip));
-            }
-            return Ok(FlowControlGuard {
-                slots: self.slots.clone(),
-                deployment_id: deployment_id.to_string(),
-                context_chars,
-            });
-        }
-
         let deadline = tokio::time::Instant::now() + timeout;
         let notify_ref = if is_vip {
             &slot.vip_notify
@@ -355,60 +333,30 @@ fn total_waiters(slot: &FlowControlSlot) -> usize {
     (slot.waiters.load(Ordering::Relaxed) + slot.vip_waiters.load(Ordering::Relaxed)) as usize
 }
 
-/// Attempt to acquire a slot atomically. Returns true if successful.
-///
-/// Uses CAS loops to atomically check-and-increment, preventing TOCTOU races
-/// that could permanently over-count `current_inflight` under high concurrency.
+/// Attempt to acquire a slot. Returns true if successful.
 fn try_acquire_slot(slot: &FlowControlSlot, context_chars: u64) -> bool {
-    let max_inflight = slot.max_inflight.load(Ordering::Acquire);
-    let max_context = slot.max_context.load(Ordering::Acquire);
+    let max_inflight = slot.max_inflight.load(Ordering::Relaxed);
+    let max_context = slot.max_context.load(Ordering::Relaxed);
 
-    // Atomically reserve an inflight slot via CAS loop.
+    // Check inflight limit.
     if max_inflight > 0 {
-        let mut current = slot.current_inflight.load(Ordering::Acquire);
-        loop {
-            if current >= max_inflight {
-                return false;
-            }
-            match slot.current_inflight.compare_exchange_weak(
-                current,
-                current + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break,
-                Err(actual) => current = actual,
-            }
+        let current = slot.current_inflight.load(Ordering::Relaxed);
+        if current >= max_inflight {
+            return false;
         }
-    } else {
-        // Unlimited — just increment (no contention risk).
-        slot.current_inflight.fetch_add(1, Ordering::Relaxed);
     }
 
-    // Atomically reserve context budget via CAS loop.
-    // If context check fails, roll back the inflight increment above.
+    // Check context limit.
     if max_context > 0 {
-        let mut current_ctx = slot.current_context.load(Ordering::Acquire);
-        loop {
-            if current_ctx + context_chars > max_context {
-                // Roll back inflight.
-                slot.current_inflight.fetch_sub(1, Ordering::Relaxed);
-                return false;
-            }
-            match slot.current_context.compare_exchange_weak(
-                current_ctx,
-                current_ctx + context_chars,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break,
-                Err(actual) => current_ctx = actual,
-            }
+        let current_ctx = slot.current_context.load(Ordering::Relaxed);
+        if current_ctx + context_chars > max_context {
+            return false;
         }
-    } else {
-        slot.current_context.fetch_add(context_chars, Ordering::Relaxed);
     }
 
+    // Both checks passed — increment counters.
+    slot.current_inflight.fetch_add(1, Ordering::Relaxed);
+    slot.current_context.fetch_add(context_chars, Ordering::Relaxed);
     true
 }
 
