@@ -1556,9 +1556,13 @@ pub async fn get_inflight_stats(
     for d in &inflight_deployments {
         models_covered.insert(d.model.clone());
         let (max_reqs, max_ctx) = fc_limits.get(d.deployment_id.as_str()).copied().unwrap_or((0, 0));
-        let fc_waiters = flowcontrol_stats.iter()
-            .find(|fc| fc.deployment_id == d.deployment_id)
-            .map(|fc| fc.waiters)
+        let fc_stat = flowcontrol_stats.iter()
+            .find(|fc| fc.deployment_id == d.deployment_id);
+        let fc_waiters = fc_stat
+            .map(|fc| fc.waiters + fc.vip_waiters)
+            .unwrap_or(0);
+        let fc_inflight = fc_stat
+            .map(|fc| fc.current_inflight)
             .unwrap_or(0);
         let queued_keys: Vec<serde_json::Value> = queued_map.get(d.deployment_id.as_str())
             .map(|entries| entries.iter().map(|e| json!({
@@ -1575,6 +1579,7 @@ pub async fn get_inflight_stats(
             "deployment_id": d.deployment_id,
             "fc_queue": fc_waiters,
             "in_reqs": d.inflight_requests,
+            "fc_inflight": fc_inflight,
             "in_reqs_max": max_reqs,
             "in_context": d.inflight_input_chars,
             "in_context_max": max_ctx,
@@ -1599,8 +1604,9 @@ pub async fn get_inflight_stats(
         rows.insert(fc.deployment_id.clone(), json!({
             "model": model,
             "deployment_id": fc.deployment_id,
-            "fc_queue": fc.waiters,
+            "fc_queue": fc.waiters + fc.vip_waiters,
             "in_reqs": fc.current_inflight,
+            "fc_inflight": fc.current_inflight,
             "in_reqs_max": fc.max_inflight,
             "in_context": fc.current_context,
             "in_context_max": fc.max_context,

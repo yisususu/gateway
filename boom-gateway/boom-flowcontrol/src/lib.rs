@@ -171,8 +171,8 @@ struct FlowControlSlot {
 impl FlowControlSlot {
     /// Greedily dispatch queued requests to fill available capacity.
     ///
-    /// Loops until: both queues empty, or inflight limit hit, or
-    /// neither queue head fits within the remaining context budget.
+    /// Scans each queue for the first request that fits (skips oversized
+    /// heads to avoid head-of-line blocking from context limits).
     /// VIP queue is always tried first (strict priority).
     fn dispatch(inner: &mut SlotInner) {
         loop {
@@ -181,48 +181,57 @@ impl FlowControlSlot {
                 break;
             }
 
-            // Try VIP head first, then normal head.
-            if Self::try_dispatch_one(inner, true) {
+            // Try VIP queue first, then normal queue.
+            // Each call scans past oversized requests.
+            if Self::try_dispatch_fitting(inner, true) {
                 continue;
             }
-            if Self::try_dispatch_one(inner, false) {
+            if Self::try_dispatch_fitting(inner, false) {
                 continue;
             }
-            // Neither queue could dispatch — done.
+            // Neither queue has a dispatchable request — done.
             break;
         }
     }
 
-    /// Try to dispatch the head of the specified queue.
-    /// Returns true if a request was dispatched (or popped as cancelled).
-    fn try_dispatch_one(inner: &mut SlotInner, vip: bool) -> bool {
+    /// Scan the queue and dispatch the first request that fits.
+    /// Skips requests that exceed the remaining context budget
+    /// (head-of-line blocking avoidance for context limits).
+    /// Cancelled requests (dropped receiver) are cleaned up along the way.
+    fn try_dispatch_fitting(inner: &mut SlotInner, vip: bool) -> bool {
         let queue = if vip {
             &mut inner.vip_queue
         } else {
             &mut inner.normal_queue
         };
-        match queue.front() {
-            Some(req) => {
-                // Context limit check.
-                if inner.max_context > 0
-                    && inner.current_context + req.context_chars > inner.max_context
-                {
-                    return false;
-                }
-                // Dispatch: reserve capacity, pop, notify.
-                let req = queue.pop_front().unwrap();
-                inner.current_inflight += 1;
-                inner.current_context += req.context_chars;
-                if req.grant.send(()).is_err() {
-                    // Receiver already dropped (rare fast path — waiter
-                    // cancelled between enqueue and dispatch).  Roll back.
-                    inner.current_inflight -= 1;
-                    inner.current_context -= req.context_chars;
-                }
-                true
+
+        let mut idx = 0;
+        while idx < queue.len() {
+            let fits = {
+                let req = &queue[idx];
+                inner.max_context == 0
+                    || inner.current_context + req.context_chars <= inner.max_context
+            };
+
+            if !fits {
+                idx += 1;
+                continue; // Skip oversized — try next.
             }
-            None => false,
+
+            // This request fits — remove and dispatch.
+            let req = queue.remove(idx).unwrap();
+            inner.current_inflight += 1;
+            inner.current_context += req.context_chars;
+            if req.grant.send(()).is_err() {
+                // Receiver dropped — roll back and continue scanning.
+                inner.current_inflight -= 1;
+                inner.current_context -= req.context_chars;
+                // Don't increment idx — next element shifted into same position.
+            }
+            return true;
         }
+
+        false // No fitting request found.
     }
 }
 
