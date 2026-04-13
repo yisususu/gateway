@@ -1,8 +1,8 @@
 use boom_core::DeploymentQueueInfo;
 use dashmap::DashMap;
 use futures::Stream;
+use std::collections::VecDeque;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -71,10 +71,93 @@ pub struct QueuedWaiterEntry {
 // Internal types
 // ═══════════════════════════════════════════════════════════
 
-/// Tracks individual waiters for dashboard visibility.
-struct QueuedWaiter {
+/// All mutable state for a single deployment's flow control slot.
+/// Protected by a std::sync::Mutex — critical sections are short
+/// (no async, no I/O), so blocking is acceptable on a 32-thread runtime.
+struct SlotInner {
+    max_inflight: u32,
+    max_context: u64,
+    current_inflight: u32,
+    current_context: u64,
+    /// VIP FIFO queue — always drained before the normal queue.
+    vip_queue: VecDeque<QueuedRequest>,
+    /// Normal FIFO queue — drained only when VIP queue is empty or blocked.
+    normal_queue: VecDeque<QueuedRequest>,
+    /// Monotonic ID for correlating timeout cleanup with dispatch.
+    next_id: u64,
+}
+
+/// A single queued request waiting to be dispatched.
+struct QueuedRequest {
+    /// Unique ID for timeout-vs-dispatch race detection.
+    id: u64,
+    /// Input context size in chars (reserved against max_context).
+    context_chars: u64,
+    /// Key alias for dashboard visibility.
     key_alias: Option<String>,
-    is_vip: bool,
+    /// Oneshot channel — dispatch sends () to grant, waiter receives it.
+    grant: tokio::sync::oneshot::Sender<()>,
+}
+
+// ═══════════════════════════════════════════════════════════
+// FlowControlSlot
+// ═══════════════════════════════════════════════════════════
+
+struct FlowControlSlot {
+    inner: std::sync::Mutex<SlotInner>,
+}
+
+impl FlowControlSlot {
+    /// Greedily dispatch queued requests to fill available capacity.
+    ///
+    /// Loops until: both queues empty, or inflight limit hit, or
+    /// neither queue head fits within the remaining context budget.
+    /// VIP queue is always tried first (strict priority).
+    fn dispatch(inner: &mut SlotInner) {
+        loop {
+            // Inflight limit check.
+            if inner.max_inflight > 0 && inner.current_inflight >= inner.max_inflight {
+                break;
+            }
+
+            // Try VIP head first, then normal head.
+            if Self::try_dispatch_one(inner, true) {
+                continue;
+            }
+            if Self::try_dispatch_one(inner, false) {
+                continue;
+            }
+            // Neither queue could dispatch — done.
+            break;
+        }
+    }
+
+    /// Try to dispatch the head of the specified queue.
+    /// Returns true if a request was dispatched.
+    fn try_dispatch_one(inner: &mut SlotInner, vip: bool) -> bool {
+        let queue = if vip {
+            &mut inner.vip_queue
+        } else {
+            &mut inner.normal_queue
+        };
+        match queue.front() {
+            Some(req) => {
+                // Context limit check.
+                if inner.max_context > 0
+                    && inner.current_context + req.context_chars > inner.max_context
+                {
+                    return false;
+                }
+                // Dispatch: reserve capacity, pop, notify.
+                let req = queue.pop_front().unwrap();
+                inner.current_inflight += 1;
+                inner.current_context += req.context_chars;
+                let _ = req.grant.send(());
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -83,29 +166,15 @@ struct QueuedWaiter {
 
 /// Per-deployment flow controller. Survives config reloads.
 ///
-/// Each deployment has a `FlowControlSlot` that tracks in-flight
-/// request count and total input context. When limits are exceeded,
-/// new requests wait asynchronously until a slot opens or timeout.
-/// VIP keys are always woken before non-VIP keys.
+/// Each deployment has a `FlowControlSlot` backed by a single Mutex
+/// protecting all mutable state (counters + two FIFO queues).
+///
+/// Dispatch triggers (all serialized by the per-slot Mutex):
+///   1. `acquire()` — enqueue then dispatch
+///   2. `FlowControlGuard::drop()` — decrement then dispatch
+///   3. `periodic_dispatch()` — 1s timer, iterate all slots
 pub struct FlowController {
     slots: Arc<DashMap<String, FlowControlSlot>>,
-}
-
-struct FlowControlSlot {
-    max_inflight: AtomicU32,
-    max_context: AtomicU64,
-    current_inflight: AtomicU32,
-    current_context: AtomicU64,
-    /// Non-VIP waiter count.
-    waiters: AtomicU32,
-    /// VIP waiter count.
-    vip_waiters: AtomicU32,
-    /// Non-VIP wake-up channel.
-    notify: tokio::sync::Notify,
-    /// VIP wake-up channel.
-    vip_notify: tokio::sync::Notify,
-    /// Individual waiter tracking for dashboard visibility.
-    queued_waiters: std::sync::Mutex<Vec<QueuedWaiter>>,
 }
 
 impl FlowController {
@@ -120,7 +189,6 @@ impl FlowController {
     /// If config is all zeros (unlimited), removes the slot.
     pub fn ensure_slot(&self, deployment_id: &str, config: &FlowControlConfig) {
         if config.max_inflight == 0 && config.max_context == 0 {
-            // No limits configured — remove if exists.
             self.slots.remove(deployment_id);
             return;
         }
@@ -132,27 +200,28 @@ impl FlowController {
             .or_insert_with(|| {
                 created = true;
                 FlowControlSlot {
-                    max_inflight: AtomicU32::new(config.max_inflight),
-                    max_context: AtomicU64::new(config.max_context),
-                    current_inflight: AtomicU32::new(0),
-                    current_context: AtomicU64::new(0),
-                    waiters: AtomicU32::new(0),
-                    vip_waiters: AtomicU32::new(0),
-                    notify: tokio::sync::Notify::new(),
-                    vip_notify: tokio::sync::Notify::new(),
-                    queued_waiters: std::sync::Mutex::new(Vec::new()),
+                    inner: std::sync::Mutex::new(SlotInner {
+                        max_inflight: config.max_inflight,
+                        max_context: config.max_context,
+                        current_inflight: 0,
+                        current_context: 0,
+                        vip_queue: VecDeque::new(),
+                        normal_queue: VecDeque::new(),
+                        next_id: 0,
+                    }),
                 }
             });
 
         if !created {
-            // Update config only (runtime state preserved).
-            slot.max_inflight.store(config.max_inflight, Ordering::Relaxed);
-            slot.max_context.store(config.max_context, Ordering::Relaxed);
+            let mut inner = slot.inner.lock().unwrap();
+            inner.max_inflight = config.max_inflight;
+            inner.max_context = config.max_context;
         }
     }
 
     /// Remove a slot (called when a deployment is deleted).
-    /// In-flight requests will drain naturally via Drop.
+    /// Queued waiters' oneshot senders are dropped, causing receivers to error.
+    /// In-flight requests drain naturally via guard Drop (no-ops if slot gone).
     pub fn remove_slot(&self, deployment_id: &str) {
         self.slots.remove(deployment_id);
     }
@@ -162,12 +231,12 @@ impl FlowController {
         self.slots.retain(|id, _| active_ids.contains(id));
     }
 
-    /// Try to acquire a flow control slot for a deployment.
+    /// Acquire a flow control slot for a deployment.
     ///
-    /// If the deployment has no slot configured, returns `Err(FlowControlError::NoSlot)`.
-    /// If limits are exceeded, waits asynchronously up to `timeout` duration.
-    /// VIP requests are always woken before non-VIP requests.
-    /// On success, returns a `FlowControlGuard` that releases the slot on Drop.
+    /// 1. Enqueue at the tail of the appropriate FIFO queue (VIP or normal).
+    /// 2. Immediately trigger dispatch — may grant this request or others ahead.
+    /// 3. Await grant signal (oneshot) or timeout.
+    /// 4. On timeout, check if already dispatched (race with guard drop).
     pub async fn acquire(
         &self,
         deployment_id: &str,
@@ -181,79 +250,105 @@ impl FlowController {
             None => return Err(FlowControlError::NoSlot),
         };
 
-        // Fast path: try to acquire without waiting.
-        if try_acquire_slot(&slot, context_chars) {
-            return Ok(FlowControlGuard {
-                slots: self.slots.clone(),
-                deployment_id: deployment_id.to_string(),
-                context_chars,
-            });
-        }
+        let (grant_tx, grant_rx) = tokio::sync::oneshot::channel();
+        let request_id: u64;
 
-        // Slow path: wait for a slot to open.
-        // Track this waiter for dashboard visibility.
+        // ── Enqueue + dispatch (single mutex hold) ──
         {
-            let mut q = slot.queued_waiters.lock().unwrap();
-            q.push(QueuedWaiter {
-                key_alias: key_alias.clone(),
-                is_vip,
-            });
+            let mut inner = slot.inner.lock().unwrap();
+            request_id = inner.next_id;
+            inner.next_id += 1;
+
+            let req = QueuedRequest {
+                id: request_id,
+                context_chars,
+                key_alias,
+                grant: grant_tx,
+            };
+
+            if is_vip {
+                inner.vip_queue.push_back(req);
+            } else {
+                inner.normal_queue.push_back(req);
+            }
+
+            FlowControlSlot::dispatch(&mut inner);
         }
+        // Mutex released, DashMap ref dropped — safe to await.
 
-        if is_vip {
-            slot.vip_waiters.fetch_add(1, Ordering::Relaxed);
-        } else {
-            slot.waiters.fetch_add(1, Ordering::Relaxed);
-        }
-
-        let deadline = tokio::time::Instant::now() + timeout;
-        let notify_ref = if is_vip {
-            &slot.vip_notify
-        } else {
-            &slot.notify
-        };
-
-        let waiter_key_alias = key_alias.clone();
-        let result = loop {
-            tokio::select! {
-                _ = notify_ref.notified() => {
-                    if try_acquire_slot(&slot, context_chars) {
-                        break Ok(FlowControlGuard {
-                            slots: self.slots.clone(),
-                            deployment_id: deployment_id.to_string(),
-                            context_chars,
-                        });
+        // ── Wait for grant or timeout ──
+        match tokio::time::timeout(timeout, grant_rx).await {
+            Ok(Ok(())) => {
+                // Granted — create guard.
+                Ok(FlowControlGuard {
+                    slots: self.slots.clone(),
+                    deployment_id: deployment_id.to_string(),
+                    context_chars,
+                })
+            }
+            Ok(Err(_)) => {
+                // Slot removed while waiting (sender dropped).
+                Err(FlowControlError::NoSlot)
+            }
+            Err(_) => {
+                // Timeout — check if already dispatched (race with guard drop).
+                let already_dispatched = {
+                    let slot = self.slots.get(deployment_id);
+                    match slot {
+                        Some(slot) => {
+                            let mut inner = slot.inner.lock().unwrap();
+                            let queue = if is_vip {
+                                &mut inner.vip_queue
+                            } else {
+                                &mut inner.normal_queue
+                            };
+                            match queue.iter().position(|r| r.id == request_id) {
+                                Some(idx) => {
+                                    queue.remove(idx);
+                                    false // Still in queue — removed.
+                                }
+                                None => true, // Already dispatched.
+                            }
+                        }
+                        None => false, // Slot gone — treat as timeout.
                     }
-                    // Failed to acquire — let someone else try.
-                    notify_ref.notify_one();
-                    if tokio::time::Instant::now() >= deadline {
-                        break Err(FlowControlError::Timeout {
-                            deployment_id: deployment_id.to_string(),
-                            waiters: total_waiters(&slot),
-                        });
-                    }
-                }
-                _ = tokio::time::sleep_until(deadline) => {
-                    break Err(FlowControlError::Timeout {
+                };
+
+                if already_dispatched {
+                    // Counters already incremented — must create guard for cleanup.
+                    Ok(FlowControlGuard {
+                        slots: self.slots.clone(),
                         deployment_id: deployment_id.to_string(),
-                        waiters: total_waiters(&slot),
-                    });
+                        context_chars,
+                    })
+                } else {
+                    Err(FlowControlError::Timeout {
+                        deployment_id: deployment_id.to_string(),
+                        waiters: self.total_waiters_for(deployment_id),
+                    })
                 }
             }
-        };
-
-        // Clean up waiter tracking.
-        if is_vip {
-            slot.vip_waiters.fetch_sub(1, Ordering::Relaxed);
-        } else {
-            slot.waiters.fetch_sub(1, Ordering::Relaxed);
         }
-        {
-            let mut q = slot.queued_waiters.lock().unwrap();
-            q.retain(|w| !(w.key_alias == waiter_key_alias && w.is_vip == is_vip));
-        }
+    }
 
-        result
+    /// Total waiters for a specific deployment (both queues).
+    fn total_waiters_for(&self, deployment_id: &str) -> usize {
+        match self.slots.get(deployment_id) {
+            Some(slot) => {
+                let inner = slot.inner.lock().unwrap();
+                inner.vip_queue.len() + inner.normal_queue.len()
+            }
+            None => 0,
+        }
+    }
+
+    /// Periodic dispatch: iterate all slots and try to fill capacity.
+    /// Called from a 1-second background timer to prevent idle capacity.
+    pub fn periodic_dispatch(&self) {
+        for r in self.slots.iter() {
+            let mut inner = r.value().inner.lock().unwrap();
+            FlowControlSlot::dispatch(&mut inner);
+        }
     }
 
     /// Get stats for all deployments with flow control configured.
@@ -261,15 +356,15 @@ impl FlowController {
         self.slots
             .iter()
             .map(|r| {
-                let s = r.value();
+                let inner = r.value().inner.lock().unwrap();
                 FlowControlStat {
                     deployment_id: r.key().clone(),
-                    current_inflight: s.current_inflight.load(Ordering::Relaxed),
-                    current_context: s.current_context.load(Ordering::Relaxed),
-                    waiters: s.waiters.load(Ordering::Relaxed) as usize,
-                    vip_waiters: s.vip_waiters.load(Ordering::Relaxed) as usize,
-                    max_inflight: s.max_inflight.load(Ordering::Relaxed),
-                    max_context: s.max_context.load(Ordering::Relaxed),
+                    current_inflight: inner.current_inflight,
+                    current_context: inner.current_context,
+                    waiters: inner.normal_queue.len(),
+                    vip_waiters: inner.vip_queue.len(),
+                    max_inflight: inner.max_inflight,
+                    max_context: inner.max_context,
                 }
             })
             .collect()
@@ -280,22 +375,21 @@ impl FlowController {
         self.slots
             .iter()
             .map(|r| {
-                let s = r.value();
-                let q = s.queued_waiters.lock().unwrap();
-                // VIP entries first.
-                let mut entries: Vec<QueuedWaiterEntry> = q
+                let inner = r.value().inner.lock().unwrap();
+                let mut entries: Vec<QueuedWaiterEntry> = inner
+                    .vip_queue
                     .iter()
-                    .filter(|w| w.is_vip)
-                    .map(|w| QueuedWaiterEntry {
-                        key_alias: w.key_alias.clone(),
+                    .map(|r| QueuedWaiterEntry {
+                        key_alias: r.key_alias.clone(),
                         is_vip: true,
                     })
                     .collect();
                 entries.extend(
-                    q.iter()
-                        .filter(|w| !w.is_vip)
-                        .map(|w| QueuedWaiterEntry {
-                            key_alias: w.key_alias.clone(),
+                    inner
+                        .normal_queue
+                        .iter()
+                        .map(|r| QueuedWaiterEntry {
+                            key_alias: r.key_alias.clone(),
                             is_vip: false,
                         }),
                 );
@@ -318,46 +412,14 @@ impl DeploymentQueueInfo for FlowController {
     fn total_load(&self, deployment_id: &str) -> u64 {
         match self.slots.get(deployment_id) {
             Some(slot) => {
-                let inflight = slot.current_inflight.load(Ordering::Relaxed) as u64;
-                let waiters = slot.waiters.load(Ordering::Relaxed) as u64;
-                let vip_waiters = slot.vip_waiters.load(Ordering::Relaxed) as u64;
-                inflight + waiters + vip_waiters
+                let inner = slot.inner.lock().unwrap();
+                inner.current_inflight as u64
+                    + inner.vip_queue.len() as u64
+                    + inner.normal_queue.len() as u64
             }
             None => 0,
         }
     }
-}
-
-/// Total waiters (VIP + normal).
-fn total_waiters(slot: &FlowControlSlot) -> usize {
-    (slot.waiters.load(Ordering::Relaxed) + slot.vip_waiters.load(Ordering::Relaxed)) as usize
-}
-
-/// Attempt to acquire a slot. Returns true if successful.
-fn try_acquire_slot(slot: &FlowControlSlot, context_chars: u64) -> bool {
-    let max_inflight = slot.max_inflight.load(Ordering::Relaxed);
-    let max_context = slot.max_context.load(Ordering::Relaxed);
-
-    // Check inflight limit.
-    if max_inflight > 0 {
-        let current = slot.current_inflight.load(Ordering::Relaxed);
-        if current >= max_inflight {
-            return false;
-        }
-    }
-
-    // Check context limit.
-    if max_context > 0 {
-        let current_ctx = slot.current_context.load(Ordering::Relaxed);
-        if current_ctx + context_chars > max_context {
-            return false;
-        }
-    }
-
-    // Both checks passed — increment counters.
-    slot.current_inflight.fetch_add(1, Ordering::Relaxed);
-    slot.current_context.fetch_add(context_chars, Ordering::Relaxed);
-    true
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -365,6 +427,7 @@ fn try_acquire_slot(slot: &FlowControlSlot, context_chars: u64) -> bool {
 // ═══════════════════════════════════════════════════════════
 
 /// RAII guard that releases the flow control slot on Drop.
+/// Drop decrements counters and triggers dispatch for queued waiters.
 pub struct FlowControlGuard {
     slots: Arc<DashMap<String, FlowControlSlot>>,
     deployment_id: String,
@@ -374,16 +437,10 @@ pub struct FlowControlGuard {
 impl Drop for FlowControlGuard {
     fn drop(&mut self) {
         if let Some(slot) = self.slots.get(&self.deployment_id) {
-            slot.current_inflight.fetch_sub(1, Ordering::Relaxed);
-            slot.current_context.fetch_sub(self.context_chars, Ordering::Relaxed);
-
-            // Wake one waiter — VIP first.
-            let vip_count = slot.vip_waiters.load(Ordering::Relaxed);
-            if vip_count > 0 {
-                slot.vip_notify.notify_one();
-            } else if slot.waiters.load(Ordering::Relaxed) > 0 {
-                slot.notify.notify_one();
-            }
+            let mut inner = slot.inner.lock().unwrap();
+            inner.current_inflight = inner.current_inflight.saturating_sub(1);
+            inner.current_context = inner.current_context.saturating_sub(self.context_chars);
+            FlowControlSlot::dispatch(&mut inner);
         }
     }
 }

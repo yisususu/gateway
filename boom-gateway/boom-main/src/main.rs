@@ -66,6 +66,9 @@ async fn main() -> anyhow::Result<()> {
     // Spawn request summary logger (every 60s).
     spawn_request_summary(state.request_count.clone(), shutdown_tx.subscribe());
 
+    // Spawn periodic FC dispatch (every 1s — prevents idle capacity).
+    spawn_periodic_fc_dispatch(state.flow_controller.clone(), shutdown_tx.subscribe());
+
     // Build router.
     let app = build_router(state.clone());
 
@@ -263,6 +266,28 @@ fn spawn_request_summary(
         }
     });
     tracing::info!("Request summary logger spawned (every 60s)");
+}
+
+/// Background task: every 1s, trigger dispatch on all flow control slots.
+/// Ensures queued requests are dispatched promptly even if no guard drops occur.
+fn spawn_periodic_fc_dispatch(
+    flow_controller: std::sync::Arc<boom_flowcontrol::FlowController>,
+    mut shutdown: tokio::sync::broadcast::Receiver<()>,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                    flow_controller.periodic_dispatch();
+                }
+                _ = shutdown.recv() => {
+                    tracing::debug!("Periodic FC dispatch task shutting down");
+                    return;
+                }
+            }
+        }
+    });
+    tracing::info!("Periodic FC dispatch task spawned (every 1s)");
 }
 
 /// Background task: every 10 minutes, snapshot in-memory state to DB and cleanup.
