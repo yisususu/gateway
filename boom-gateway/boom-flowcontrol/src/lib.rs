@@ -71,54 +71,43 @@ pub struct QueuedWaiterEntry {
 // Internal types
 // ═══════════════════════════════════════════════════════════
 
-/// All mutable state for a single deployment's flow control slot.
-/// Protected by a std::sync::Mutex — critical sections are short
-/// (no async, no I/O), so blocking is acceptable on a 32-thread runtime.
+/// All state for a single deployment's flow control slot.
+///
+/// NO separate counters — the queue IS the source of truth.
+/// `dispatched == true` means in-flight; `dispatched == false` means waiting.
+/// This makes counter leaks structurally impossible.
 struct SlotInner {
     max_inflight: u32,
     max_context: u64,
-    current_inflight: u32,
-    current_context: u64,
-    /// VIP FIFO queue — always drained before the normal queue.
     vip_queue: VecDeque<QueuedRequest>,
-    /// Normal FIFO queue — drained only when VIP queue is empty or blocked.
     normal_queue: VecDeque<QueuedRequest>,
-    /// Monotonic ID for correlating timeout cleanup with dispatch.
     next_id: u64,
 }
 
-/// A single queued request waiting to be dispatched.
+/// A request in the flow control queue.
 struct QueuedRequest {
-    /// Unique ID for timeout-vs-dispatch race detection.
     id: u64,
-    /// Input context size in chars (reserved against max_context).
     context_chars: u64,
-    /// Key alias for dashboard visibility.
     key_alias: Option<String>,
-    /// Oneshot channel — dispatch sends () to grant, waiter receives it.
-    grant: tokio::sync::oneshot::Sender<()>,
+    /// `false` = waiting in queue, `true` = dispatched (in-flight).
+    dispatched: bool,
+    /// Oneshot sender — taken and fired when dispatched.
+    grant: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 // ═══════════════════════════════════════════════════════════
-// AcquireCleanup — RAII guard against counter leaks
+// AcquireCleanup — RAII guard for cancellation safety
 // ═══════════════════════════════════════════════════════════
 
-/// RAII cleanup for `acquire()`.  When the acquire future is dropped
-/// (client disconnect / task cancellation), this Drop impl detects
-/// whether the request was already dispatched (popped + counters
-/// incremented) or still in the queue, and rolls back accordingly.
-///
-/// This is the ONLY reliable way to prevent counter leaks: the
-/// oneshot send might succeed (value buffered) but the waiter
-/// never runs — no `send().is_err()` path can catch that.
+/// When the acquire future is cancelled (client disconnect), this Drop
+/// removes the request from the queue. If it was already dispatched,
+/// removal frees the slot — dispatch is re-triggered to fill it.
+/// No counter to leak — removing from the queue IS the rollback.
 struct AcquireCleanup {
     request_id: u64,
     deployment_id: String,
     is_vip: bool,
-    context_chars: u64,
     slots: Arc<DashMap<String, FlowControlSlot>>,
-    /// Set to true when the guard is consumed (FlowControlGuard created)
-    /// or when the function handles cleanup itself (timeout path).
     consumed: bool,
 }
 
@@ -127,35 +116,19 @@ impl Drop for AcquireCleanup {
         if self.consumed {
             return;
         }
-
-        // Future was cancelled (client disconnect, task abort, etc).
-        // Lock mutex and determine if we were dispatched or still queued.
         let slot = match self.slots.get(&self.deployment_id) {
             Some(s) => s,
-            None => return, // Slot gone — nothing to clean up.
+            None => return,
         };
         let mut inner = slot.inner.lock().unwrap();
-
         let queue = if self.is_vip {
             &mut inner.vip_queue
         } else {
             &mut inner.normal_queue
         };
-
-        match queue.iter().position(|r| r.id == self.request_id) {
-            Some(idx) => {
-                // Still in queue — not yet dispatched. Just remove.
-                queue.remove(idx);
-            }
-            None => {
-                // Not in queue — dispatch already popped us and incremented
-                // counters, but we were cancelled before creating FlowControlGuard.
-                // Roll back to prevent permanent counter leak.
-                inner.current_inflight = inner.current_inflight.saturating_sub(1);
-                inner.current_context = inner.current_context.saturating_sub(self.context_chars);
-                // Re-dispatch to fill the freed capacity.
-                FlowControlSlot::dispatch(&mut inner);
-            }
+        if let Some(idx) = queue.iter().position(|r| r.id == self.request_id) {
+            queue.remove(idx);
+            FlowControlSlot::dispatch(&mut inner);
         }
     }
 }
@@ -169,36 +142,48 @@ struct FlowControlSlot {
 }
 
 impl FlowControlSlot {
-    /// Greedily dispatch queued requests to fill available capacity.
+    /// Count in-flight requests and sum their context.
+    fn inflight_stats(inner: &SlotInner) -> (u32, u64) {
+        inner
+            .vip_queue
+            .iter()
+            .chain(inner.normal_queue.iter())
+            .filter(|r| r.dispatched)
+            .fold((0u32, 0u64), |(cnt, ctx), r| {
+                (cnt + 1, ctx + r.context_chars)
+            })
+    }
+
+    /// Greedily dispatch waiting requests to fill available capacity.
     ///
-    /// Scans each queue for the first request that fits (skips oversized
-    /// heads to avoid head-of-line blocking from context limits).
-    /// VIP queue is always tried first (strict priority).
+    /// Scans each queue for the first non-dispatched request that fits,
+    /// skipping oversized entries (head-of-line avoidance for context).
+    /// VIP queue always tried first.
     fn dispatch(inner: &mut SlotInner) {
         loop {
-            // Inflight limit check.
-            if inner.max_inflight > 0 && inner.current_inflight >= inner.max_inflight {
+            let (inflight, used_ctx) = Self::inflight_stats(inner);
+            if inner.max_inflight > 0 && inflight >= inner.max_inflight {
                 break;
             }
 
-            // Try VIP queue first, then normal queue.
-            // Each call scans past oversized requests.
-            if Self::try_dispatch_fitting(inner, true) {
+            if Self::try_dispatch_fitting(inner, used_ctx, true) {
                 continue;
             }
-            if Self::try_dispatch_fitting(inner, false) {
+            if Self::try_dispatch_fitting(inner, used_ctx, false) {
                 continue;
             }
-            // Neither queue has a dispatchable request — done.
             break;
         }
     }
 
-    /// Scan the queue and dispatch the first request that fits.
-    /// Skips requests that exceed the remaining context budget
-    /// (head-of-line blocking avoidance for context limits).
-    /// Cancelled requests (dropped receiver) are cleaned up along the way.
-    fn try_dispatch_fitting(inner: &mut SlotInner, vip: bool) -> bool {
+    /// Scan a queue and dispatch the first waiting request that fits.
+    /// Also cleans up cancelled requests (grant sender already dropped)
+    /// encountered along the way.
+    fn try_dispatch_fitting(
+        inner: &mut SlotInner,
+        used_ctx: u64,
+        vip: bool,
+    ) -> bool {
         let queue = if vip {
             &mut inner.vip_queue
         } else {
@@ -207,31 +192,38 @@ impl FlowControlSlot {
 
         let mut idx = 0;
         while idx < queue.len() {
-            let fits = {
-                let req = &queue[idx];
-                inner.max_context == 0
-                    || inner.current_context + req.context_chars <= inner.max_context
-            };
+            let req = &queue[idx];
 
-            if !fits {
+            if req.dispatched {
                 idx += 1;
-                continue; // Skip oversized — try next.
+                continue;
             }
 
-            // This request fits — remove and dispatch.
-            let req = queue.remove(idx).unwrap();
-            inner.current_inflight += 1;
-            inner.current_context += req.context_chars;
-            if req.grant.send(()).is_err() {
-                // Receiver dropped — roll back and continue scanning.
-                inner.current_inflight -= 1;
-                inner.current_context -= req.context_chars;
-                // Don't increment idx — next element shifted into same position.
+            // Check if grant sender is still alive (client connected).
+            if req.grant.is_none() {
+                // Cancelled — remove and continue.
+                queue.remove(idx);
+                continue;
+            }
+
+            // Context check.
+            if inner.max_context > 0 && used_ctx + req.context_chars > inner.max_context {
+                idx += 1;
+                continue; // Oversized — skip.
+            }
+
+            // Dispatch: mark in-flight and notify waiter.
+            queue[idx].dispatched = true;
+            let sender = queue[idx].grant.take().unwrap();
+            if sender.send(()).is_err() {
+                // Receiver gone — un-dispatch and remove.
+                queue.remove(idx);
+                continue;
             }
             return true;
         }
 
-        false // No fitting request found.
+        false
     }
 }
 
@@ -239,19 +231,6 @@ impl FlowControlSlot {
 // FlowController
 // ═══════════════════════════════════════════════════════════
 
-/// Per-deployment flow controller. Survives config reloads.
-///
-/// Each deployment has a `FlowControlSlot` backed by a single Mutex
-/// protecting all mutable state (counters + two FIFO queues).
-///
-/// Dispatch triggers (all serialized by the per-slot Mutex):
-///   1. `acquire()` — enqueue then dispatch
-///   2. `FlowControlGuard::drop()` — decrement then dispatch
-///   3. `periodic_dispatch()` — 1s timer, iterate all slots
-///
-/// Counter leak prevention:
-///   `AcquireCleanup` RAII guard rolls back counters when the acquire
-///   future is cancelled after dispatch but before FlowControlGuard creation.
 pub struct FlowController {
     slots: Arc<DashMap<String, FlowControlSlot>>,
 }
@@ -263,9 +242,6 @@ impl FlowController {
         }
     }
 
-    /// Ensure a slot exists for the given deployment_id with the given config.
-    /// If the slot already exists, only updates the config limits (preserves runtime state).
-    /// If config is all zeros (unlimited), removes the slot.
     pub fn ensure_slot(&self, deployment_id: &str, config: &FlowControlConfig) {
         if config.max_inflight == 0 && config.max_context == 0 {
             self.slots.remove(deployment_id);
@@ -282,8 +258,6 @@ impl FlowController {
                     inner: std::sync::Mutex::new(SlotInner {
                         max_inflight: config.max_inflight,
                         max_context: config.max_context,
-                        current_inflight: 0,
-                        current_context: 0,
                         vip_queue: VecDeque::new(),
                         normal_queue: VecDeque::new(),
                         next_id: 0,
@@ -298,28 +272,14 @@ impl FlowController {
         }
     }
 
-    /// Remove a slot (called when a deployment is deleted).
-    /// Queued waiters' oneshot senders are dropped, causing receivers to error.
-    /// In-flight requests drain naturally via guard Drop (no-ops if slot gone).
     pub fn remove_slot(&self, deployment_id: &str) {
         self.slots.remove(deployment_id);
     }
 
-    /// Remove slots that are no longer in the provided list.
     pub fn retain_slots(&self, active_ids: &[String]) {
         self.slots.retain(|id, _| active_ids.contains(id));
     }
 
-    /// Acquire a flow control slot for a deployment.
-    ///
-    /// 1. Enqueue at the tail of the appropriate FIFO queue (VIP or normal).
-    /// 2. Immediately trigger dispatch — may grant this request or others ahead.
-    /// 3. Await grant signal (oneshot) or timeout.
-    /// 4. On timeout, check if already dispatched (race with guard drop).
-    ///
-    /// `AcquireCleanup` RAII guard handles cancellation at any point:
-    /// if the future is dropped after dispatch sent the grant but before
-    /// we could create FlowControlGuard, it rolls back the counters.
     pub async fn acquire(
         &self,
         deployment_id: &str,
@@ -336,7 +296,6 @@ impl FlowController {
         let (grant_tx, grant_rx) = tokio::sync::oneshot::channel();
         let request_id: u64;
 
-        // ── Enqueue + dispatch (single mutex hold) ──
         {
             let mut inner = slot.inner.lock().unwrap();
             request_id = inner.next_id;
@@ -346,7 +305,8 @@ impl FlowController {
                 id: request_id,
                 context_chars,
                 key_alias,
-                grant: grant_tx,
+                dispatched: false,
+                grant: Some(grant_tx),
             };
 
             if is_vip {
@@ -357,39 +317,32 @@ impl FlowController {
 
             FlowControlSlot::dispatch(&mut inner);
         }
-        // Mutex released — drop DashMap ref before awaiting.
         drop(slot);
 
-        // RAII cleanup — rolls back counters if future is cancelled
-        // after dispatch but before FlowControlGuard creation.
         let mut cleanup = AcquireCleanup {
             request_id,
             deployment_id: deployment_id.to_string(),
             is_vip,
-            context_chars,
             slots: self.slots.clone(),
             consumed: false,
         };
 
-        // ── Wait for grant or timeout ──
         match tokio::time::timeout(timeout, grant_rx).await {
             Ok(Ok(())) => {
-                // Granted — mark consumed so cleanup is a no-op.
                 cleanup.consumed = true;
                 Ok(FlowControlGuard {
                     slots: self.slots.clone(),
                     deployment_id: deployment_id.to_string(),
-                    context_chars,
+                    request_id,
+                    is_vip,
                 })
             }
             Ok(Err(_)) => {
-                // Slot removed while waiting (sender dropped).
-                // AcquireCleanup handles queue removal (if still queued).
-                cleanup.consumed = true; // Slot gone, nothing to roll back.
+                cleanup.consumed = true;
                 Err(FlowControlError::NoSlot)
             }
             Err(_) => {
-                // Timeout — check if already dispatched (race with guard drop).
+                // Timeout — check if already dispatched.
                 let already_dispatched = {
                     let slot = self.slots.get(deployment_id);
                     match slot {
@@ -402,28 +355,30 @@ impl FlowController {
                             };
                             match queue.iter().position(|r| r.id == request_id) {
                                 Some(idx) => {
-                                    queue.remove(idx);
-                                    false // Still in queue — removed.
+                                    if queue[idx].dispatched {
+                                        true
+                                    } else {
+                                        queue.remove(idx);
+                                        false
+                                    }
                                 }
-                                None => true, // Already dispatched.
+                                None => true,
                             }
                         }
-                        None => false, // Slot gone — treat as timeout.
+                        None => false,
                     }
                 };
 
                 if already_dispatched {
-                    // Counters already incremented — must create guard for cleanup.
-                    // Mark consumed so AcquireCleanup doesn't double-roll-back.
                     cleanup.consumed = true;
                     Ok(FlowControlGuard {
                         slots: self.slots.clone(),
                         deployment_id: deployment_id.to_string(),
-                        context_chars,
+                        request_id,
+                        is_vip,
                     })
                 } else {
-                    // Not dispatched — removed from queue by us.
-                    cleanup.consumed = true; // Already removed, nothing for cleanup.
+                    cleanup.consumed = true;
                     Err(FlowControlError::Timeout {
                         deployment_id: deployment_id.to_string(),
                         waiters: self.total_waiters_for(deployment_id),
@@ -433,19 +388,21 @@ impl FlowController {
         }
     }
 
-    /// Total waiters for a specific deployment (both queues).
     fn total_waiters_for(&self, deployment_id: &str) -> usize {
         match self.slots.get(deployment_id) {
             Some(slot) => {
                 let inner = slot.inner.lock().unwrap();
-                inner.vip_queue.len() + inner.normal_queue.len()
+                inner
+                    .vip_queue
+                    .iter()
+                    .chain(inner.normal_queue.iter())
+                    .filter(|r| !r.dispatched)
+                    .count()
             }
             None => 0,
         }
     }
 
-    /// Periodic dispatch: iterate all slots and try to fill capacity.
-    /// Called from a 1-second background timer to prevent idle capacity.
     pub fn periodic_dispatch(&self) {
         for r in self.slots.iter() {
             let mut inner = r.value().inner.lock().unwrap();
@@ -453,18 +410,20 @@ impl FlowController {
         }
     }
 
-    /// Get stats for all deployments with flow control configured.
     pub fn get_stats(&self) -> Vec<FlowControlStat> {
         self.slots
             .iter()
             .map(|r| {
                 let inner = r.value().inner.lock().unwrap();
+                let (inflight, context) = FlowControlSlot::inflight_stats(&inner);
+                let vip_waiting = inner.vip_queue.iter().filter(|r| !r.dispatched).count();
+                let normal_waiting = inner.normal_queue.iter().filter(|r| !r.dispatched).count();
                 FlowControlStat {
                     deployment_id: r.key().clone(),
-                    current_inflight: inner.current_inflight,
-                    current_context: inner.current_context,
-                    waiters: inner.normal_queue.len(),
-                    vip_waiters: inner.vip_queue.len(),
+                    current_inflight: inflight,
+                    current_context: context,
+                    waiters: normal_waiting,
+                    vip_waiters: vip_waiting,
                     max_inflight: inner.max_inflight,
                     max_context: inner.max_context,
                 }
@@ -472,7 +431,6 @@ impl FlowController {
             .collect()
     }
 
-    /// Get per-deployment queued waiter details for dashboard visibility.
     pub fn get_queued_waiters(&self) -> Vec<QueuedWaiterStat> {
         self.slots
             .iter()
@@ -481,6 +439,7 @@ impl FlowController {
                 let mut entries: Vec<QueuedWaiterEntry> = inner
                     .vip_queue
                     .iter()
+                    .filter(|r| !r.dispatched)
                     .map(|r| QueuedWaiterEntry {
                         key_alias: r.key_alias.clone(),
                         is_vip: true,
@@ -490,6 +449,7 @@ impl FlowController {
                     inner
                         .normal_queue
                         .iter()
+                        .filter(|r| !r.dispatched)
                         .map(|r| QueuedWaiterEntry {
                             key_alias: r.key_alias.clone(),
                             is_vip: false,
@@ -515,9 +475,7 @@ impl DeploymentQueueInfo for FlowController {
         match self.slots.get(deployment_id) {
             Some(slot) => {
                 let inner = slot.inner.lock().unwrap();
-                inner.current_inflight as u64
-                    + inner.vip_queue.len() as u64
-                    + inner.normal_queue.len() as u64
+                inner.vip_queue.len() as u64 + inner.normal_queue.len() as u64
             }
             None => 0,
         }
@@ -528,21 +486,26 @@ impl DeploymentQueueInfo for FlowController {
 // FlowControlGuard — RAII
 // ═══════════════════════════════════════════════════════════
 
-/// RAII guard that releases the flow control slot on Drop.
-/// Drop decrements counters and triggers dispatch for queued waiters.
 pub struct FlowControlGuard {
     slots: Arc<DashMap<String, FlowControlSlot>>,
     deployment_id: String,
-    context_chars: u64,
+    request_id: u64,
+    is_vip: bool,
 }
 
 impl Drop for FlowControlGuard {
     fn drop(&mut self) {
         if let Some(slot) = self.slots.get(&self.deployment_id) {
             let mut inner = slot.inner.lock().unwrap();
-            inner.current_inflight = inner.current_inflight.saturating_sub(1);
-            inner.current_context = inner.current_context.saturating_sub(self.context_chars);
-            FlowControlSlot::dispatch(&mut inner);
+            let queue = if self.is_vip {
+                &mut inner.vip_queue
+            } else {
+                &mut inner.normal_queue
+            };
+            if let Some(idx) = queue.iter().position(|r| r.id == self.request_id) {
+                queue.remove(idx);
+                FlowControlSlot::dispatch(&mut inner);
+            }
         }
     }
 }
@@ -551,8 +514,6 @@ impl Drop for FlowControlGuard {
 // FlowControlledStream — releases guard when stream ends
 // ═══════════════════════════════════════════════════════════
 
-/// Stream wrapper that holds an optional flow control guard.
-/// When the stream ends (returns `None`) or is dropped, the guard is released.
 pub struct FlowControlledStream<S> {
     inner: S,
     guard: Option<FlowControlGuard>,
@@ -566,7 +527,6 @@ impl<S> FlowControlledStream<S> {
         }
     }
 
-    /// Create a passthrough wrapper (no guard to release).
     pub fn passthrough(inner: S) -> Self {
         Self {
             inner,
@@ -582,7 +542,6 @@ impl<S: Stream + Unpin> Stream for FlowControlledStream<S> {
         let result = Pin::new(&mut self.inner).poll_next(cx);
 
         if matches!(result, Poll::Ready(None)) {
-            // Stream finished — release the guard.
             self.guard.take();
         }
         result
