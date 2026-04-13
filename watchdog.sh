@@ -13,26 +13,52 @@ RESTART_SCRIPT="$2"
 shift 2
 
 URL="http://127.0.0.1:${PORT}/health"
+LOG="boom_gateway_watchdog.log"
+RUN_LOG="boom_gateway_run.log"
 FAIL=0
+RESTARTS=0
+START_EPOCH=$(date +%s)
+LAST_HEARTBEAT=$(date +%s)
 
-echo "[watchdog] port=${PORT} url=${URL} restart=${RESTART_SCRIPT}"
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG"
+}
+
+log "watchdog started — port=${PORT} restart=${RESTART_SCRIPT}"
 
 while true; do
+    NOW=$(date +%s)
+
+    # Heartbeat: print uptime every ~60s when healthy.
+    if [ $((NOW - LAST_HEARTBEAT)) -ge 60 ] && [ "$FAIL" -eq 0 ]; then
+        UPTIME=$(( NOW - START_EPOCH ))
+        DAYS=$(( UPTIME / 86400 ))
+        HOURS=$(( (UPTIME % 86400) / 3600 ))
+        MINS=$(( (UPTIME % 3600) / 60 ))
+        log "heartbeat — uptime ${DAYS}d${HOURS}h${MINS}m, restarts ${RESTARTS}"
+        LAST_HEARTBEAT=$NOW
+    fi
+
     START=$(date +%s%N)
     if curl -sf --max-time 2 "$URL" > /dev/null 2>&1; then
         if [ "$FAIL" -gt 0 ]; then
-            echo "[watchdog] recovered after ${FAIL} failure(s)"
+            log "recovered after ${FAIL} failure(s)"
         fi
         FAIL=0
     else
         FAIL=$((FAIL + 1))
-        echo "[watchdog] FAIL ${FAIL}/3 — $(date '+%Y-%m-%d %H:%M:%S')"
+        log "health check FAIL ${FAIL}/3"
         if [ "$FAIL" -ge 3 ]; then
-            echo "[watchdog] 3 consecutive failures — restarting..."
-            bash "$RESTART_SCRIPT" "$@" 2>&1 || true
-            echo "[watchdog] restart script exited, waiting 10s before resuming probes..."
+            RESTARTS=$((RESTARTS + 1))
+            log "RESTART #${RESTARTS} — running ${RESTART_SCRIPT}"
+            bash "$RESTART_SCRIPT" "$@" >> "$RUN_LOG" 2>&1 &
+            RESTART_PID=$!
+            log "restart script running as PID ${RESTART_PID}, logs >> ${RUN_LOG}"
+            wait "$RESTART_PID" 2>/dev/null || true
+            log "restart script exited, waiting 10s before resuming probes"
             sleep 10
             FAIL=0
+            LAST_HEARTBEAT=$(date +%s)
         fi
     fi
 
