@@ -865,7 +865,10 @@ fn check_model_access(
     public_models: &[String],
 ) -> Result<(), GatewayError> {
     // Public model — bypass all key-level whitelist checks.
-    if public_models.iter().any(|m| m == model) {
+    // Match both the requested name and its alias target (if any).
+    let is_public = public_models.iter().any(|m| m == model)
+        || router.resolve_model(model).map_or(false, |target| public_models.iter().any(|m| m == &target));
+    if is_public {
         return Ok(());
     }
 
