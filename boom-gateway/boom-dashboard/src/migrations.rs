@@ -100,7 +100,7 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
     tracing::info!("Migration 6/7: done");
 
     // 4. KV config store (dashboard-owned).
-    tracing::info!("Migration 7/7: boom_config...");
+    tracing::info!("Migration 7/8: boom_config...");
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS boom_config (
             key         TEXT PRIMARY KEY,
@@ -110,12 +110,27 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
     )
     .execute(&mut *conn)
     .await?;
-    tracing::info!("Migration 7/7: done");
+    tracing::info!("Migration 7/8: done");
+
+    // 5. Team table (dashboard-owned).
+    tracing::info!("Migration 8/8: boom_team_table...");
+    sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS boom_team_table (
+            team_id     TEXT PRIMARY KEY,
+            team_alias  TEXT,
+            models      TEXT[] DEFAULT '{}',
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )"#,
+    )
+    .execute(&mut *conn)
+    .await?;
+    tracing::info!("Migration 8/8: done");
 
     // Connection returns to pool on drop.
     drop(conn);
 
-    tracing::info!("BooMGateway persistence tables ensured (7 tables)");
+    tracing::info!("BooMGateway persistence tables ensured (8 tables)");
     Ok(())
 }
 

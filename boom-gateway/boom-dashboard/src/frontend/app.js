@@ -1248,18 +1248,93 @@
     const wrap = document.getElementById("teams-table-wrap");
     if (teams.length === 0) { wrap.innerHTML = "<p>No teams found.</p>"; return; }
     wrap.innerHTML = `<table>
-      <tr><th>Team Alias</th><th>Team ID</th><th>Keys</th><th>Requests</th><th>Input Tokens</th><th>Output Tokens</th><th>Total Tokens</th></tr>
+      <tr><th>Team Alias</th><th>Team ID</th><th>Models</th><th>Keys</th><th>Requests</th><th>Input Tokens</th><th>Output Tokens</th><th>Total Tokens</th><th>Actions</th></tr>
       ${teams.map((t) => `<tr>
         <td>${esc(t.team_alias || "-")}</td>
-        <td class="mono" title="${esc(t.team_id)}">${esc((t.team_id || "").substring(0, 8))}</td>
+        <td class="mono" title="${esc(t.team_id)}">${esc((t.team_id || "").substring(0, 12))}</td>
+        <td class="mono">${esc(formatTeamModels(t.models))}</td>
         <td>${t.key_count}</td>
         <td>${formatNumber(t.request_count)}</td>
         <td>${formatNumber(t.total_input_tokens || 0)}</td>
         <td>${formatNumber(t.total_output_tokens || 0)}</td>
         <td>${formatNumber((t.total_input_tokens || 0) + (t.total_output_tokens || 0))}</td>
+        <td>
+          <button class="btn-secondary btn-sm" onclick='window._editTeam(${JSON.stringify(t.team_id)})'>Edit</button>
+          <button class="btn-danger btn-sm" onclick='window._deleteTeam(${JSON.stringify(t.team_id)}, ${t.key_count})'>Delete</button>
+        </td>
       </tr>`).join("")}
     </table>`;
   }
+
+  function formatTeamModels(models) {
+    if (!models || models.length === 0) return "all-team-models";
+    if (models.includes("all-team-models")) return "all-team-models";
+    return models.join(", ");
+  }
+
+  window.showCreateTeamModal = function(prefill) {
+    const p = prefill || {};
+    showModal(`
+      <h3>${p.team_id ? "Edit" : "Create"} Team</h3>
+      <div class="form-group"><label>Team ID ${tip("Unique identifier for this team. Cannot be changed after creation.")}</label><input id="m-team-id" value="${esc(p.team_id || "")}" ${p.team_id ? "readonly" : ""} required></div>
+      <div class="form-group"><label>Team Alias ${tip("Display name for this team. Can be non-unique.")}</label><input id="m-team-alias" value="${esc(p.team_alias || "")}"></div>
+      <div class="form-group"><label>Models ${tip("Select model access for this team. Check 'all-team-models' for full access to all current and future models, or pick specific models.")}</label><div class="model-check-combo" id="m-team-models-combo"></div></div>
+      <div class="modal-actions">
+        <button class="btn-secondary" onclick="hideModal()" style="width:auto">Cancel</button>
+        <button class="btn-primary" id="m-team-submit">${p.team_id ? "Update" : "Create"}</button>
+      </div>
+    `);
+    getModelNames().then((names) => {
+      const container = document.getElementById("m-team-models-combo");
+      if (container) initModelCombo(container, p.models || [], names);
+    });
+    document.getElementById("m-team-submit").addEventListener("click", async () => {
+      try {
+        const modelsVal = getComboModels("m-team-models-combo");
+        const body = {
+          team_id: document.getElementById("m-team-id").value.trim(),
+          team_alias: document.getElementById("m-team-alias").value.trim() || null,
+          models: modelsVal || ["all-team-models"],
+        };
+        if (p.team_id) {
+          await api("/admin/teams/" + encodeURIComponent(p.team_id), {
+            method: "PUT",
+            body: JSON.stringify({
+              team_alias: body.team_alias,
+              models: body.models,
+            }),
+          });
+        } else {
+          await api("/admin/teams", { method: "POST", body: JSON.stringify(body) });
+        }
+        hideModal();
+        loadTeams();
+      } catch (err) { alert("Error: " + err.message); }
+    });
+  };
+
+  window._editTeam = async (teamId) => {
+    try {
+      const data = await api("/admin/teams");
+      const t = (data.teams || []).find((x) => x.team_id === teamId);
+      if (!t) return;
+      // Fetch full team record with models from DB.
+      // list_teams doesn't return models, so we pass what we have.
+      showCreateTeamModal(t);
+    } catch (err) { alert("Error: " + err.message); }
+  };
+
+  window._deleteTeam = async (teamId, keyCount) => {
+    if (keyCount > 0) {
+      alert(`Cannot delete team: ${keyCount} key(s) still assigned.`);
+      return;
+    }
+    if (!confirm(`Delete team "${teamId}"?`)) return;
+    try {
+      await api("/admin/teams/" + encodeURIComponent(teamId), { method: "DELETE" });
+      loadTeams();
+    } catch (err) { alert("Error: " + err.message); }
+  };
 
   // ── Admin: Logs ──────────────────────────────────────
   let logsPage = 1;

@@ -136,7 +136,11 @@ pub fn build_router<S: Clone + Send + Sync + 'static>(state: DashboardState) -> 
         // Admin — Teams.
         .route(
             "/dashboard/api/admin/teams",
-            get(handlers_admin::list_teams),
+            get(handlers_admin::list_teams).post(handlers_admin::create_team),
+        )
+        .route(
+            "/dashboard/api/admin/teams/{team_id}",
+            put(handlers_admin::update_team).delete(handlers_admin::delete_team),
         )
         // Admin — Debug error recording.
         .route(

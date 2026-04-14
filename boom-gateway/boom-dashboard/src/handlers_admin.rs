@@ -1405,6 +1405,7 @@ pub async fn list_logs(
 struct TeamUsageRow {
     team_id: String,
     team_alias: Option<String>,
+    models: Option<Vec<String>>,
     key_count: i64,
     total_input_tokens: Option<i64>,
     total_output_tokens: Option<i64>,
@@ -1425,6 +1426,7 @@ pub async fn list_teams(
     let sql = r#"
         SELECT bt.team_id,
                bt.team_alias,
+               bt.models,
                COALESCE(kc.cnt, 0) AS key_count,
                COALESCE(rl.total_input, 0) AS total_input_tokens,
                COALESCE(rl.total_output, 0) AS total_output_tokens,
@@ -1461,6 +1463,7 @@ pub async fn list_teams(
             json!({
                 "team_id": r.team_id,
                 "team_alias": r.team_alias,
+                "models": r.models,
                 "key_count": r.key_count,
                 "total_input_tokens": r.total_input_tokens,
                 "total_output_tokens": r.total_output_tokens,
@@ -1470,6 +1473,160 @@ pub async fn list_teams(
         .collect();
 
     Json(json!({ "teams": teams })).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTeamRequest {
+    pub team_id: String,
+    pub team_alias: Option<String>,
+    /// Allowed models. Empty or containing "all-team-models" = all models allowed.
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
+pub async fn create_team(
+    _session: AdminSession,
+    Extension(state): Extension<std::sync::Arc<DashboardState>>,
+    Json(req): Json<CreateTeamRequest>,
+) -> Response {
+    let db_pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => return Json(json!({"error": "Database not available"})).into_response(),
+    };
+
+    if req.team_id.trim().is_empty() {
+        return (axum::http::StatusCode::BAD_REQUEST, "team_id is required").into_response();
+    }
+
+    // Normalize: if models contains "all-team-models", treat as full access.
+    let models = if req.models.iter().any(|m| m == "all-team-models") {
+        vec!["all-team-models".to_string()]
+    } else {
+        req.models
+    };
+
+    let result = sqlx::query(
+        r#"INSERT INTO boom_team_table (team_id, team_alias, models, created_at, updated_at)
+           VALUES ($1, $2, $3, NOW(), NOW())"#,
+    )
+    .bind(&req.team_id)
+    .bind(&req.team_alias)
+    .bind(&models)
+    .execute(db_pool)
+    .await;
+
+    match result {
+        Ok(_) => Json(json!({
+            "ok": true,
+            "team_id": req.team_id,
+            "team_alias": req.team_alias,
+            "models": models,
+        })).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("duplicate key") || msg.contains("violates unique") {
+                return (
+                    axum::http::StatusCode::CONFLICT,
+                    format!("team_id '{}' already exists", req.team_id),
+                ).into_response();
+            }
+            tracing::error!("Dashboard create_team failed: {}", e);
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateTeamRequest {
+    pub team_alias: Option<String>,
+    #[serde(default)]
+    pub models: Option<Vec<String>>,
+}
+
+pub async fn update_team(
+    _session: AdminSession,
+    Extension(state): Extension<std::sync::Arc<DashboardState>>,
+    Path(team_id): Path<String>,
+    Json(req): Json<UpdateTeamRequest>,
+) -> Response {
+    let db_pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => return Json(json!({"error": "Database not available"})).into_response(),
+    };
+
+    // Normalize models if provided.
+    let models = req.models.map(|ms| {
+        if ms.iter().any(|m| m == "all-team-models") {
+            vec!["all-team-models".to_string()]
+        } else {
+            ms
+        }
+    });
+
+    let result = sqlx::query(
+        r#"UPDATE boom_team_table
+           SET team_alias = COALESCE($2, team_alias),
+               models = COALESCE($3, models),
+               updated_at = NOW()
+           WHERE team_id = $1"#,
+    )
+    .bind(&team_id)
+    .bind(&req.team_alias)
+    .bind(&models)
+    .execute(db_pool)
+    .await;
+
+    match result {
+        Ok(r) if r.rows_affected() > 0 => Json(json!({"ok": true})).into_response(),
+        Ok(_) => (axum::http::StatusCode::NOT_FOUND, "Team not found").into_response(),
+        Err(e) => {
+            tracing::error!("Dashboard update_team failed: {}", e);
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()
+        }
+    }
+}
+
+pub async fn delete_team(
+    _session: AdminSession,
+    Extension(state): Extension<std::sync::Arc<DashboardState>>,
+    Path(team_id): Path<String>,
+) -> Response {
+    let db_pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => return Json(json!({"error": "Database not available"})).into_response(),
+    };
+
+    // Check if team has keys.
+    let key_count: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM boom_verification_token WHERE team_id = $1"#,
+    )
+    .bind(&team_id)
+    .fetch_one(db_pool)
+    .await
+    .unwrap_or(0);
+
+    if key_count > 0 {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            format!("Cannot delete team: {} key(s) still assigned", key_count),
+        ).into_response();
+    }
+
+    let result = sqlx::query(
+        r#"DELETE FROM boom_team_table WHERE team_id = $1"#,
+    )
+    .bind(&team_id)
+    .execute(db_pool)
+    .await;
+
+    match result {
+        Ok(r) if r.rows_affected() > 0 => Json(json!({"ok": true, "team_id": team_id})).into_response(),
+        Ok(_) => (axum::http::StatusCode::NOT_FOUND, "Team not found").into_response(),
+        Err(e) => {
+            tracing::error!("Dashboard delete_team failed: {}", e);
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════
