@@ -210,21 +210,22 @@ pub async fn reload_model_deployments(
 
 /// Auto-disable a faulty deployment: mark `enabled = false, auto_disabled = true` in DB,
 /// then reload the deployment store so the node is immediately excluded from routing.
+/// Uses the actual model_name from the DB record (not the requested model name)
+/// so that wildcard `*` deployments are correctly reloaded.
 pub async fn auto_disable_deployment(
     pool: &sqlx::PgPool,
     deployment_store: &Arc<DeploymentStore>,
     deployment_id: &str,
-    model_name: &str,
+    _requested_model: &str,
 ) {
     tracing::warn!(
         deployment_id = %deployment_id,
-        model = %model_name,
         "Auto-disabling deployment due to consecutive failures"
     );
 
-    match DeploymentStore::auto_disable_db(pool, deployment_id).await {
-        Ok(true) => {}
-        Ok(false) => {
+    let actual_model_name = match DeploymentStore::auto_disable_db(pool, deployment_id).await {
+        Ok(Some(name)) => name,
+        Ok(None) => {
             tracing::warn!(deployment_id = %deployment_id, "No rows updated — deployment_id may not exist in DB");
             return;
         }
@@ -232,14 +233,14 @@ pub async fn auto_disable_deployment(
             tracing::error!(deployment_id = %deployment_id, "Failed to auto-disable deployment in DB: {}", e);
             return;
         }
-    }
+    };
 
-    // Reload deployments for this model from DB (removes the disabled one from memory).
-    reload_model_deployments(pool, deployment_store, model_name).await;
+    // Reload deployments for the ACTUAL model_name from DB (removes the disabled one from memory).
+    reload_model_deployments(pool, deployment_store, &actual_model_name).await;
 
     tracing::warn!(
         deployment_id = %deployment_id,
-        model = %model_name,
+        model = %actual_model_name,
         "Deployment auto-disabled and removed from routing"
     );
 }

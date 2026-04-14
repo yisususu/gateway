@@ -430,23 +430,25 @@ impl DeploymentStore {
     }
 
     /// Auto-disable a deployment: set enabled=false, auto_disabled=true.
-    pub async fn auto_disable_db(pool: &sqlx::PgPool, deployment_id: &str) -> Result<bool, sqlx::Error> {
-        let result = sqlx::query(
+    /// Returns the actual model_name of the disabled deployment, or None if not found.
+    pub async fn auto_disable_db(pool: &sqlx::PgPool, deployment_id: &str) -> Result<Option<String>, sqlx::Error> {
+        let row: Option<(String,)> = sqlx::query_as(
             r#"UPDATE boom_model_deployment
                SET enabled = false, auto_disabled = true, updated_at = NOW()
-               WHERE deployment_id = $1"#,
+               WHERE deployment_id = $1
+               RETURNING model_name"#,
         )
         .bind(deployment_id)
-        .execute(pool)
+        .fetch_optional(pool)
         .await?;
 
-        if result.rows_affected() == 0 {
+        if row.is_none() {
             tracing::warn!(
                 deployment_id = %deployment_id,
                 "No rows updated — deployment_id may not exist in DB"
             );
         }
-        Ok(result.rows_affected() > 0)
+        Ok(row.map(|(name,)| name))
     }
 
     /// List all deployments from DB (for dashboard).
