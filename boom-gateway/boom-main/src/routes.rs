@@ -23,6 +23,48 @@ use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
+/// Acquire flow control guard for a deployment.
+/// Returns Ok(Some(guard)) if acquired, Ok(None) if no slot (pass-through),
+/// or Err with appropriate error reply.
+async fn acquire_fc_guard<E>(
+    state: &AppState,
+    deployment_id: &str,
+    context_chars: u64,
+    is_vip: bool,
+    key_alias: Option<String>,
+    api_path: &str,
+    identity: &boom_core::types::AuthIdentity,
+    model: &str,
+    is_stream: bool,
+    start: Instant,
+    request_id: &str,
+    err_wrap: impl Fn(GatewayError, bool) -> E,
+) -> Result<Option<boom_flowcontrol::FlowControlGuard>, E> {
+    let timeout = std::time::Duration::from_secs(1200);
+    match state.flow_controller.acquire(deployment_id, context_chars, timeout, is_vip, key_alias).await {
+        Ok(g) => Ok(Some(g)),
+        Err(FlowControlError::Timeout { waiters, .. }) => {
+            let e = GatewayError::FlowControlQueueTimeout {
+                deployment_id: deployment_id.to_string(),
+                waiters,
+                message: format!("Deployment '{}' flow control queue timeout — too many concurrent requests", deployment_id),
+            };
+            log_error(state, identity, model, api_path, is_stream, start, &e, Some(request_id.to_string()), Some(deployment_id.to_string()), None);
+            Err(err_wrap(e, is_stream))
+        }
+        Err(FlowControlError::NoSlot) => Ok(None),
+        Err(FlowControlError::ContextExceeded { deployment_id: _, context_chars, max_context }) => {
+            let e = GatewayError::RateLimitExceeded {
+                retry_after_secs: None,
+                message: format!("Request context ({} chars) exceeds deployment max_context limit ({} chars)", context_chars, max_context),
+                limit_type: "flow_control_context",
+            };
+            log_error(state, identity, model, api_path, is_stream, start, &e, Some(request_id.to_string()), Some(deployment_id.to_string()), None);
+            Err(err_wrap(e, is_stream))
+        }
+    }
+}
+
 /// Consecutive failure threshold to trigger auto-disable.
 const AUTO_DISABLE_THRESHOLD: u32 = 3;
 
@@ -270,30 +312,11 @@ async fn chat_completions_inner(
 
     // 3.5. Flow control — queue if per-deployment limits exceeded.
     let fc_guard = if let Some(ref did) = deployment_id {
-        let timeout = std::time::Duration::from_secs(1200);
-        let vip = is_vip_key(&identity.metadata);
-        match state.flow_controller.acquire(did, input_chars as u64, timeout, vip, identity.key_alias.clone()).await {
-            Ok(g) => Some(g),
-            Err(FlowControlError::Timeout { waiters, .. }) => {
-                let e = GatewayError::FlowControlQueueTimeout {
-                    deployment_id: did.clone(),
-                    waiters,
-                    message: format!("Deployment '{}' flow control queue timeout — too many concurrent requests", did),
-                };
-                log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()), deployment_id.clone(), None);
-                return Err(GatewayErrorReply(e, is_stream));
-            }
-            Err(FlowControlError::NoSlot) => None,
-            Err(FlowControlError::ContextExceeded { deployment_id: _, context_chars, max_context }) => {
-                let e = GatewayError::RateLimitExceeded {
-                    retry_after_secs: None,
-                    message: format!("Request context ({} chars) exceeds deployment max_context limit ({} chars)", context_chars, max_context),
-                    limit_type: "flow_control_context",
-                };
-                log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()), deployment_id.clone(), None);
-                return Err(GatewayErrorReply(e, is_stream));
-            }
-        }
+        acquire_fc_guard(
+            &state, did, input_chars as u64, is_vip_key(&identity.metadata),
+            identity.key_alias.clone(), api_path, &identity, &model,
+            is_stream, start, &request_id, GatewayErrorReply,
+        ).await?
     } else {
         None
     };
@@ -1335,30 +1358,11 @@ pub async fn messages(
 
     // 3.5. Flow control — queue if per-deployment limits exceeded.
     let fc_guard = if let Some(ref did) = deployment_id {
-        let timeout = std::time::Duration::from_secs(1200);
-        let vip = is_vip_key(&identity.metadata);
-        match state.flow_controller.acquire(did, input_chars as u64, timeout, vip, identity.key_alias.clone()).await {
-            Ok(g) => Some(g),
-            Err(FlowControlError::Timeout { waiters, .. }) => {
-                let e = GatewayError::FlowControlQueueTimeout {
-                    deployment_id: did.clone(),
-                    waiters,
-                    message: format!("Deployment '{}' flow control queue timeout — too many concurrent requests", did),
-                };
-                log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()), deployment_id.clone(), None);
-                return Err(AnthropicErrorReply(e, is_stream));
-            }
-            Err(FlowControlError::NoSlot) => None,
-            Err(FlowControlError::ContextExceeded { deployment_id: _, context_chars, max_context }) => {
-                let e = GatewayError::RateLimitExceeded {
-                    retry_after_secs: None,
-                    message: format!("Request context ({} chars) exceeds deployment max_context limit ({} chars)", context_chars, max_context),
-                    limit_type: "flow_control_context",
-                };
-                log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()), deployment_id.clone(), None);
-                return Err(AnthropicErrorReply(e, is_stream));
-            }
-        }
+        acquire_fc_guard(
+            &state, did, input_chars as u64, is_vip_key(&identity.metadata),
+            identity.key_alias.clone(), "/v1/messages", &identity, &model,
+            is_stream, start, &request_id, AnthropicErrorReply,
+        ).await?
     } else {
         None
     };
