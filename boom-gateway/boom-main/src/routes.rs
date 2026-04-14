@@ -246,7 +246,7 @@ async fn chat_completions_inner(
     }
 
     // 1. Model access check (deployment-aware, alias-aware).
-    check_model_access(identity, &req.model, &state.router)
+    check_model_access(identity, &req.model, &state.router, &inner.config.general_settings.public_models)
         .map_err(|e| {
             log_error(&state, &identity, &model, api_path, is_stream, start, &e, Some(request_id.clone()), None, None);
             GatewayErrorReply(e, false)
@@ -862,7 +862,13 @@ fn check_model_access(
     identity: &AuthIdentity,
     model: &str,
     router: &Router,
+    public_models: &[String],
 ) -> Result<(), GatewayError> {
+    // Public model — bypass all key-level whitelist checks.
+    if public_models.iter().any(|m| m == model) {
+        return Ok(());
+    }
+
     // Unrestricted key
     if identity.models.is_empty() {
         tracing::debug!(
@@ -1293,7 +1299,7 @@ pub async fn messages(
     }
 
     // 1. Model access check (deployment-aware, alias-aware).
-    check_model_access(identity, &openai_req.model, &state.router)
+    check_model_access(identity, &openai_req.model, &state.router, &inner.config.general_settings.public_models)
         .map_err(|e| {
             log_error(&state, &identity, &model, "/v1/messages", is_stream, start, &e, Some(request_id.clone()), None, None);
             AnthropicErrorReply(e, is_stream)
