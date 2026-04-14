@@ -162,9 +162,10 @@ impl FlowControlSlot {
 
     /// Greedily dispatch waiting requests to fill available capacity.
     ///
-    /// Strict FIFO within each queue: only dispatch the FIRST waiting request.
-    /// If the head doesn't fit (context limit), stop — don't scan past it.
-    /// This prevents starvation of large-context requests.
+    /// Scans each queue for the first non-dispatched request that fits,
+    /// skipping entries that temporarily don't fit (current load too high).
+    /// Since oversized requests (context > max_context) are rejected at
+    /// enqueue time, every queued request WILL eventually fit when load drops.
     /// VIP queue always tried first.
     fn dispatch(inner: &mut SlotInner) {
         loop {
@@ -173,36 +174,19 @@ impl FlowControlSlot {
                 break;
             }
 
-            // Clean up cancelled entries at queue heads, then try to dispatch.
-            Self::drain_cancelled(&mut inner.vip_queue);
-            if Self::try_dispatch_head(inner, used_ctx, true) {
+            if Self::try_dispatch_fitting(inner, used_ctx, true) {
                 continue;
             }
-            Self::drain_cancelled(&mut inner.normal_queue);
-            if Self::try_dispatch_head(inner, used_ctx, false) {
+            if Self::try_dispatch_fitting(inner, used_ctx, false) {
                 continue;
             }
             break;
         }
     }
 
-    /// Remove cancelled requests (grant sender already dropped) from queue head.
-    fn drain_cancelled(queue: &mut VecDeque<QueuedRequest>) {
-        while let Some(front) = queue.front() {
-            if front.dispatched {
-                break;
-            }
-            if front.grant.is_none() {
-                queue.pop_front();
-                continue;
-            }
-            break;
-        }
-    }
-
-    /// Try to dispatch the first waiting request in the queue (strict FIFO).
-    /// Returns true if dispatched, false if queue empty or head can't fit.
-    fn try_dispatch_head(
+    /// Scan a queue and dispatch the first waiting request that fits.
+    /// Also cleans up cancelled requests (grant sender already dropped).
+    fn try_dispatch_fitting(
         inner: &mut SlotInner,
         used_ctx: u64,
         vip: bool,
@@ -213,25 +197,40 @@ impl FlowControlSlot {
             &mut inner.normal_queue
         };
 
-        // Find the first non-dispatched entry (should be near the front).
-        let idx = match queue.iter().position(|r| !r.dispatched) {
-            Some(i) => i,
-            None => return false,
-        };
+        let mut idx = 0;
+        while idx < queue.len() {
+            let req = &queue[idx];
 
-        // Context check — strict FIFO: if head doesn't fit, don't skip.
-        if inner.max_context > 0 && used_ctx + queue[idx].context_chars > inner.max_context {
-            return false;
+            if req.dispatched {
+                idx += 1;
+                continue;
+            }
+
+            // Check if grant sender is still alive (client connected).
+            if req.grant.is_none() {
+                queue.remove(idx);
+                continue;
+            }
+
+            // Context check: skip if current load + this request exceeds budget.
+            // Safe to skip because enqueue-time check guarantees context <= max_context,
+            // so this request WILL fit when load drops.
+            if inner.max_context > 0 && used_ctx + req.context_chars > inner.max_context {
+                idx += 1;
+                continue;
+            }
+
+            // Dispatch: mark in-flight and notify waiter.
+            queue[idx].dispatched = true;
+            let sender = queue[idx].grant.take().unwrap();
+            if sender.send(()).is_err() {
+                queue.remove(idx);
+                continue;
+            }
+            return true;
         }
 
-        // Dispatch: mark in-flight and notify waiter.
-        queue[idx].dispatched = true;
-        let sender = queue[idx].grant.take().unwrap();
-        if sender.send(()).is_err() {
-            queue.remove(idx);
-            return false;
-        }
-        true
+        false
     }
 }
 
