@@ -41,10 +41,6 @@ pub enum AdminCommand {
     },
     /// Fire-and-forget: config changed, dump snapshot.
     ConfigChanged,
-    /// Hot-reload config.yaml. Reply contains summary message.
-    ReloadConfig {
-        reply: oneshot::Sender<Result<String, String>>,
-    },
 }
 
 pub type AdminTx = mpsc::Sender<AdminCommand>;

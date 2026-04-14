@@ -1027,21 +1027,6 @@
     if (btnAlias) btnAlias.addEventListener("click", showNewAliasModal);
     const btnConfig = document.getElementById("btn-new-config");
     if (btnConfig) btnConfig.addEventListener("click", showNewConfigModal);
-    const btnReload = document.getElementById("btn-reload-config");
-    if (btnReload) btnReload.addEventListener("click", async () => {
-      if (!confirm("Hot-reload config.yaml without restart?")) return;
-      btnReload.disabled = true;
-      btnReload.textContent = "Reloading...";
-      try {
-        const data = await api("/admin/config/reload", { method: "POST" });
-        alert(data.message || "Config reloaded successfully");
-        onRoute();
-      } catch (err) { alert("Reload error: " + err.message); }
-      finally {
-        btnReload.disabled = false;
-        btnReload.textContent = "Reload Config";
-      }
-    });
     const btnDebug = document.getElementById("btn-debug-toggle");
     if (btnDebug) btnDebug.addEventListener("click", toggleDebug);
     loadDebugStatus();

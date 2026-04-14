@@ -33,18 +33,6 @@ pub async fn admin_command_handler(mut rx: tokio::sync::mpsc::Receiver<AdminComm
             AdminCommand::ConfigChanged => {
                 state.dump_config_snapshot().await;
             }
-            AdminCommand::ReloadConfig { reply } => {
-                match state.reload().await {
-                    Ok(summary) => {
-                        tracing::info!("Config hot-reloaded via dashboard: {}", summary);
-                        let _ = reply.send(Ok(summary));
-                    }
-                    Err(e) => {
-                        tracing::error!("Config hot-reload failed: {}", e);
-                        let _ = reply.send(Err(format!("Reload failed: {}", e)));
-                    }
-                }
-            }
         }
     }
     tracing::warn!("Admin command handler stopped (channel closed)");

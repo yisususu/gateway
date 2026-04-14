@@ -246,10 +246,6 @@ pub struct GeneralSettings {
     /// the authority and DB only persists rate-limit state / key assignments.
     #[serde(default)]
     pub store_model_in_db: bool,
-    /// Models accessible to ALL keys regardless of per-key model whitelist.
-    /// Add new universally-available models here instead of updating every key.
-    #[serde(default)]
-    pub public_models: Vec<String>,
 }
 
 impl Default for GeneralSettings {
@@ -258,7 +254,6 @@ impl Default for GeneralSettings {
             master_key: None,
             database_url: None,
             store_model_in_db: false,
-            public_models: Vec::new(),
         }
     }
 }
