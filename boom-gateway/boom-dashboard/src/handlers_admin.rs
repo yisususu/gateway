@@ -1882,3 +1882,41 @@ pub async fn get_debug_error(
             .into_response(),
     }
 }
+
+// ═══════════════════════════════════════════════════════════
+// Hot-Reload Config
+// ═══════════════════════════════════════════════════════════
+
+pub async fn reload_config(
+    _session: AdminSession,
+    Extension(state): Extension<Arc<DashboardState>>,
+) -> Response {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+
+    if state
+        .admin_tx
+        .send(crate::state::AdminCommand::ReloadConfig { reply: reply_tx })
+        .await
+        .is_err()
+    {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "Admin command handler unavailable",
+        )
+            .into_response();
+    }
+
+    match reply_rx.await {
+        Ok(Ok(msg)) => Json(json!({"ok": true, "message": msg})).into_response(),
+        Ok(Err(msg)) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            msg,
+        )
+            .into_response(),
+        Err(_) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "Admin command handler dropped reply",
+        )
+            .into_response(),
+    }
+}

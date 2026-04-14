@@ -155,6 +155,11 @@ pub fn build_router<S: Clone + Send + Sync + 'static>(state: DashboardState) -> 
             "/dashboard/api/admin/debug/errors/{request_id}",
             get(handlers_admin::get_debug_error),
         )
+        // Admin — Hot-reload config.
+        .route(
+            "/dashboard/api/admin/config/reload",
+            post(handlers_admin::reload_config),
+        )
         // SPA fallback — must be last.
         .route("/dashboard/{*path}", get(handlers_static::spa_fallback))
         // Inject state via Extension layer.
