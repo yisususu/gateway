@@ -829,6 +829,14 @@ impl Provider for AnthropicProvider {
                                     }
                                 }
                                 "message_start" => {
+                                    // Extract input_tokens from message_start event.
+                                    let input_tokens = data
+                                        .get("message")
+                                        .and_then(|m| m.get("usage"))
+                                        .and_then(|u| u.get("input_tokens"))
+                                        .and_then(|t| t.as_u64())
+                                        .map(|t| t as i32);
+
                                     // Emit a role chunk so OpenAI clients see `role: "assistant"`
                                     // in the first SSE chunk (matching litellm behavior).
                                     let role_chunk = ChatStreamChunk {
@@ -846,7 +854,11 @@ impl Provider for AnthropicProvider {
                                             },
                                             finish_reason: None,
                                         }],
-                                        usage: None,
+                                        usage: input_tokens.map(|it| StreamUsage {
+                                            prompt_tokens: Some(it),
+                                            completion_tokens: Some(0),
+                                            total_tokens: None,
+                                        }),
                                     };
                                     if tx.send(Ok(Some(role_chunk))).await.is_err() {
                                         return;

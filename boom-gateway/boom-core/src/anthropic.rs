@@ -262,6 +262,9 @@ impl AnthropicStreamTranscoder {
             if let Some(pt) = usage.prompt_tokens {
                 self.input_tokens = self.input_tokens.max(pt as u32);
             }
+            if let Some(ct) = usage.completion_tokens {
+                self.output_tokens = self.output_tokens.max(ct as u32);
+            }
         }
 
         for choice in &chunk.choices {
@@ -281,8 +284,8 @@ impl AnthropicStreamTranscoder {
                             "stop_reason": null,
                             "stop_sequence": null,
                             "usage": {
-                                "input_tokens": 0,
-                                "output_tokens": 0,
+                                "input_tokens": self.input_tokens,
+                                "output_tokens": self.output_tokens,
                                 "cache_creation_input_tokens": self.cache_creation_input_tokens,
                                 "cache_read_input_tokens": self.cache_read_input_tokens,
                             }
