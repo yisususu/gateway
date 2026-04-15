@@ -447,10 +447,11 @@ pub async fn list_models(
     auth: RequiredAuth,
 ) -> Result<Json<serde_json::Value>, GatewayErrorReply> {
     let identity = auth.identity();
-    let _inner = state.inner.load();
+    let inner = state.inner.load();
 
     // Collect all visible model names (deployments + non-hidden aliases, excluding "*").
     let all_names = state.router.visible_model_names();
+    let public_models = &inner.config.general_settings.public_models;
 
     let visible: Vec<ModelInfo> = if identity.models.is_empty() {
         // Unrestricted key — show all visible models.
@@ -464,33 +465,10 @@ pub async fn list_models(
             })
             .collect()
     } else {
-        // Restricted key — only show models the key has access to.
+        // Restricted key — show models the key has access to + public_models.
         all_names
             .iter()
-            .filter(|name| {
-                // Direct match in key's allowed list.
-                if identity.models.iter().any(|m| m == *name && m != "*") {
-                    return true;
-                }
-                // If name is an alias, check if key has access to target model.
-                if let Some(target) = state.router.resolve_model(name) {
-                    if identity.models.iter().any(|m| m == &target && m != "*") {
-                        return true;
-                    }
-                }
-                // If name is a deployment (target), check if key has an alias that maps to it.
-                for allowed in &identity.models {
-                    if allowed == "*" {
-                        continue;
-                    }
-                    if let Some(target) = state.router.resolve_model(allowed) {
-                        if target == **name {
-                            return true;
-                        }
-                    }
-                }
-                false
-            })
+            .filter(|name| is_model_visible(name, &identity.models, &state.router, public_models))
             .map(|name| ModelInfo {
                 id: name.clone(),
                 object: "model".to_string(),
@@ -516,26 +494,19 @@ pub async fn get_model(
     Path(model_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, GatewayErrorReply> {
     let identity = auth.identity();
+    let inner = state.inner.load();
 
     // Collect all visible model names (same logic as list_models).
     let all_names = state.router.visible_model_names();
+    let public_models = &inner.config.general_settings.public_models;
 
     let is_accessible = if identity.models.is_empty() {
         true // Unrestricted key — check existence only.
     } else {
-        // Restricted key — check if model_id is in the accessible set.
-        let accessible: Vec<&String> = all_names.iter().filter(|name| {
-            identity.models.iter().any(|m| *m == **name && m != "*")
-                || state.router.resolve_model(name)
-                    .map(|target| identity.models.iter().any(|m| *m == target && m != "*"))
-                    .unwrap_or(false)
-                || identity.models.iter().any(|allowed| {
-                    state.router.resolve_model(allowed)
-                        .map(|target| target == **name)
-                        .unwrap_or(false)
-                })
-        }).collect();
-        accessible.iter().any(|name| ***name == model_id)
+        // Restricted key — check if model_id is in the accessible set (including public_models).
+        all_names.iter()
+            .filter(|name| is_model_visible(name, &identity.models, &state.router, public_models))
+            .any(|name| name == &model_id)
     };
 
     if !is_accessible || !all_names.iter().any(|n| n == &model_id) {
@@ -850,6 +821,48 @@ impl From<GatewayError> for GatewayErrorReply {
     fn from(e: GatewayError) -> Self {
         GatewayErrorReply(e, false)
     }
+}
+
+// ============================================================
+// Model Visibility Helper (shared by list_models + get_model)
+// ============================================================
+
+/// Check if a model name should be visible to a restricted key.
+/// Considers: key whitelist, aliases, and public_models.
+fn is_model_visible(
+    name: &str,
+    key_models: &[String],
+    router: &Router,
+    public_models: &[String],
+) -> bool {
+    // Public model — always visible.
+    if public_models.iter().any(|m| m == name)
+        || router.resolve_model(name).map_or(false, |target| public_models.iter().any(|m| m == &target))
+    {
+        return true;
+    }
+    // Direct match in key's allowed list.
+    if key_models.iter().any(|m| m == name && m != "*") {
+        return true;
+    }
+    // If name is an alias, check if key has access to target model.
+    if let Some(target) = router.resolve_model(name) {
+        if key_models.iter().any(|m| m == &target && m != "*") {
+            return true;
+        }
+    }
+    // If name is a deployment (target), check if key has an alias that maps to it.
+    for allowed in key_models {
+        if allowed == "*" {
+            continue;
+        }
+        if let Some(target) = router.resolve_model(allowed) {
+            if target == name {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // ============================================================
