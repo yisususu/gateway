@@ -333,37 +333,53 @@ async fn sync_yaml_to_db(pool: &PgPool, config: &Config, plan_store: &Arc<PlanSt
     // ── Deployments (delegated to DeploymentStore) ──
     let yaml_model_names: Vec<String> = config.model_list.iter()
         .map(|e| e.model_name.clone()).collect();
-    let yaml_deployments: Vec<boom_routing::YamlDeploymentData> = config.model_list.iter()
-        .map(|entry| {
-            let p = &entry.litellm_params;
-            boom_routing::YamlDeploymentData {
-                model_name: entry.model_name.clone(),
-                litellm_model: p.model.clone(),
-                api_key: p.api_key.clone(),
-                api_base: p.api_base.clone(),
-                api_version: p.api_version.clone(),
-                aws_region_name: p.aws_region_name.clone(),
-                aws_access_key_id: p.aws_access_key_id.clone(),
-                aws_secret_access_key: p.aws_secret_access_key.clone(),
-                rpm: p.rpm.map(|v| v as i64),
-                tpm: p.tpm.map(|v| v as i64),
-                timeout: p.timeout as i64,
-                headers: serde_json::to_value(&p.headers).unwrap_or(serde_json::json!({})),
-                temperature: p.temperature,
-                max_tokens: p.max_tokens.map(|v| v as i32),
-                deployment_id: entry.model_info.as_ref().and_then(|mi| mi.id.clone()),
-                quota_count_ratio: entry.model_info.as_ref()
-                    .and_then(|mi| mi.quota_count_ratio)
-                    .map(|v| v as i64)
-                    .unwrap_or(1),
-                max_inflight_queue_len: entry.flow_control.as_ref()
-                    .and_then(|fc| fc.model_queue_limit).map(|v| v as i32),
-                max_context_len: entry.flow_control.as_ref()
-                    .and_then(|fc| fc.model_context_limit).map(|v| v as i64),
-            }
-        })
-        .collect();
-    DeploymentStore::sync_yaml_to_db(pool, &yaml_model_names, &yaml_deployments).await?;
+    let mut yaml_deployments: Vec<boom_routing::YamlDeploymentData> = Vec::new();
+    for entry in &config.model_list {
+        let p = &entry.litellm_params;
+        let d = boom_routing::YamlDeploymentData {
+            model_name: entry.model_name.clone(),
+            litellm_model: p.model.clone(),
+            api_key: p.api_key.clone(),
+            api_base: p.api_base.clone(),
+            api_version: p.api_version.clone(),
+            aws_region_name: p.aws_region_name.clone(),
+            aws_access_key_id: p.aws_access_key_id.clone(),
+            aws_secret_access_key: p.aws_secret_access_key.clone(),
+            rpm: p.rpm.map(|v| v as i64),
+            tpm: p.tpm.map(|v| v as i64),
+            timeout: p.timeout as i64,
+            headers: serde_json::to_value(&p.headers).unwrap_or(serde_json::json!({})),
+            temperature: p.temperature,
+            max_tokens: p.max_tokens.map(|v| v as i32),
+            deployment_id: entry.model_info.as_ref().and_then(|mi| mi.id.clone()),
+            quota_count_ratio: entry.model_info.as_ref()
+                .and_then(|mi| mi.quota_count_ratio)
+                .map(|v| v as i64)
+                .unwrap_or(1),
+            max_inflight_queue_len: entry.flow_control.as_ref()
+                .and_then(|fc| fc.model_queue_limit).map(|v| v as i32),
+            max_context_len: entry.flow_control.as_ref()
+                .and_then(|fc| fc.model_context_limit).map(|v| v as i64),
+            enabled: entry.enabled,
+        };
+        yaml_deployments.push(d);
+
+        // serve_not_match: also write a wildcard "*" record to DB.
+        if entry.serve_not_match && !yaml_model_names.contains(&"*".to_string()) {
+            let mut wildcard = yaml_deployments.last().unwrap().clone();
+            wildcard.model_name = "*".to_string();
+            yaml_deployments.push(wildcard);
+        }
+    }
+    // Add "*" to yaml_model_names if any entry uses serve_not_match,
+    // so sync_yaml_to_db cleans up conflicting source='db' rows.
+    let mut all_model_names = yaml_model_names;
+    if config.model_list.iter().any(|e| e.serve_not_match) {
+        if !all_model_names.contains(&"*".to_string()) {
+            all_model_names.push("*".to_string());
+        }
+    }
+    DeploymentStore::sync_yaml_to_db(pool, &all_model_names, &yaml_deployments).await?;
 
     // ── Aliases (delegated to AliasStore) ──
     let yaml_aliases: Vec<(String, String, bool)> = config.router_settings.model_group_alias.iter()
@@ -507,6 +523,12 @@ fn build_deployments_from_config(config: &Config, deployment_store: &Arc<Deploym
             .and_then(|mi| mi.quota_count_ratio)
             .unwrap_or(1);
 
+        // Skip provider creation for disabled deployments.
+        if !entry.enabled {
+            tracing::info!(model = %entry.model_name, "Deployment disabled in YAML config, skipping routing");
+            continue;
+        }
+
         match boom_provider::create_provider(
             &p.model,
             p.api_key.clone(),
@@ -516,7 +538,14 @@ fn build_deployments_from_config(config: &Config, deployment_store: &Arc<Deploym
             deployment_id,
         ) {
             Ok(provider) => {
+                // Also register as wildcard catch-all if flagged.
+                if entry.serve_not_match {
+                    deployment_store.add_deployment("*", provider.clone());
+                    tracing::info!(model = %entry.model_name, "Registered as wildcard catch-all");
+                }
+
                 deployment_store.add_deployment(&entry.model_name, provider);
+
                 if ratio != 1 {
                     tracing::info!(
                         model = %entry.model_name,

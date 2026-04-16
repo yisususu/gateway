@@ -88,6 +88,7 @@ pub struct DeploymentInput {
 }
 
 /// YAML deployment data for sync (no provider needed).
+#[derive(Clone)]
 pub struct YamlDeploymentData {
     pub model_name: String,
     pub litellm_model: String,
@@ -107,6 +108,7 @@ pub struct YamlDeploymentData {
     pub quota_count_ratio: i64,
     pub max_inflight_queue_len: Option<i32>,
     pub max_context_len: Option<i64>,
+    pub enabled: bool,
 }
 
 impl DeploymentStore {
@@ -263,8 +265,8 @@ impl DeploymentStore {
                     aws_region_name, aws_access_key_id, aws_secret_access_key,
                     rpm, tpm, timeout, headers, temperature, max_tokens, enabled, source, deployment_id,
                     quota_count_ratio, max_inflight_queue_len, max_context_len)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, true, 'yaml', $16,
-                   $17, $18, $19)"#,
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'yaml', $17,
+                   $18, $19, $20)"#,
             )
             .bind(&d.model_name)
             .bind(&d.litellm_model)
@@ -281,6 +283,7 @@ impl DeploymentStore {
             .bind(&d.headers)
             .bind(d.temperature)
             .bind(d.max_tokens.map(|v| v as i32))
+            .bind(d.enabled)
             .bind(&d.deployment_id)
             .bind(d.quota_count_ratio)
             .bind(d.max_inflight_queue_len)

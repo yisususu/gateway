@@ -123,6 +123,14 @@ pub struct ModelEntry {
     /// Per-deployment flow control (queue + context limits).
     #[serde(default)]
     pub flow_control: Option<FlowControlEntry>,
+    /// When true, this deployment also serves as a catch-all for unmatched model names.
+    /// The same deployment is registered under both its real name and "*".
+    #[serde(default)]
+    pub serve_not_match: bool,
+    /// When false, the deployment is written to DB (visible in dashboard) but
+    /// excluded from the in-memory routing table. Default: true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 /// Provider params — compatible with litellm's `litellm_params` format.
