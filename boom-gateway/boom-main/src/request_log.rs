@@ -96,15 +96,19 @@ pub fn log_error(
     if !error.should_log_to_db() {
         let dedup_key = format!("{}:{}:{}", error.error_type(), identity.key_hash, model);
         if REJECTION_DEDUP.get(&dedup_key).is_some() {
-            tracing::warn!(
-                status_code = error.status_code(),
-                error_type = error.error_type(),
-                "Request rejected (log deduplicated)"
-            );
+            // Deduplicated — skip both DB log and console output.
             return;
         }
         REJECTION_DEDUP.insert(dedup_key, ());
-        // First rejection in this window — fall through to write DB log
+        // First rejection in this window — log to console and DB.
+        tracing::warn!(
+            status_code = error.status_code(),
+            error_type = error.error_type(),
+            key = identity.key_alias.as_deref().or(identity.key_name.as_deref()).unwrap_or("-"),
+            model = model,
+            "{:.80}",
+            error.to_string()
+        );
     }
 
     log_request(
