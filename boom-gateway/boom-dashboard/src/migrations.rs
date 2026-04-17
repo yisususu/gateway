@@ -127,10 +127,15 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
     .await?;
     tracing::info!("Migration 8/8: done");
 
+    // 6. Verification token table (boom-auth).
+    tracing::info!("Migration 9/9: boom_verification_token...");
+    run_ddl_on_conn(&mut conn, verification_token_ddl()).await?;
+    tracing::info!("Migration 9/9: done");
+
     // Connection returns to pool on drop.
     drop(conn);
 
-    tracing::info!("BooMGateway persistence tables ensured (8 tables)");
+    tracing::info!("BooMGateway persistence tables ensured (9 tables)");
     Ok(())
 }
 
@@ -146,4 +151,40 @@ async fn run_ddl_on_conn(
         }
     }
     Ok(())
+}
+
+/// DDL for `boom_verification_token` (boom-auth table).
+/// Defined here because boom-dashboard cannot depend on boom-auth per architecture rules.
+fn verification_token_ddl() -> &'static str {
+    r#"
+CREATE TABLE IF NOT EXISTS "boom_verification_token" (
+    token TEXT PRIMARY KEY,
+    key_name TEXT,
+    key_alias TEXT,
+    user_id TEXT,
+    team_id TEXT,
+    models TEXT[] DEFAULT '{}',
+    aliases JSONB,
+    config JSONB,
+    spend DOUBLE PRECISION DEFAULT 0.0,
+    expires TIMESTAMP,
+    blocked BOOLEAN DEFAULT false,
+    max_parallel_requests INTEGER,
+    tpm_limit BIGINT,
+    rpm_limit BIGINT,
+    max_budget DOUBLE PRECISION,
+    budget_duration TEXT,
+    budget_reset_at TIMESTAMP,
+    allowed_cache_controls TEXT[] DEFAULT '{}',
+    allowed_routes TEXT[] DEFAULT '{}',
+    metadata JSONB DEFAULT '{}',
+    model_spend JSONB,
+    model_max_budget JSONB,
+    budget_id TEXT,
+    organization_id TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    created_by TEXT,
+    updated_at TIMESTAMP DEFAULT NOW()
+)
+"#
 }
