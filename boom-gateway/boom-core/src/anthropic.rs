@@ -263,12 +263,14 @@ impl AnthropicStreamTranscoder {
         let mut events = Vec::new();
 
         // Extract usage data when available.
+        // Use real values directly (overriding char-based estimates) — upstream
+        // usage is authoritative for actual token counts.
         if let Some(ref usage) = chunk.usage {
             if let Some(pt) = usage.prompt_tokens {
-                self.input_tokens = self.input_tokens.max(pt as u32);
+                self.input_tokens = pt as u32;
             }
             if let Some(ct) = usage.completion_tokens {
-                self.output_tokens = self.output_tokens.max(ct as u32);
+                self.output_tokens = ct as u32;
             }
         }
 
