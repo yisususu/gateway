@@ -210,8 +210,10 @@ pub struct AnthropicStreamTranscoder {
     output_tokens: u32,
     cache_creation_input_tokens: Option<u32>,
     cache_read_input_tokens: Option<u32>,
-    /// Held finish events (message_delta + message_stop), waiting for the usage chunk.
-    pending_finish: Option<Vec<AnthropicSseEvent>>,
+    /// Held stop_reason, waiting for the usage chunk to arrive before emitting
+    /// message_delta + message_stop. Events are reconstructed at release time
+    /// so that the latest usage values are always used.
+    pending_stop_reason: Option<String>,
 }
 
 impl AnthropicStreamTranscoder {
@@ -229,7 +231,7 @@ impl AnthropicStreamTranscoder {
             output_tokens: 0,
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
-            pending_finish: None,
+            pending_stop_reason: None,
         }
     }
 
@@ -270,11 +272,12 @@ impl AnthropicStreamTranscoder {
             }
         }
 
-        // If we have a held finish, check if this chunk provides usage data.
-        // For vLLM: the usage chunk (empty choices) arrives right after the finish chunk.
-        if let Some(held) = self.pending_finish.take() {
-            // Emit held events. If this chunk had usage, it was already extracted above.
-            events.extend(held);
+        // If we have a held stop_reason, the previous chunk had finish_reason.
+        // The current chunk likely carries the usage data (vLLM pattern) or is
+        // just the next chunk. Either way, emit message_delta + message_stop now
+        // with the LATEST usage values (extracted above).
+        if let Some(stop_reason) = self.pending_stop_reason.take() {
+            self.emit_finish_events(&mut events, &stop_reason);
             return events;
         }
 
@@ -484,30 +487,11 @@ impl AnthropicStreamTranscoder {
 
                 let stop_reason = finish_reason_to_stop_reason(&choice.finish_reason);
 
-                // Hold message_delta + message_stop to wait for the usage chunk.
+                // Hold the stop_reason — don't emit message_delta yet.
                 // vLLM sends usage in a separate chunk right after finish_reason.
-                // If the next chunk has usage data, it's already extracted above.
-                self.pending_finish = Some(vec![
-                    AnthropicSseEvent {
-                        event: "message_delta".to_string(),
-                        data: serde_json::json!({
-                            "type": "message_delta",
-                            "delta": {
-                                "stop_reason": stop_reason,
-                                "stop_sequence": null
-                            },
-                            "usage": {
-                                "input_tokens": self.input_tokens,
-                                "output_tokens": self.output_tokens.max(1)
-                            }
-                        })
-                        .to_string(),
-                    },
-                    AnthropicSseEvent {
-                        event: "message_stop".to_string(),
-                        data: "{\"type\":\"message_stop\"}".to_string(),
-                    },
-                ]);
+                // When the next chunk arrives, transcode() will extract its usage
+                // and then emit message_delta + message_stop with correct values.
+                self.pending_stop_reason = stop_reason;
             }
         }
 
@@ -517,7 +501,34 @@ impl AnthropicStreamTranscoder {
     /// Flush any held finish events (call after stream ends).
     /// If the usage chunk never arrived, emit with whatever we have.
     pub fn drain(&mut self) -> Vec<AnthropicSseEvent> {
-        self.pending_finish.take().unwrap_or_default()
+        let mut events = Vec::new();
+        if let Some(stop_reason) = self.pending_stop_reason.take() {
+            self.emit_finish_events(&mut events, &stop_reason);
+        }
+        events
+    }
+
+    /// Build and emit message_delta + message_stop with current usage values.
+    fn emit_finish_events(&self, events: &mut Vec<AnthropicSseEvent>, stop_reason: &str) {
+        events.push(AnthropicSseEvent {
+            event: "message_delta".to_string(),
+            data: serde_json::json!({
+                "type": "message_delta",
+                "delta": {
+                    "stop_reason": stop_reason,
+                    "stop_sequence": null
+                },
+                "usage": {
+                    "input_tokens": self.input_tokens,
+                    "output_tokens": self.output_tokens.max(1)
+                }
+            })
+            .to_string(),
+        });
+        events.push(AnthropicSseEvent {
+            event: "message_stop".to_string(),
+            data: "{\"type\":\"message_stop\"}".to_string(),
+        });
     }
 }
 
