@@ -210,6 +210,8 @@ pub struct AnthropicStreamTranscoder {
     output_tokens: u32,
     cache_creation_input_tokens: Option<u32>,
     cache_read_input_tokens: Option<u32>,
+    /// Held finish events (message_delta + message_stop), waiting for the usage chunk.
+    pending_finish: Option<Vec<AnthropicSseEvent>>,
 }
 
 impl AnthropicStreamTranscoder {
@@ -227,6 +229,7 @@ impl AnthropicStreamTranscoder {
             output_tokens: 0,
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
+            pending_finish: None,
         }
     }
 
@@ -257,7 +260,7 @@ impl AnthropicStreamTranscoder {
     pub fn transcode(&mut self, chunk: &ChatStreamChunk) -> Vec<AnthropicSseEvent> {
         let mut events = Vec::new();
 
-        // Extract input_tokens from usage when available.
+        // Extract usage data when available.
         if let Some(ref usage) = chunk.usage {
             if let Some(pt) = usage.prompt_tokens {
                 self.input_tokens = self.input_tokens.max(pt as u32);
@@ -265,6 +268,14 @@ impl AnthropicStreamTranscoder {
             if let Some(ct) = usage.completion_tokens {
                 self.output_tokens = self.output_tokens.max(ct as u32);
             }
+        }
+
+        // If we have a held finish, check if this chunk provides usage data.
+        // For vLLM: the usage chunk (empty choices) arrives right after the finish chunk.
+        if let Some(held) = self.pending_finish.take() {
+            // Emit held events. If this chunk had usage, it was already extracted above.
+            events.extend(held);
+            return events;
         }
 
         for choice in &chunk.choices {
@@ -472,28 +483,41 @@ impl AnthropicStreamTranscoder {
                 self.tool_block_map.clear();
 
                 let stop_reason = finish_reason_to_stop_reason(&choice.finish_reason);
-                events.push(AnthropicSseEvent {
-                    event: "message_delta".to_string(),
-                    data: serde_json::json!({
-                        "type": "message_delta",
-                        "delta": {
-                            "stop_reason": stop_reason,
-                            "stop_sequence": null
-                        },
-                        "usage": {
-                            "output_tokens": self.output_tokens.max(1)
-                        }
-                    })
-                    .to_string(),
-                });
-                events.push(AnthropicSseEvent {
-                    event: "message_stop".to_string(),
-                    data: "{\"type\":\"message_stop\"}".to_string(),
-                });
+
+                // Hold message_delta + message_stop to wait for the usage chunk.
+                // vLLM sends usage in a separate chunk right after finish_reason.
+                // If the next chunk has usage data, it's already extracted above.
+                self.pending_finish = Some(vec![
+                    AnthropicSseEvent {
+                        event: "message_delta".to_string(),
+                        data: serde_json::json!({
+                            "type": "message_delta",
+                            "delta": {
+                                "stop_reason": stop_reason,
+                                "stop_sequence": null
+                            },
+                            "usage": {
+                                "input_tokens": self.input_tokens,
+                                "output_tokens": self.output_tokens.max(1)
+                            }
+                        })
+                        .to_string(),
+                    },
+                    AnthropicSseEvent {
+                        event: "message_stop".to_string(),
+                        data: "{\"type\":\"message_stop\"}".to_string(),
+                    },
+                ]);
             }
         }
 
         events
+    }
+
+    /// Flush any held finish events (call after stream ends).
+    /// If the usage chunk never arrived, emit with whatever we have.
+    pub fn drain(&mut self) -> Vec<AnthropicSseEvent> {
+        self.pending_finish.take().unwrap_or_default()
     }
 }
 

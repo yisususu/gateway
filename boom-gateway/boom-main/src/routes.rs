@@ -1546,6 +1546,14 @@ fn sse_stream_from_anthropic_chat_stream(
                 }
             }
         }
+
+        // Flush any held finish events (e.g. if usage chunk never arrived).
+        for ev in transcoder.drain() {
+            let axum_event = Event::default().event(&ev.event).data(ev.data);
+            if tx.send(axum_event).await.is_err() {
+                return;
+            }
+        }
     });
 
     tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok)
