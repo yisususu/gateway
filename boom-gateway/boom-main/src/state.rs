@@ -81,14 +81,7 @@ impl AppState {
         let db_pool = match &config.general_settings.database_url {
             Some(url) => {
                 tracing::info!("Connecting to database...");
-                let pool = sqlx::postgres::PgPoolOptions::new()
-                    .max_connections(30)
-                    .acquire_timeout(std::time::Duration::from_secs(10))
-                    .idle_timeout(std::time::Duration::from_secs(600))
-                    .max_lifetime(std::time::Duration::from_secs(1800))
-                    .connect(url)
-                    .await?;
-                tracing::info!("Database connected");
+                let pool = connect_pg_with_auto_create(url).await?;
                 Some(pool)
             }
             None => {
@@ -194,13 +187,7 @@ impl AppState {
             tracing::info!("Database URL changed, reconnecting...");
             match &new_config.general_settings.database_url {
                 Some(url) => Some(
-                    sqlx::postgres::PgPoolOptions::new()
-                        .max_connections(30)
-                        .acquire_timeout(std::time::Duration::from_secs(10))
-                        .idle_timeout(std::time::Duration::from_secs(600))
-                        .max_lifetime(std::time::Duration::from_secs(1800))
-                        .connect(url)
-                        .await?,
+                    connect_pg_with_auto_create(url).await?,
                 ),
                 None => None,
             }
@@ -918,4 +905,89 @@ async fn build_config_snapshot_value(pool: &PgPool) -> Result<serde_json::Value,
         },
         "plan_settings": plan_settings,
     }))
+}
+
+/// Connect to PostgreSQL, auto-creating the database if it doesn't exist.
+/// 1. Parse the URL to extract the database name.
+/// 2. Connect to the "postgres" maintenance database.
+/// 3. CREATE DATABASE IF NOT EXISTS (via pg_database check).
+/// 4. Connect to the target database.
+async fn connect_pg_with_auto_create(url: &str) -> Result<PgPool, anyhow::Error> {
+    let pool_options = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(30)
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .idle_timeout(std::time::Duration::from_secs(600))
+        .max_lifetime(std::time::Duration::from_secs(1800));
+
+    // Try direct connection first (common case: DB already exists).
+    match pool_options.clone().connect(url).await {
+        Ok(pool) => return Ok(pool),
+        Err(e) => {
+            // Only attempt auto-create on "database does not exist" errors.
+            let err_msg = e.to_string();
+            if !err_msg.contains("does not exist") && !err_msg.contains("3D000") {
+                return Err(e.into());
+            }
+            tracing::info!("Database does not exist, attempting auto-create...");
+            let db_name = extract_db_name(url).ok_or_else(|| {
+                anyhow::anyhow!("Cannot parse database name from URL")
+            })?;
+            let postgres_url = replace_db_name(url, "postgres").ok_or_else(|| {
+                anyhow::anyhow!("Cannot build postgres maintenance URL")
+            })?;
+
+            // Connect to maintenance database and create the target DB.
+            let maint_pool = sqlx::postgres::PgPoolOptions::new()
+                .acquire_timeout(std::time::Duration::from_secs(5))
+                .connect(&postgres_url)
+                .await?;
+
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)",
+            )
+            .bind(&db_name)
+            .fetch_one(&maint_pool)
+            .await
+            .unwrap_or(false);
+
+            if !exists {
+                // Identifier must be sanitized (no SQL injection via db name).
+                let safe_name = db_name
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_');
+                if !safe_name {
+                    anyhow::bail!("Invalid database name: {}", db_name);
+                }
+                sqlx::query(&format!("CREATE DATABASE {}", db_name))
+                    .execute(&maint_pool)
+                    .await?;
+                tracing::info!("Database '{}' created", db_name);
+            }
+            maint_pool.close().await;
+
+            // Now connect to the newly created database.
+            let pool = pool_options.connect(url).await?;
+            tracing::info!("Connected to database '{}'", db_name);
+            Ok(pool)
+        }
+    }
+}
+
+/// Extract the database name from a PostgreSQL URL.
+fn extract_db_name(url: &str) -> Option<String> {
+    let path = url.split('?').next()?.rsplitn(2, '/').next()?;
+    if path.is_empty() { None } else { Some(path.to_string()) }
+}
+
+/// Replace the database name in a PostgreSQL URL.
+fn replace_db_name(url: &str, new_db: &str) -> Option<String> {
+    let (before_path, rest) = url.split_once("://")?;
+    let after_host = rest.find('/')?;
+    let query_start = rest[after_host..].find('?').map(|i| after_host + i);
+    let base = &rest[..after_host + 1]; // includes trailing '/'
+    let result = match query_start {
+        Some(qi) => format!("{}://{}{}{}", before_path, base, new_db, &rest[qi..]),
+        None => format!("{}://{}{}", before_path, base, new_db),
+    };
+    Some(result)
 }
