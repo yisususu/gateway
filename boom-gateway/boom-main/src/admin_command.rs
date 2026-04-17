@@ -201,11 +201,10 @@ pub async fn reload_model_deployments(
         }
     }
 
-    if providers.is_empty() {
-        deployment_store.remove_deployments(model_name);
-    } else {
-        deployment_store.set_deployments(model_name.to_string(), providers);
-    }
+    // Always set (even empty) so resolve_candidates can distinguish
+    // "configured but all down" from "never configured". An empty provider
+    // list prevents silent fallthrough to the wildcard catch-all.
+    deployment_store.set_deployments(model_name.to_string(), providers);
 }
 
 /// Auto-disable a faulty deployment: mark `enabled = false, auto_disabled = true` in DB,

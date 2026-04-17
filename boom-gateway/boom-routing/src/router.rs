@@ -79,13 +79,22 @@ impl Router {
     }
 
     /// Resolve model name to a list of candidate providers.
-    /// Exact match → alias resolution → wildcard "*".
+    ///
+    /// Priority: exact match → alias resolution → wildcard "*".
+    ///
+    /// Important: if the model IS configured (key exists in deployment_store)
+    /// but all its deployments are down (empty provider list), we return None
+    /// immediately — we do NOT fall through to the wildcard. This ensures that
+    /// a user requesting "gpt-4" never gets silently routed to a different model.
+    /// The wildcard catch-all only applies to completely unknown model names.
     fn resolve_candidates(&self, model: &str) -> Option<Vec<Arc<dyn Provider>>> {
         // Exact match first.
         if let Some(ps) = self.deployment_store.get_providers(model) {
             if !ps.is_empty() {
                 return Some(ps);
             }
+            // Model is configured but all deployments are down — don't fall through.
+            return None;
         }
 
         // Alias resolution.
@@ -94,10 +103,15 @@ impl Router {
                 if !ps.is_empty() {
                     return Some(ps);
                 }
+                // Alias target is configured but all down — don't fall through.
+                return None;
             }
+            // Alias exists but target has no deployment entry — misconfiguration.
+            // Still don't fall through to wildcard.
+            return None;
         }
 
-        // Fallback to catch-all "*".
+        // Fallback to catch-all "*" — only for completely unknown model names.
         self.deployment_store.get_providers("*")
     }
 
