@@ -11,6 +11,7 @@ members = [
     "boom-gateway/boom-flowcontrol",
     "boom-gateway/boom-main",
     "boom-gateway/boom-dashboard",
+    "boom-gateway/boom-promptlog",
 ]
 
 [workspace.package]

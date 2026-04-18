@@ -1,6 +1,7 @@
 use boom_core::DebugErrorStore;
 use boom_flowcontrol::FlowController;
 use boom_limiter::{PlanStore, SlidingWindowLimiter};
+use boom_promptlog::PromptLogWriter;
 use boom_routing::{AliasStore, DeploymentStore, InFlightTracker};
 use dashmap::DashMap;
 use serde_json::Value;
@@ -78,6 +79,8 @@ pub struct DashboardState {
     pub login_attempts: Arc<DashMap<String, LoginAttempt>>,
     /// Debug error store — shared with boom-main for recording upstream errors.
     pub debug_store: Arc<DebugErrorStore>,
+    /// Prompt log writer — shared with boom-main for runtime config control.
+    pub prompt_log_writer: PromptLogWriter,
 }
 
 impl DashboardState {
@@ -92,6 +95,7 @@ impl DashboardState {
         admin_tx: AdminTx,
         master_key: Option<String>,
         debug_store: Arc<DebugErrorStore>,
+        prompt_log_writer: PromptLogWriter,
     ) -> Self {
         // Derive JWT secret from master_key, or use a random fallback.
         let jwt_secret = master_key
@@ -111,6 +115,7 @@ impl DashboardState {
             master_key,
             login_attempts: Arc::new(DashMap::new()),
             debug_store,
+            prompt_log_writer,
         }
     }
 }

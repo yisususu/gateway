@@ -13,6 +13,7 @@ use boom_core::types::*;
 use boom_core::GatewayError;
 use boom_flowcontrol::{FlowControlError, FlowControlledStream};
 use boom_limiter::{ConcurrencyGuard, GuardedStream, PlanStore, RateLimitPlan};
+use boom_promptlog::{PromptLogEntry, PromptLogStream};
 use boom_routing::{InFlightGuard, Router};
 use futures::StreamExt;
 use sqlx::PgPool;
@@ -245,6 +246,25 @@ async fn chat_completions_inner(
         debug_append("REQUEST", &serde_json::to_string(&req).unwrap_or_default());
     }
 
+    // Prompt log: check early to avoid unnecessary cloning.
+    let prompt_log_should = state.prompt_log_writer.should_capture(
+        &identity.key_hash,
+        identity.team_id.as_deref(),
+    );
+    let prompt_log_req_body = if prompt_log_should {
+        serde_json::to_value(&req).ok()
+    } else {
+        None
+    };
+    let prompt_log_sender = if prompt_log_should {
+        Some(state.prompt_log_writer.sender())
+    } else {
+        None
+    };
+    // Clone request_id and model for prompt log (they get moved into RequestLog later).
+    let prompt_log_rid = if prompt_log_should { Some(request_id.clone()) } else { None };
+    let prompt_log_model = if prompt_log_should { Some(model.clone()) } else { None };
+
     // 1. Model access check (deployment-aware, alias-aware).
     check_model_access(identity, &req.model, &state.router, &inner.config.general_settings.public_models)
         .map_err(|e| {
@@ -372,6 +392,22 @@ async fn chat_completions_inner(
             deployment_id,
         }, start, usage);
 
+        // Wrap with prompt log stream if enabled, then wrap in Sse.
+        if let Some(sender) = prompt_log_sender {
+            if let Some(req_body) = prompt_log_req_body {
+                let prompt_entry = PromptLogEntry::new(
+                    prompt_log_rid.as_deref().unwrap_or_default(),
+                    &identity.key_hash,
+                    prompt_log_model.as_deref().unwrap_or_default(),
+                    api_path,
+                    true,
+                    req_body,
+                );
+                let prompt_logged = PromptLogStream::new(logged, sender, prompt_entry);
+                let response = Sse::new(prompt_logged).keep_alive(KeepAlive::default());
+                return Ok(response.into_response());
+            }
+        }
         let response = Sse::new(logged).keep_alive(KeepAlive::default());
         Ok(response.into_response())
     } else {
@@ -421,6 +457,24 @@ async fn chat_completions_inner(
         for choice in &mut resp.choices {
             choice.message.normalize_reasoning_for_openai();
         }
+
+        // Prompt log: capture non-streaming response.
+        if let Some(sender) = prompt_log_sender {
+            if let Some(req_body) = prompt_log_req_body {
+                let mut prompt_entry = PromptLogEntry::new(
+                    prompt_log_rid.as_deref().unwrap_or_default(),
+                    &identity.key_hash,
+                    prompt_log_model.as_deref().unwrap_or_default(),
+                    api_path,
+                    false,
+                    req_body,
+                );
+                prompt_entry.set_response(serde_json::to_value(&resp).unwrap_or(serde_json::Value::Null));
+                prompt_entry.set_status(200, duration_ms as u64);
+                let _ = sender.send(prompt_entry);
+            }
+        }
+
         Ok(Json(resp).into_response())
     }
 }
@@ -1032,7 +1086,7 @@ async fn check_plan_or_default_limits(
 
     match plan {
         Some(plan) => {
-            let (concurrency_limit, rpm_limit, window_limits) = plan.effective_limits();
+            let (concurrency_limit, rpm_limit, window_limits, stale_limits) = plan.effective_limits();
             tracing::debug!(
                 key_hash = %key_hash,
                 plan = %plan.name,
@@ -1057,6 +1111,12 @@ async fn check_plan_or_default_limits(
                 key_hash: key_hash.to_string(),
                 model: "__plan__".to_string(),
             };
+
+            // Clear stale counters from the other schedule period so the user
+            // starts fresh on every schedule switch.
+            if !stale_limits.is_empty() {
+                limiter.clear_windows(&rl_key, &stale_limits);
+            }
 
             let decision = limiter
                 .check_and_record(&rl_key, rpm_limit, &window_limits, weight)
@@ -1314,6 +1374,25 @@ pub async fn messages(
         debug_append("REQUEST (anthropic)", &serde_json::to_string(&req).unwrap_or_default());
     }
 
+    // Prompt log: check early to avoid unnecessary cloning.
+    let prompt_log_should = state.prompt_log_writer.should_capture(
+        &identity.key_hash,
+        identity.team_id.as_deref(),
+    );
+    let prompt_log_req_body = if prompt_log_should {
+        serde_json::to_value(&req).ok()
+    } else {
+        None
+    };
+    let prompt_log_sender = if prompt_log_should {
+        Some(state.prompt_log_writer.sender())
+    } else {
+        None
+    };
+    // Clone request_id and model for prompt log (they get moved into RequestLog later).
+    let prompt_log_rid = if prompt_log_should { Some(request_id.clone()) } else { None };
+    let prompt_log_model = if prompt_log_should { Some(model.clone()) } else { None };
+
     // 1. Model access check (deployment-aware, alias-aware).
     check_model_access(identity, &openai_req.model, &state.router, &inner.config.general_settings.public_models)
         .map_err(|e| {
@@ -1439,6 +1518,22 @@ pub async fn messages(
             deployment_id,
         }, start, usage);
 
+        // Wrap with prompt log stream if enabled, then wrap in Sse.
+        if let Some(sender) = prompt_log_sender {
+            if let Some(req_body) = prompt_log_req_body {
+                let prompt_entry = PromptLogEntry::new(
+                    prompt_log_rid.as_deref().unwrap_or_default(),
+                    &identity.key_hash,
+                    prompt_log_model.as_deref().unwrap_or_default(),
+                    "/v1/messages",
+                    true,
+                    req_body,
+                );
+                let prompt_logged = PromptLogStream::new(logged, sender, prompt_entry);
+                let response = Sse::new(prompt_logged).keep_alive(KeepAlive::default());
+                return Ok(response.into_response());
+            }
+        }
         let response = Sse::new(logged).keep_alive(KeepAlive::default());
         Ok(response.into_response())
     } else {
@@ -1482,6 +1577,24 @@ pub async fn messages(
         );
 
         let anthropic_resp = openai_response_to_anthropic(&response);
+
+        // Prompt log: capture non-streaming Anthropic response.
+        if let Some(sender) = prompt_log_sender {
+            if let Some(req_body) = prompt_log_req_body {
+                let mut prompt_entry = PromptLogEntry::new(
+                    prompt_log_rid.as_deref().unwrap_or_default(),
+                    &identity.key_hash,
+                    prompt_log_model.as_deref().unwrap_or_default(),
+                    "/v1/messages",
+                    false,
+                    req_body,
+                );
+                prompt_entry.set_response(serde_json::to_value(&anthropic_resp).unwrap_or(serde_json::Value::Null));
+                prompt_entry.set_status(200, duration_ms as u64);
+                let _ = sender.send(prompt_entry);
+            }
+        }
+
         Ok(Json(anthropic_resp).into_response())
     }
 }

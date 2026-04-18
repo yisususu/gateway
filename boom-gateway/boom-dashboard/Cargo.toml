@@ -9,6 +9,7 @@ boom-flowcontrol = { path = "../boom-flowcontrol" }
 boom-limiter = { path = "../boom-limiter" }
 boom-routing = { path = "../boom-routing" }
 boom-audit = { path = "../boom-audit" }
+boom-promptlog = { path = "../boom-promptlog" }
 axum = { workspace = true }
 sqlx = { workspace = true }
 serde = { workspace = true }

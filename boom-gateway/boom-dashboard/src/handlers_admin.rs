@@ -1920,3 +1920,85 @@ pub async fn reload_config(
             .into_response(),
     }
 }
+
+// ═══════════════════════════════════════════════════════════
+// Prompt Log Controls
+// ═══════════════════════════════════════════════════════════
+
+pub async fn get_prompt_log_status(
+    _session: AdminSession,
+    Extension(state): Extension<Arc<DashboardState>>,
+) -> Json<Value> {
+    let cfg = state.prompt_log_writer.config();
+    Json(json!({
+        "enabled": cfg.enabled,
+        "excluded_keys": cfg.excluded_keys,
+        "excluded_teams": cfg.excluded_teams,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PromptLogToggleRequest {
+    pub enabled: bool,
+}
+
+pub async fn toggle_prompt_log(
+    _session: AdminSession,
+    Extension(state): Extension<Arc<DashboardState>>,
+    Json(req): Json<PromptLogToggleRequest>,
+) -> Json<Value> {
+    let cfg = state.prompt_log_writer.config();
+    let new_cfg = cfg.with_enabled(req.enabled);
+    state.prompt_log_writer.update_config(new_cfg);
+    tracing::info!(enabled = req.enabled, "Prompt log toggled via dashboard");
+    Json(json!({
+        "ok": true,
+        "enabled": req.enabled,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PromptLogTeamRequest {
+    pub team_id: String,
+    /// true = exclude this team from logging, false = include.
+    pub excluded: bool,
+}
+
+pub async fn toggle_team_prompt_log(
+    _session: AdminSession,
+    Extension(state): Extension<Arc<DashboardState>>,
+    Json(req): Json<PromptLogTeamRequest>,
+) -> Json<Value> {
+    let cfg = state.prompt_log_writer.config();
+    let new_cfg = cfg.with_team_excluded(&req.team_id, req.excluded);
+    state.prompt_log_writer.update_config(new_cfg);
+    tracing::info!(team_id = %req.team_id, excluded = req.excluded, "Prompt log team exclusion toggled");
+    Json(json!({
+        "ok": true,
+        "team_id": req.team_id,
+        "excluded": req.excluded,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PromptLogKeyRequest {
+    pub key_hash: String,
+    /// true = exclude this key from logging, false = include.
+    pub excluded: bool,
+}
+
+pub async fn toggle_key_prompt_log(
+    _session: AdminSession,
+    Extension(state): Extension<Arc<DashboardState>>,
+    Json(req): Json<PromptLogKeyRequest>,
+) -> Json<Value> {
+    let cfg = state.prompt_log_writer.config();
+    let new_cfg = cfg.with_key_excluded(&req.key_hash, req.excluded);
+    state.prompt_log_writer.update_config(new_cfg);
+    tracing::info!(key_hash = %req.key_hash, excluded = req.excluded, "Prompt log key exclusion toggled");
+    Json(json!({
+        "ok": true,
+        "key_hash": req.key_hash,
+        "excluded": req.excluded,
+    }))
+}

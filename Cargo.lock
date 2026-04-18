@@ -295,6 +295,7 @@ dependencies = [
  "boom-core",
  "boom-flowcontrol",
  "boom-limiter",
+ "boom-promptlog",
  "boom-routing",
  "chrono",
  "dashmap",
@@ -352,6 +353,7 @@ dependencies = [
  "boom-dashboard",
  "boom-flowcontrol",
  "boom-limiter",
+ "boom-promptlog",
  "boom-provider",
  "boom-routing",
  "chrono",
@@ -372,6 +374,19 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "boom-promptlog"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "chrono",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

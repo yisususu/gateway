@@ -19,6 +19,9 @@ pub struct Config {
     pub rate_limit: RateLimitSettings,
     #[serde(default)]
     pub plan_settings: PlanSettings,
+    /// Prompt log configuration (transparent pass-through to boom-promptlog).
+    #[serde(default)]
+    pub prompt_log: Option<serde_json::Value>,
 }
 
 /// A single plan definition in YAML config (plan name comes from the HashMap key).

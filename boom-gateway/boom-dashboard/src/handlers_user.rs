@@ -24,7 +24,7 @@ pub async fn get_plan(
 
     match plan {
         Some(p) => {
-            let (concurrency_limit, rpm_limit, window_limits) = p.effective_limits();
+            let (concurrency_limit, rpm_limit, window_limits, _) = p.effective_limits();
             Json(json!({
                 "plan_name": p.name,
                 "concurrency_limit": concurrency_limit,
@@ -56,10 +56,10 @@ pub async fn get_usage(
         .plan_store
         .resolve_plan(key_hash)
         .or_else(|| state.plan_store.get_default_plan());
-    let (plan_concurrency, plan_rpm, plan_window_limits) = plan
+    let (plan_concurrency, plan_rpm, plan_window_limits, _) = plan
         .as_ref()
         .map(|p| p.effective_limits())
-        .unwrap_or((None, None, vec![]));
+        .unwrap_or((None, None, vec![], vec![]));
 
     let windows: Vec<Value> = state
         .limiter

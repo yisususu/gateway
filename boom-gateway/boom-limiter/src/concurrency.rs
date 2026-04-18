@@ -28,9 +28,10 @@ pub struct RateLimitPlan {
 impl RateLimitPlan {
     /// Return the effective limits for the current time.
     ///
-    /// If a schedule slot matches the current local time, its limits are used;
-    /// otherwise, the plan's base limits are returned.
-    pub fn effective_limits(&self) -> (Option<u32>, Option<u64>, Vec<(u64, u64)>) {
+    /// Returns (concurrency, rpm, active_windows, stale_windows).
+    /// `stale_windows` contains counters from the OTHER schedule period that
+    /// should be cleared so the user starts fresh on every schedule switch.
+    pub fn effective_limits(&self) -> (Option<u32>, Option<u64>, Vec<(u64, u64)>, Vec<(u64, u64)>) {
         for slot in &self.schedule {
             if slot.is_active_now() {
                 // Merge: slot fields override plan base, unset fields fall back to base.
@@ -41,13 +42,27 @@ impl RateLimitPlan {
                 } else {
                     slot.window_limits.clone()
                 };
-                return (concurrency, rpm, windows);
+                // Clear base counters whose window_secs doesn't overlap with active.
+                let active_secs: Vec<u64> = windows.iter().map(|&(_, s)| s).collect();
+                let stale: Vec<(u64, u64)> = self.window_limits.iter()
+                    .filter(|(_, s)| !active_secs.contains(s))
+                    .copied()
+                    .collect();
+                return (concurrency, rpm, windows, stale);
             }
         }
+        // No schedule active: clear all schedule slot counters that don't overlap with base.
+        let base_secs: Vec<u64> = self.window_limits.iter().map(|&(_, s)| s).collect();
+        let stale: Vec<(u64, u64)> = self.schedule.iter()
+            .flat_map(|s| s.window_limits.iter())
+            .filter(|(_, s)| !base_secs.contains(s))
+            .copied()
+            .collect();
         (
             self.concurrency_limit,
             self.rpm_limit,
             self.window_limits.clone(),
+            stale,
         )
     }
 }

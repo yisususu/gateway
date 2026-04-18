@@ -248,6 +248,15 @@ impl SlidingWindowLimiter {
         before - self.windows.len()
     }
 
+    /// Clear specific window counters for a rate limit key.
+    /// Used to reset stale counters when schedule switches.
+    pub fn clear_windows(&self, key: &RateLimitKey, window_limits: &[(u64, u64)]) {
+        for &(_, window_secs) in window_limits {
+            let win_key = Self::cache_key(key, window_secs);
+            self.windows.remove(&win_key);
+        }
+    }
+
     /// Clear all window counters for a specific key_hash.
     /// Returns the number of counters removed.
     pub fn clear_for_key(&self, key_hash: &str) -> usize {

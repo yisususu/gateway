@@ -17,6 +17,7 @@ boom-routing = { path = "../boom-routing" }
 boom-audit = { path = "../boom-audit" }
 boom-dashboard = { path = "../boom-dashboard" }
 boom-flowcontrol = { path = "../boom-flowcontrol" }
+boom-promptlog = { path = "../boom-promptlog" }
 axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }

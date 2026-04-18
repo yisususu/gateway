@@ -554,6 +554,11 @@
   async function loadKeys(page) {
     if (page !== undefined) keysPage = page;
     try {
+      // Load prompt log excluded keys list.
+      try {
+        const plData = await api("/admin/prompt-log/status");
+        window._promptLogExcludedKeys = plData.excluded_keys || [];
+      } catch { window._promptLogExcludedKeys = []; }
       let url = `/admin/keys?page=${keysPage}&per_page=50`;
       if (keysSearch) url += `&search=${encodeURIComponent(keysSearch)}`;
       if (keysVipOnly) url += "&vip_only=true";
@@ -949,6 +954,62 @@
   }
 
   async function showDebugError(requestId) {
+
+  // ── Prompt Log toggle (same pattern as Debug toggle) ──
+
+  let promptLogEnabled = false;
+
+  async function loadPromptLogStatus() {
+    const btn = document.getElementById("btn-prompt-log-toggle");
+    if (!btn) return;
+    try {
+      const data = await api("/admin/prompt-log/status");
+      promptLogEnabled = data.enabled;
+      updatePromptLogButton(btn);
+    } catch {}
+  }
+
+  function updatePromptLogButton(btn) {
+    if (!btn) return;
+    btn.textContent = promptLogEnabled ? "Prompt Log: ON" : "Prompt Log: OFF";
+    btn.style.background = promptLogEnabled ? "#2563eb" : "";
+    btn.style.color = promptLogEnabled ? "#fff" : "";
+  }
+
+  async function togglePromptLog() {
+    const btn = document.getElementById("btn-prompt-log-toggle");
+    if (!btn) return;
+    try {
+      const data = await api("/admin/prompt-log/toggle", {
+        method: "POST",
+        body: JSON.stringify({ enabled: !promptLogEnabled }),
+      });
+      promptLogEnabled = data.enabled;
+      updatePromptLogButton(btn);
+    } catch (err) { alert("Error: " + err.message); }
+  }
+
+  // Check if a team is excluded from prompt logging.
+  let promptLogExcludedTeams = [];
+  async function loadPromptLogExcludedTeams() {
+    try {
+      const data = await api("/admin/prompt-log/status");
+      // We don't get the full list from status; load from config if needed.
+      // For now, we'll just track via the team toggle state per-row.
+    } catch {}
+  }
+
+  async function toggleTeamPromptLog(teamId, excluded) {
+    try {
+      await api("/admin/prompt-log/team", {
+        method: "POST",
+        body: JSON.stringify({ team_id: teamId, excluded: !excluded }),
+      });
+      loadTeams();
+    } catch (err) { alert("Error: " + err.message); }
+  }
+
+  async function showDebugError(requestId) {
     try {
       const data = await api("/admin/debug/errors/" + encodeURIComponent(requestId));
       const e = data.debug_error;
@@ -1045,6 +1106,9 @@
     const btnDebug = document.getElementById("btn-debug-toggle");
     if (btnDebug) btnDebug.addEventListener("click", toggleDebug);
     loadDebugStatus();
+    const btnPromptLog = document.getElementById("btn-prompt-log-toggle");
+    if (btnPromptLog) btnPromptLog.addEventListener("click", togglePromptLog);
+    loadPromptLogStatus();
   }
 
   function showModal(html) {
@@ -1160,6 +1224,7 @@
   function showEditKeyModal(key) {
     const existingModels = Array.isArray(key.models) ? key.models : [];
     const isVip = key.metadata && key.metadata.vip === true;
+    const isPromptLogExcluded = (window._promptLogExcludedKeys || []).includes(key.token_hash);
     showModal(`
       <h3>Edit Key</h3>
       <div class="form-group"><label>Alias ${tip("Short unique identifier for this key, e.g. 'alice'. Used for dashboard display and debug logging.")}</label><input id="m-edit-alias" value="${esc(key.key_alias || "")}"></div>
@@ -1169,6 +1234,7 @@
       <div class="form-group"><label>RPM Limit ${tip("Per-key RPM override. Leave empty to use plan limits.")}</label><input id="m-edit-rpm" type="number" value="${key.rpm_limit || ""}"></div>
       <div class="form-group"><label>Plan ${tip("Rate limit plan assigned to this key. Change via Assignments page.")}</label><input value="${esc(key.plan_name || "Default")}" readonly style="background:var(--surface3);cursor:not-allowed"></div>
       <div class="form-group"><label>VIP ${tip("VIP keys get priority in flow control queues when deployments are at capacity.")}</label><div style="display:flex;align-items:center;gap:8px;padding-top:4px"><input type="checkbox" id="m-edit-vip" ${isVip ? "checked" : ""}><span style="font-weight:600;color:#b45309;white-space:nowrap">Priority queue access</span></div></div>
+      <div class="form-group"><label>Prompt Log ${tip("Disable prompt logging for this key. When the global prompt log switch is ON, this key will be excluded from capture.")}</label><div style="display:flex;align-items:center;gap:8px;padding-top:4px"><input type="checkbox" id="m-edit-no-prompt-log" ${isPromptLogExcluded ? "checked" : ""}><span style="font-weight:600;color:#dc2626;white-space:nowrap">Disable prompt logging</span></div></div>
       <div class="modal-actions">
         <button class="btn-secondary" onclick="hideModal()" style="width:auto">Cancel</button>
         <button class="btn-primary" id="m-edit-submit">Save</button>
@@ -1199,6 +1265,14 @@
           method: "PUT",
           body: JSON.stringify(body),
         });
+        // Update prompt log exclusion for this key.
+        const noPromptLog = document.getElementById("m-edit-no-prompt-log").checked;
+        if (noPromptLog !== isPromptLogExcluded) {
+          await api("/admin/prompt-log/key", {
+            method: "POST",
+            body: JSON.stringify({ key_hash: key.token_hash, excluded: noPromptLog }),
+          });
+        }
         hideModal();
         loadKeys();
       } catch (err) { alert("Error: " + err.message); }
@@ -1251,6 +1325,11 @@
   // ── Admin: Teams ──────────────────────────────────────
   async function loadTeams() {
     try {
+      // Load prompt log status alongside teams to know excluded teams.
+      try {
+        const plData = await api("/admin/prompt-log/status");
+        window._promptLogExcludedTeams = plData.excluded_teams || [];
+      } catch { window._promptLogExcludedTeams = []; }
       const data = await api("/admin/teams");
       renderTeamsTable(data.teams || []);
     } catch (err) {
@@ -1263,8 +1342,12 @@
     const wrap = document.getElementById("teams-table-wrap");
     if (teams.length === 0) { wrap.innerHTML = "<p>No teams found.</p>"; return; }
     wrap.innerHTML = `<table>
-      <tr><th>Team Alias</th><th>Team ID</th><th>Models</th><th>Keys</th><th>Requests</th><th>Input Tokens</th><th>Output Tokens</th><th>Total Tokens</th><th>Actions</th></tr>
-      ${teams.map((t) => `<tr>
+      <tr><th>Team Alias</th><th>Team ID</th><th>Models</th><th>Keys</th><th>Requests</th><th>Input Tokens</th><th>Output Tokens</th><th>Total Tokens</th><th>Prompt Log</th><th>Actions</th></tr>
+      ${teams.map((t) => {
+        const isExcluded = (window._promptLogExcludedTeams || []).includes(t.team_id);
+        const logBtnClass = isExcluded ? "btn-secondary" : "btn-primary";
+        const logBtnText = isExcluded ? "OFF" : "ON";
+        return `<tr>
         <td>${esc(t.team_alias || "-")}</td>
         <td class="mono" title="${esc(t.team_id)}">${esc((t.team_id || "").substring(0, 12))}</td>
         <td class="mono">${esc(formatTeamModels(t.models))}</td>
@@ -1273,11 +1356,13 @@
         <td>${formatNumber(t.total_input_tokens || 0)}</td>
         <td>${formatNumber(t.total_output_tokens || 0)}</td>
         <td>${formatNumber((t.total_input_tokens || 0) + (t.total_output_tokens || 0))}</td>
+        <td><button class="${logBtnClass} btn-sm" onclick='window._toggleTeamPromptLog(${JSON.stringify(t.team_id)}, ${isExcluded})'>${logBtnText}</button></td>
         <td>
           <button class="btn-secondary btn-sm" onclick='window._editTeam(${JSON.stringify(t.team_id)})'>Edit</button>
           <button class="btn-danger btn-sm" onclick='window._deleteTeam(${JSON.stringify(t.team_id)}, ${t.key_count})'>Delete</button>
         </td>
-      </tr>`).join("")}
+      </tr>`;
+      }).join("")}
     </table>`;
   }
 
@@ -1349,6 +1434,17 @@
       await api("/admin/teams/" + encodeURIComponent(teamId), { method: "DELETE" });
       loadTeams();
     } catch (err) { alert("Error: " + err.message); }
+  };
+
+
+  window._toggleTeamPromptLog = async (teamId, isExcluded) => {
+    try {
+      await api('/admin/prompt-log/team', {
+        method: 'POST',
+        body: JSON.stringify({ team_id: teamId, excluded: !isExcluded }),
+      });
+      loadTeams();
+    } catch (err) { alert('Error: ' + err.message); }
   };
 
   // ── Admin: Logs ──────────────────────────────────────

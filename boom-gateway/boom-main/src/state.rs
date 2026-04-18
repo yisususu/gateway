@@ -6,6 +6,7 @@ use boom_core::DebugErrorStore;
 use boom_limiter::{PlanStore, RateLimitPlan, ScheduleSlot, SlidingWindowLimiter};
 use boom_flowcontrol::{FlowControlConfig, FlowController};
 use boom_routing::{AliasStore, DeploymentStore, InFlightTracker, KeyAffinityPolicy, Router, RoundRobinPolicy, SchedulePolicy};
+use boom_promptlog::PromptLogWriter;
 use boom_provider;
 use dashmap::DashMap;
 use sqlx::PgPool;
@@ -50,6 +51,8 @@ pub struct AppState {
     pub flow_controller: Arc<FlowController>,
     /// Debug error store — captures upstream error details on demand.
     pub debug_store: Arc<DebugErrorStore>,
+    /// Prompt log writer — captures full request/response for audit.
+    pub prompt_log_writer: PromptLogWriter,
 }
 
 /// The state that gets swapped on config reload.
@@ -150,6 +153,11 @@ impl AppState {
         }
 
         // 6. Build inner state (config + auth + health).
+        let prompt_log_config = config.prompt_log.as_ref()
+            .and_then(|v| serde_json::from_value::<boom_promptlog::PromptLogConfig>(v.clone()).ok())
+            .unwrap_or_default();
+        let prompt_log_writer = PromptLogWriter::spawn(prompt_log_config);
+
         let inner = Self::build_inner(config, &db_pool, chrono::Utc::now(), 0)?;
 
         Ok(Self {
@@ -166,6 +174,7 @@ impl AppState {
             failure_counter: Arc::new(DashMap::new()),
             flow_controller,
             debug_store,
+            prompt_log_writer,
         })
     }
 
@@ -240,11 +249,20 @@ impl AppState {
         // Clean up assignments pointing to plans that no longer exist.
         self.plan_store.cleanup_assignments();
 
-        // 5. Build new inner state.
+        // 5. Update prompt log config (hot-reload).
+        if let Some(ref v) = new_config.prompt_log {
+            if let Ok(pc) = serde_json::from_value::<boom_promptlog::PromptLogConfig>(v.clone()) {
+                self.prompt_log_writer.update_config(pc);
+            }
+        } else {
+            self.prompt_log_writer.update_config(boom_promptlog::PromptLogConfig::default());
+        }
+
+        // 6. Build new inner state.
         let new_inner =
             Self::build_inner(new_config, &db_pool, old_started_at, new_reload_count)?;
 
-        // 6. Atomic swap.
+        // 7. Atomic swap.
         self.inner.store(Arc::new(new_inner));
 
         let model_count = self.deployment_store.len();
