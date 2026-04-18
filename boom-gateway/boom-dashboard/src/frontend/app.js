@@ -954,6 +954,11 @@
   }
 
   async function showDebugError(requestId) {
+    try {
+      const data = await api("/admin/debug/errors/" + requestId);
+      showModalContent("<pre>" + esc(JSON.stringify(data, null, 2)) + "</pre>");
+    } catch (err) { alert("Error: " + err.message); }
+  }
 
   // ── Prompt Log toggle (same pattern as Debug toggle) ──
 
