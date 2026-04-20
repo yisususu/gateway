@@ -956,7 +956,7 @@
   async function showDebugError(requestId) {
     try {
       const data = await api("/admin/debug/errors/" + requestId);
-      showModalContent("<pre>" + esc(JSON.stringify(data, null, 2)) + "</pre>");
+      showModal("<pre style='max-height:60vh;overflow:auto'>" + esc(JSON.stringify(data, null, 2)) + "</pre>");
     } catch (err) { alert("Error: " + err.message); }
   }
 
@@ -1507,7 +1507,7 @@
     const tbody = document.getElementById("logs-tbody");
     if (!tbody) return;
     if (logs.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="11" class="no-results">No matching logs found.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="12" class="no-results">No matching logs found.</td></tr>';
       return;
     }
     tbody.innerHTML = logs.map((l) => {
@@ -1519,6 +1519,9 @@
           ? (isDebuggable
             ? '<a href="#" onclick="event.preventDefault();window._showDebugError(\'' + esc(l.request_id) + '\')" style="color:var(--primary);text-decoration:underline;cursor:pointer" title="' + esc(l.error_message) + '">' + esc(etype.substring(0, 20)) + '</a>'
             : '<span style="color:var(--danger)" title="' + esc(l.error_message) + '">' + esc(etype.substring(0, 20)) + '</span>')
+          : "-";
+        const detailCell = promptLogEnabled && l.request_id
+          ? '<button class="btn-small" onclick="window._viewPromptLog(\'' + esc(l.request_id) + '\',\'' + esc(l.key_hash) + '\',\'' + esc(l.team_alias || "") + '\')">View</button>'
           : "-";
         return `<tr>
         <td class="mono">${formatTimestamp(l.created_at)}</td>
@@ -1532,6 +1535,7 @@
         <td>${l.output_tokens != null ? formatNumber(l.output_tokens) : "-"}</td>
         <td>${l.duration_ms != null ? l.duration_ms + "ms" : "-"}</td>
         <td>${errorCell}</td>
+        <td>${detailCell}</td>
       </tr>`;
     }).join("");
   }
@@ -1548,6 +1552,34 @@
   }
 
   window._loadLogsPage = (p) => loadLogs(p);
+
+  // ── Prompt Log Entry Viewer ──────────────────────────
+  window._viewPromptLog = async function(requestId, keyHash, teamAlias) {
+    const overlay = document.getElementById("modal-overlay");
+    const modalEl = overlay ? overlay.querySelector(".modal") : null;
+    // Widen modal for JSON viewing.
+    if (modalEl) modalEl.style.width = "90vw";
+    showModal('<div style="text-align:center;padding:40px">Loading...</div>');
+    try {
+      const params = new URLSearchParams({ key_hash: keyHash });
+      if (teamAlias) params.set("team_alias", teamAlias);
+      const data = await api("/admin/prompt-log/entry/" + encodeURIComponent(requestId) + "?" + params);
+      const json = JSON.stringify(data, null, 2);
+      showModal(
+        '<h3 style="margin-bottom:12px">Prompt Log Detail</h3>' +
+        '<div style="max-height:72vh;overflow:auto;background:#1e1e2e;color:#cdd6f4;padding:16px;border-radius:8px;font-size:13px;line-height:1.5;white-space:pre-wrap;word-break:break-word;font-family:Menlo,Consolas,monospace">' +
+        esc(json) + '</div>'
+      );
+    } catch (err) {
+      showModal('<div style="padding:20px;color:var(--danger)">Failed to load prompt log: ' + esc(err.message) + '</div>');
+    }
+    // Restore modal width on close.
+    const restoreWidth = () => {
+      if (modalEl) modalEl.style.width = "";
+      overlay.removeEventListener("click", restoreWidth);
+    };
+    overlay.addEventListener("click", restoreWidth);
+  };
 
   // ── Model Checkbox Combo ──────────────────────────────
   // Renders a custom multi-select dropdown with checkboxes.

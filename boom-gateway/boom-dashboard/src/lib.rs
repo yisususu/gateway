@@ -172,6 +172,10 @@ pub fn build_router<S: Clone + Send + Sync + 'static>(state: DashboardState) -> 
             "/dashboard/api/admin/prompt-log/key",
             post(handlers_admin::toggle_key_prompt_log),
         )
+        .route(
+            "/dashboard/api/admin/prompt-log/entry/{request_id}",
+            get(handlers_admin::get_prompt_log_entry),
+        )
         // Admin — Hot-reload config.
         .route(
             "/dashboard/api/admin/config/reload",
