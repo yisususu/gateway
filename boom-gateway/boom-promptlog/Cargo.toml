@@ -11,3 +11,4 @@ chrono = { workspace = true }
 arc-swap = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
+flate2 = { workspace = true }

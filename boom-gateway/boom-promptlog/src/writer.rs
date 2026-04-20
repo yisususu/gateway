@@ -1,6 +1,8 @@
 use crate::config::PromptLogConfig;
 use crate::entry::PromptLogEntry;
 use arc_swap::ArcSwap;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -112,8 +114,23 @@ async fn background_writer(
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::hash_map::Entry::Vacant(e) => {
                 // Scan directory for existing files to find max sequence.
-                let seq = find_max_sequence(&key_dir).await + 1;
+                let (seq, stale) = find_max_sequence_and_stale(&key_dir).await;
                 let path = key_dir.join(format!("log_{:06}.jsonl", seq));
+
+                // Compress stale .jsonl files left over from a crash.
+                if !stale.is_empty() {
+                    let stale_paths: Vec<PathBuf> = stale.iter()
+                        .map(|s| key_dir.join(format!("log_{:06}.jsonl", s)))
+                        .collect();
+                    tokio::spawn(async move {
+                        for p in stale_paths {
+                            if let Err(e) = compress_file(&p).await {
+                                tracing::warn!("Failed to compress stale file {:?}: {}", p, e);
+                            }
+                        }
+                    });
+                }
+
                 match tokio::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -139,20 +156,26 @@ async fn background_writer(
         // Check if writing this line would exceed max file size.
         // If current file is non-empty and would overflow, rotate to a new file.
         if of.size > 0 && of.size + line_bytes > max_bytes {
-            // Close current file by dropping it.
+            let old_path = key_dir.join(format!("log_{:06}.jsonl", of.sequence));
             let new_seq = of.sequence + 1;
-            let path = key_dir.join(format!("log_{:06}.jsonl", new_seq));
-            match tokio::fs::File::create(&path).await {
+            let new_path = key_dir.join(format!("log_{:06}.jsonl", new_seq));
+            match tokio::fs::File::create(&new_path).await {
                 Ok(file) => {
                     tracing::info!(
-                        path = %path.display(),
+                        path = %new_path.display(),
                         key_hash = %entry.key_hash,
                         "Rotated prompt log file"
                     );
                     *of = OpenFile { file, size: 0, sequence: new_seq };
+                    // Compress old file in background — fire-and-forget.
+                    tokio::spawn(async move {
+                        if let Err(e) = compress_file(&old_path).await {
+                            tracing::warn!("Failed to compress {:?}: {}", old_path, e);
+                        }
+                    });
                 }
                 Err(err) => {
-                    tracing::error!("Failed to create new prompt log file {:?}: {}", path, err);
+                    tracing::error!("Failed to create new prompt log file {:?}: {}", new_path, err);
                     continue;
                 }
             }
@@ -171,12 +194,21 @@ async fn background_writer(
     tracing::info!("Prompt log writer channel closed, exiting background task");
 }
 
-/// Scan a directory for existing log_*.jsonl files and return the max sequence number.
-async fn find_max_sequence(dir: &std::path::Path) -> u64 {
-    let mut max_seq: u64 = 0;
+/// Scan a directory for existing log files.
+/// Returns (max_sequence_to_use, stale_uncompressed_sequences).
+///
+/// - max_sequence_to_use: the highest sequence found + 1 (next file to write).
+///   If only `.jsonl` files exist (no `.gz`), the max `.jsonl` seq is the current
+///   file, so we return max+1. If a `.gz` exists with same seq, that `.jsonl` is stale.
+/// - stale_uncompressed_sequences: sequences that have `.jsonl` but no matching `.gz`
+///   and are NOT the newest `.jsonl` file (left over from a crash).
+async fn find_max_sequence_and_stale(dir: &std::path::Path) -> (u64, Vec<u64>) {
+    let mut jsonl_seqs: Vec<u64> = Vec::new();
+    let mut gz_seqs: std::collections::HashSet<u64> = std::collections::HashSet::new();
+
     let mut entries = match tokio::fs::read_dir(dir).await {
         Ok(rd) => rd,
-        Err(_) => return 0,
+        Err(_) => return (1, Vec::new()),
     };
     while let Ok(Some(entry)) = entries.next_entry().await {
         let name = entry.file_name();
@@ -186,9 +218,53 @@ async fn find_max_sequence(dir: &std::path::Path) -> u64 {
             .and_then(|s| s.strip_suffix(".jsonl"))
         {
             if let Ok(seq) = seq_str.parse::<u64>() {
-                max_seq = max_seq.max(seq);
+                jsonl_seqs.push(seq);
+            }
+        } else if let Some(seq_str) = name_str
+            .strip_prefix("log_")
+            .and_then(|s| s.strip_suffix(".jsonl.gz"))
+        {
+            if let Ok(seq) = seq_str.parse::<u64>() {
+                gz_seqs.insert(seq);
             }
         }
     }
-    max_seq
+
+    let overall_max = jsonl_seqs.iter().copied().chain(gz_seqs.iter().copied()).max().unwrap_or(0);
+    let next_seq = overall_max + 1;
+
+    // Stale: .jsonl files that are NOT the newest and don't have a .gz counterpart.
+    let newest_jsonl = jsonl_seqs.iter().copied().max().unwrap_or(0);
+    let stale: Vec<u64> = jsonl_seqs
+        .into_iter()
+        .filter(|&s| s < newest_jsonl && !gz_seqs.contains(&s))
+        .collect();
+
+    (next_seq, stale)
+}
+
+/// Compress a file to `.gz` and delete the original on success.
+async fn compress_file(path: &std::path::Path) -> std::io::Result<()> {
+    let data = tokio::fs::read(path).await?;
+    let gz_path = PathBuf::from(format!("{}.gz", path.display()));
+
+    // Compress in a blocking task to avoid starving the async runtime.
+    let gz_path_clone = gz_path.clone();
+    let compressed = tokio::task::spawn_blocking(move || {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        use std::io::Write;
+        encoder.write_all(&data)?;
+        encoder.finish()
+    })
+    .await
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))??;
+
+    tokio::fs::write(&gz_path_clone, &compressed).await?;
+    tokio::fs::remove_file(path).await?;
+    tracing::info!(
+        original = %path.display(),
+        compressed = %gz_path_clone.display(),
+        "Compressed prompt log file"
+    );
+    Ok(())
 }
