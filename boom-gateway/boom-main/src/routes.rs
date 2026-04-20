@@ -398,6 +398,7 @@ async fn chat_completions_inner(
                 let prompt_entry = PromptLogEntry::new(
                     prompt_log_rid.as_deref().unwrap_or_default(),
                     &identity.key_hash,
+                    identity.team_alias.as_deref(),
                     prompt_log_model.as_deref().unwrap_or_default(),
                     api_path,
                     true,
@@ -464,6 +465,7 @@ async fn chat_completions_inner(
                 let mut prompt_entry = PromptLogEntry::new(
                     prompt_log_rid.as_deref().unwrap_or_default(),
                     &identity.key_hash,
+                    identity.team_alias.as_deref(),
                     prompt_log_model.as_deref().unwrap_or_default(),
                     api_path,
                     false,
@@ -1524,6 +1526,7 @@ pub async fn messages(
                 let prompt_entry = PromptLogEntry::new(
                     prompt_log_rid.as_deref().unwrap_or_default(),
                     &identity.key_hash,
+                    identity.team_alias.as_deref(),
                     prompt_log_model.as_deref().unwrap_or_default(),
                     "/v1/messages",
                     true,
@@ -1584,6 +1587,7 @@ pub async fn messages(
                 let mut prompt_entry = PromptLogEntry::new(
                     prompt_log_rid.as_deref().unwrap_or_default(),
                     &identity.key_hash,
+                    identity.team_alias.as_deref(),
                     prompt_log_model.as_deref().unwrap_or_default(),
                     "/v1/messages",
                     false,

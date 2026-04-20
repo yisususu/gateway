@@ -390,6 +390,8 @@ pub struct AuthIdentity {
     pub key_alias: Option<String>,
     pub user_id: Option<String>,
     pub team_id: Option<String>,
+    /// Human-readable team alias (from boom_team_table.team_alias).
+    pub team_alias: Option<String>,
     /// Allowed models from key. May contain model group names (e.g. "all-team-models").
     pub models: Vec<String>,
     /// Resolved models from the key's team (boom_team_table.models).

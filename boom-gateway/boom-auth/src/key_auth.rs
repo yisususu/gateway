@@ -112,6 +112,7 @@ impl DbAuthenticator {
             key_alias: token.key_alias,
             user_id: token.user_id,
             team_id: token.team_id,
+            team_alias: None, // resolved later in authenticate()
             models: token.models,
             team_models: vec![], // resolved later in authenticate()
             rpm_limit: token.rpm_limit.map(|v| v as u64),
@@ -124,25 +125,28 @@ impl DbAuthenticator {
         }
     }
 
-    /// Query team's allowed models from boom_team_table.
-    async fn lookup_team_models(&self, team_id: &str) -> Result<Vec<String>, GatewayError> {
+    /// Query team's allowed models and alias from boom_team_table.
+    async fn lookup_team(&self, team_id: &str) -> Result<(Vec<String>, Option<String>), GatewayError> {
         let db = match &self.db {
             Some(pool) => pool,
-            None => return Ok(vec![]),
+            None => return Ok((vec![], None)),
         };
 
         let result = sqlx::query_as::<_, TeamRow>(
-            r#"SELECT models FROM "boom_team_table" WHERE team_id = $1"#,
+            r#"SELECT models, team_alias FROM "boom_team_table" WHERE team_id = $1"#,
         )
         .bind(team_id)
         .fetch_optional(db)
         .await
         .map_err(|e| {
-            tracing::warn!("Failed to query team models for team {}: {}", team_id, e);
+            tracing::warn!("Failed to query team for team {}: {}", team_id, e);
             GatewayError::InternalError(format!("Database error: {}", e))
         })?;
 
-        Ok(result.map(|r| r.models).unwrap_or_default())
+        Ok(match result {
+            Some(r) => (r.models, r.team_alias),
+            None => (vec![], None),
+        })
     }
 }
 
@@ -158,6 +162,7 @@ impl Authenticator for DbAuthenticator {
                 key_alias: Some("master".to_string()),
                 user_id: None,
                 team_id: None,
+                team_alias: None,
                 models: vec![], // master can access all models
                 team_models: vec![],
                 rpm_limit: None,
@@ -187,16 +192,17 @@ impl Authenticator for DbAuthenticator {
         //    - "all-team-models" → use team's models (empty = all allowed)
         //    - "all-proxy-models" → all models on this proxy (empty = all allowed)
         if let Some(ref team_id) = identity.team_id {
-            match self.lookup_team_models(team_id).await {
-                Ok(team_models) => {
+            match self.lookup_team(team_id).await {
+                Ok((team_models, team_alias)) => {
                     tracing::debug!(
-                        "Resolved team models for team {}: {:?}",
-                        team_id, team_models
+                        "Resolved team for team {}: models={:?}, alias={:?}",
+                        team_id, team_models, team_alias
                     );
                     identity.team_models = team_models;
+                    identity.team_alias = team_alias;
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to resolve team models: {}", e);
+                    tracing::warn!("Failed to resolve team: {}", e);
                 }
             }
         }

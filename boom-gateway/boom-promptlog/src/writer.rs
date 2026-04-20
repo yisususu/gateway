@@ -75,7 +75,7 @@ async fn background_writer(
     mut receiver: mpsc::UnboundedReceiver<PromptLogEntry>,
     config: Arc<ArcSwap<PromptLogConfig>>,
 ) {
-    // key_hash → open file state
+    // "{team_alias}/{key_hash}" → open file state
     let mut open_files: HashMap<String, OpenFile> = HashMap::new();
 
     while let Some(entry) = receiver.recv().await {
@@ -84,7 +84,12 @@ async fn background_writer(
         let max_bytes = cfg.max_file_size_mb * 1024 * 1024;
         drop(cfg); // release config guard
 
-        let key_dir = base_dir.join(&entry.key_hash);
+        // Directory layout: {dir}/{team_alias}/{key_hash}/
+        // If no team_alias, use "_no_team" as fallback.
+        let team_dir_name = entry.team_alias.as_deref().unwrap_or("_no_team");
+        let key_dir = base_dir.join(team_dir_name).join(&entry.key_hash);
+        // Map key for open_files: use team_alias/key_hash as composite key.
+        let file_key = format!("{}/{}", team_dir_name, entry.key_hash);
 
         // Ensure directory exists.
         if let Err(e) = tokio::fs::create_dir_all(&key_dir).await {
@@ -102,8 +107,8 @@ async fn background_writer(
         };
         let line_bytes = json_line.len() as u64;
 
-        // Get or create open file for this key_hash.
-        let of = match open_files.entry(entry.key_hash.clone()) {
+        // Get or create open file for this team/key.
+        let of = match open_files.entry(file_key.clone()) {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::hash_map::Entry::Vacant(e) => {
                 // Scan directory for existing files to find max sequence.

@@ -6,6 +6,8 @@ pub struct PromptLogEntry {
     pub request_id: String,
     pub timestamp: String,
     pub key_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub team_alias: Option<String>,
     pub model: String,
     pub api_path: String,
     pub is_stream: bool,
@@ -26,6 +28,7 @@ impl PromptLogEntry {
     pub fn new(
         request_id: &str,
         key_hash: &str,
+        team_alias: Option<&str>,
         model: &str,
         api_path: &str,
         is_stream: bool,
@@ -35,6 +38,7 @@ impl PromptLogEntry {
             request_id: request_id.to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             key_hash: key_hash.to_string(),
+            team_alias: team_alias.map(|s| s.to_string()),
             model: model.to_string(),
             api_path: api_path.to_string(),
             is_stream,

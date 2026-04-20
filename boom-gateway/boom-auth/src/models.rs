@@ -46,4 +46,5 @@ pub struct VerificationToken {
 #[derive(Debug, Clone, FromRow)]
 pub struct TeamRow {
     pub models: Vec<String>,
+    pub team_alias: Option<String>,
 }
