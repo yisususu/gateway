@@ -1,0 +1,39 @@
+model_list:
+  - model_name: "Qwen3.5"
+    model_info:
+      id: "instance-01"
+    flow_control:
+      model_queue_limit: 1
+      model_context_limit: 1000000
+    litellm_params:
+      model: "openai/Qwen3.5"
+      api_base: "http://127.0.0.1:8008/v1"
+      api_key: "dummy-upstream-key"
+      timeout: 120
+
+general_settings:
+  master_key: "sk-master-e2e"
+  # No database_url for the simplest startup path.
+
+router_settings:
+  schedule_policy: "round_robin"
+
+server:
+  host: "0.0.0.0"
+  port: 4000
+  workers: 4
+
+rate_limit:
+  enabled: true
+  default_rpm: 2
+  window_limits:
+    - [3, 60]
+
+plan_settings:
+  default_plan: "basic"
+  plans:
+    basic:
+      concurrency_limit: 2
+      rpm_limit: 2
+      window_limits:
+        - [3, 60]
