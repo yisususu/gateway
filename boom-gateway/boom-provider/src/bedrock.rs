@@ -1,4 +1,4 @@
-use boom_core::provider::Provider;
+use boom_core::provider::{Provider, RequestContext};
 use boom_core::types::*;
 use boom_core::GatewayError;
 use async_trait::async_trait;
@@ -37,7 +37,7 @@ impl BedrockProvider {
 
 #[async_trait]
 impl Provider for BedrockProvider {
-    async fn chat(&self, _req: ChatCompletionRequest) -> Result<ChatCompletionResponse, GatewayError> {
+    async fn chat(&self, _req: ChatCompletionRequest, _ctx: &RequestContext) -> Result<ChatCompletionResponse, GatewayError> {
         // TODO: Implement AWS SigV4 request signing.
         // This requires either the aws-sdk-bedrockruntime crate or a manual SigV4 implementation.
         Err(GatewayError::ProviderError(
@@ -45,7 +45,7 @@ impl Provider for BedrockProvider {
         ))
     }
 
-    async fn chat_stream(&self, _req: ChatCompletionRequest) -> Result<ChatStream, GatewayError> {
+    async fn chat_stream(&self, _req: ChatCompletionRequest, _ctx: &RequestContext) -> Result<ChatStream, GatewayError> {
         // TODO: Implement with streaming invoke endpoint.
         Err(GatewayError::ProviderError(
             "Bedrock streaming is not yet implemented.".to_string(),

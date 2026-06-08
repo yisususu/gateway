@@ -1,5 +1,5 @@
 use crate::{generate_response_id, now_timestamp};
-use boom_core::provider::Provider;
+use boom_core::provider::{Provider, RequestContext};
 use boom_core::types::*;
 use boom_core::GatewayError;
 use async_trait::async_trait;
@@ -298,7 +298,7 @@ impl GeminiProvider {
 
 #[async_trait]
 impl Provider for GeminiProvider {
-    async fn chat(&self, req: ChatCompletionRequest) -> Result<ChatCompletionResponse, GatewayError> {
+    async fn chat(&self, req: ChatCompletionRequest, _ctx: &RequestContext) -> Result<ChatCompletionResponse, GatewayError> {
         let requested_model = req.model.clone();
         let body = self.to_gemini_request(&req);
         let url = format!(
@@ -342,7 +342,7 @@ impl Provider for GeminiProvider {
         Ok(self.from_gemini_response(body, &requested_model))
     }
 
-    async fn chat_stream(&self, req: ChatCompletionRequest) -> Result<ChatStream, GatewayError> {
+    async fn chat_stream(&self, req: ChatCompletionRequest, _ctx: &RequestContext) -> Result<ChatStream, GatewayError> {
         let requested_model = req.model.clone();
         let body = self.to_gemini_request(&req);
         let url = format!(

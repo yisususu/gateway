@@ -8,7 +8,7 @@ use axum::Json;
 use boom_core::anthropic::{
     anthropic_request_to_openai, openai_response_to_anthropic, AnthropicStreamTranscoder,
 };
-use boom_core::provider::RateLimiter;
+use boom_core::provider::{RateLimiter, RequestContext};
 use boom_core::types::*;
 use boom_core::GatewayError;
 use boom_flowcontrol::{FlowControlError, FlowControlledStream};
@@ -362,9 +362,10 @@ async fn chat_completions_inner(
     }
 
     // 3.5. Flow control — queue if per-deployment limits exceeded.
+    let is_vip = is_vip_key(&identity.metadata);
     let fc_guard = if let Some(ref did) = deployment_id {
         acquire_fc_guard(
-            &state, did, input_chars as u64, is_vip_key(&identity.metadata),
+            &state, did, input_chars as u64, is_vip,
             identity.key_alias.clone(), Some(identity.key_hash.clone()),
             Some(inflight_model.clone()),
             api_path, &identity, &model,
@@ -372,6 +373,10 @@ async fn chat_completions_inner(
         ).await?
     } else {
         None
+    };
+
+    let req_ctx = RequestContext {
+        priority: if is_vip { RequestContext::PRIORITY_VIP } else { RequestContext::PRIORITY_NORMAL },
     };
 
     // Capture request body for debug recording if debug mode is enabled.
@@ -383,7 +388,7 @@ async fn chat_completions_inner(
 
     // 4. Route to provider (streaming or non-streaming).
     if is_stream {
-        let stream = provider.chat_stream(req).await.map_err(|e| {
+        let stream = provider.chat_stream(req, &req_ctx).await.map_err(|e| {
             log_error(&state, &identity, &model, api_path, true, start, &e, Some(request_id.clone()), deployment_id.clone(), debug_req_body.clone(), Some(client_ip.clone()));
             record_deployment_failure(&state, &deployment_id, &model, &e);
             rollback_plan_quota(&state.limiter, &rl_info);
@@ -453,7 +458,7 @@ async fn chat_completions_inner(
         } else {
             InFlightGuard::new(state.inflight.clone(), &inflight_model, input_chars as u64)
         };
-        let response = provider.chat(req).await.map_err(|e| {
+        let response = provider.chat(req, &req_ctx).await.map_err(|e| {
             log_error(&state, &identity, &model, api_path, false, start, &e, Some(request_id.clone()), deployment_id.clone(), debug_req_body.clone(), Some(client_ip.clone()));
             record_deployment_failure(&state, &deployment_id, &model, &e);
             rollback_plan_quota(&state.limiter, &rl_info);
@@ -1526,9 +1531,10 @@ pub async fn messages(
     }
 
     // 3.5. Flow control — queue if per-deployment limits exceeded.
+    let is_vip = is_vip_key(&identity.metadata);
     let fc_guard = if let Some(ref did) = deployment_id {
         acquire_fc_guard(
-            &state, did, input_chars as u64, is_vip_key(&identity.metadata),
+            &state, did, input_chars as u64, is_vip,
             identity.key_alias.clone(), Some(identity.key_hash.clone()),
             Some(inflight_model.clone()),
             "/v1/messages", &identity, &model,
@@ -1536,6 +1542,10 @@ pub async fn messages(
         ).await?
     } else {
         None
+    };
+
+    let req_ctx = RequestContext {
+        priority: if is_vip { RequestContext::PRIORITY_VIP } else { RequestContext::PRIORITY_NORMAL },
     };
 
     // Capture request body for debug recording if debug mode is enabled.
@@ -1547,7 +1557,7 @@ pub async fn messages(
 
     // 4. Route to provider.
     if is_stream {
-        let stream = provider.chat_stream(openai_req).await.map_err(|e| {
+        let stream = provider.chat_stream(openai_req, &req_ctx).await.map_err(|e| {
             log_error(&state, &identity, &model, "/v1/messages", true, start, &e, Some(request_id.clone()), deployment_id.clone(), debug_req_body.clone(), Some(client_ip.clone()));
             record_deployment_failure(&state, &deployment_id, &model, &e);
             rollback_plan_quota(&state.limiter, &rl_info);
@@ -1616,7 +1626,7 @@ pub async fn messages(
         } else {
             InFlightGuard::new(state.inflight.clone(), &inflight_model, input_chars as u64)
         };
-        let response = provider.chat(openai_req).await.map_err(|e| {
+        let response = provider.chat(openai_req, &req_ctx).await.map_err(|e| {
             log_error(&state, &identity, &model, "/v1/messages", false, start, &e, Some(request_id.clone()), deployment_id.clone(), debug_req_body.clone(), Some(client_ip.clone()));
             record_deployment_failure(&state, &deployment_id, &model, &e);
             rollback_plan_quota(&state.limiter, &rl_info);

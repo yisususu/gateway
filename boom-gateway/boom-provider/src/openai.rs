@@ -1,4 +1,4 @@
-use boom_core::provider::Provider;
+use boom_core::provider::{Provider, RequestContext};
 use boom_core::types::*;
 use boom_core::GatewayError;
 use async_trait::async_trait;
@@ -55,7 +55,7 @@ impl OpenAIProvider {
 
 #[async_trait]
 impl Provider for OpenAIProvider {
-    async fn chat(&self, req: ChatCompletionRequest) -> Result<ChatCompletionResponse, GatewayError> {
+    async fn chat(&self, req: ChatCompletionRequest, ctx: &RequestContext) -> Result<ChatCompletionResponse, GatewayError> {
         let body = self.build_request(req);
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
@@ -63,8 +63,7 @@ impl Provider for OpenAIProvider {
         if let Some(ref key) = self.api_key {
             builder = builder.bearer_auth(key);
         }
-        // Non-streaming: upstream sends no data until the entire response is ready.
-        // Uses the reqwest Client timeout from deployment config (`create_provider`), not a separate 600s cap.
+        builder = builder.header("X-Gateway-Priority", ctx.priority.to_string());
 
         let resp = builder
             .json(&body)
@@ -92,7 +91,7 @@ impl Provider for OpenAIProvider {
             })
     }
 
-    async fn chat_stream(&self, req: ChatCompletionRequest) -> Result<ChatStream, GatewayError> {
+    async fn chat_stream(&self, req: ChatCompletionRequest, ctx: &RequestContext) -> Result<ChatStream, GatewayError> {
         let mut body = self.build_request(req);
         // Ensure stream is enabled and request usage in the final chunk.
         if let Some(obj) = body.as_object_mut() {
@@ -109,6 +108,7 @@ impl Provider for OpenAIProvider {
         if let Some(ref key) = self.api_key {
             builder = builder.bearer_auth(key);
         }
+        builder = builder.header("X-Gateway-Priority", ctx.priority.to_string());
 
         let resp = builder
             .json(&body)
