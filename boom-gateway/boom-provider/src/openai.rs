@@ -1,4 +1,4 @@
-use boom_core::provider::Provider;
+use boom_core::provider::{Provider, RequestContext};
 use boom_core::types::*;
 use boom_core::GatewayError;
 use async_trait::async_trait;
@@ -55,7 +55,7 @@ impl OpenAIProvider {
 
 #[async_trait]
 impl Provider for OpenAIProvider {
-    async fn chat(&self, req: ChatCompletionRequest) -> Result<ChatCompletionResponse, GatewayError> {
+    async fn chat(&self, req: ChatCompletionRequest, ctx: &RequestContext) -> Result<ChatCompletionResponse, GatewayError> {
         let body = self.build_request(req);
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
@@ -63,8 +63,7 @@ impl Provider for OpenAIProvider {
         if let Some(ref key) = self.api_key {
             builder = builder.bearer_auth(key);
         }
-        // Non-streaming: upstream sends no data until the entire response is ready.
-        // Uses the reqwest Client timeout from deployment config (`create_provider`), not a separate 600s cap.
+        builder = builder.header("X-Gateway-Priority", ctx.priority.to_string());
 
         let resp = builder
             .json(&body)
@@ -92,7 +91,7 @@ impl Provider for OpenAIProvider {
             })
     }
 
-    async fn chat_stream(&self, req: ChatCompletionRequest) -> Result<ChatStream, GatewayError> {
+    async fn chat_stream(&self, req: ChatCompletionRequest, ctx: &RequestContext) -> Result<ChatStream, GatewayError> {
         let mut body = self.build_request(req);
         // Ensure stream is enabled and request usage in the final chunk.
         if let Some(obj) = body.as_object_mut() {
@@ -109,6 +108,7 @@ impl Provider for OpenAIProvider {
         if let Some(ref key) = self.api_key {
             builder = builder.bearer_auth(key);
         }
+        builder = builder.header("X-Gateway-Priority", ctx.priority.to_string());
 
         let resp = builder
             .json(&body)
@@ -199,5 +199,198 @@ impl Provider for OpenAIProvider {
 
     fn deployment_id(&self) -> Option<&str> {
         self.deployment_id.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path, header};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn minimal_chat_request() -> ChatCompletionRequest {
+        ChatCompletionRequest {
+            model: "test-model".to_string(),
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: MessageContent::Text("hello".to_string()),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            }],
+            temperature: None,
+            top_p: None,
+            n: None,
+            stream: None,
+            stop: None,
+            max_tokens: None,
+            max_completion_tokens: None,
+            presence_penalty: None,
+            frequency_penalty: None,
+            user: None,
+            tools: None,
+            tool_choice: None,
+            response_format: None,
+            seed: None,
+            logprobs: None,
+            top_logprobs: None,
+            logit_bias: None,
+            extra: Default::default(),
+        }
+    }
+
+    fn fake_completion_response() -> serde_json::Value {
+        serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1700000000_u64,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "hi"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 5,
+                "completion_tokens": 1,
+                "total_tokens": 6
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn chat_sends_priority_header_for_vip() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("X-Gateway-Priority", "100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(fake_completion_response()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = OpenAIProvider::new(
+            Client::new(),
+            None,
+            Some(server.uri()),
+            "test-model",
+            None,
+        );
+
+        let ctx = RequestContext { priority: RequestContext::PRIORITY_VIP };
+        let result = provider.chat(minimal_chat_request(), &ctx).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn chat_sends_priority_header_for_normal() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("X-Gateway-Priority", "0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(fake_completion_response()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = OpenAIProvider::new(
+            Client::new(),
+            None,
+            Some(server.uri()),
+            "test-model",
+            None,
+        );
+
+        let ctx = RequestContext::default();
+        let result = provider.chat(minimal_chat_request(), &ctx).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn chat_sends_custom_priority_value() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("X-Gateway-Priority", "42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(fake_completion_response()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = OpenAIProvider::new(
+            Client::new(),
+            None,
+            Some(server.uri()),
+            "test-model",
+            None,
+        );
+
+        let ctx = RequestContext { priority: 42 };
+        let result = provider.chat(minimal_chat_request(), &ctx).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn chat_stream_sends_priority_header() {
+        let sse_body = "data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n";
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("X-Gateway-Priority", "100"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(sse_body)
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = OpenAIProvider::new(
+            Client::new(),
+            None,
+            Some(server.uri()),
+            "test-model",
+            None,
+        );
+
+        let ctx = RequestContext { priority: RequestContext::PRIORITY_VIP };
+        let result = provider.chat_stream(minimal_chat_request(), &ctx).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn chat_includes_bearer_auth_alongside_priority() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("Authorization", "Bearer sk-test-key"))
+            .and(header("X-Gateway-Priority", "100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(fake_completion_response()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = OpenAIProvider::new(
+            Client::new(),
+            Some("sk-test-key".to_string()),
+            Some(server.uri()),
+            "test-model",
+            None,
+        );
+
+        let ctx = RequestContext { priority: 100 };
+        let result = provider.chat(minimal_chat_request(), &ctx).await;
+        assert!(result.is_ok());
     }
 }

@@ -1,4 +1,4 @@
-use boom_core::provider::Provider;
+use boom_core::provider::{Provider, RequestContext};
 use boom_core::types::*;
 use boom_core::GatewayError;
 use async_trait::async_trait;
@@ -53,7 +53,7 @@ impl AzureProvider {
 
 #[async_trait]
 impl Provider for AzureProvider {
-    async fn chat(&self, mut req: ChatCompletionRequest) -> Result<ChatCompletionResponse, GatewayError> {
+    async fn chat(&self, mut req: ChatCompletionRequest, _ctx: &RequestContext) -> Result<ChatCompletionResponse, GatewayError> {
         req.model = self.deployment.clone();
         let body = serde_json::to_value(&req)
             .map_err(|e| GatewayError::InternalError(format!("Serialize error: {}", e)))?;
@@ -91,7 +91,7 @@ impl Provider for AzureProvider {
             })
     }
 
-    async fn chat_stream(&self, mut req: ChatCompletionRequest) -> Result<ChatStream, GatewayError> {
+    async fn chat_stream(&self, mut req: ChatCompletionRequest, _ctx: &RequestContext) -> Result<ChatStream, GatewayError> {
         req.model = self.deployment.clone();
         let mut body = serde_json::to_value(&req)
             .map_err(|e| GatewayError::InternalError(format!("Serialize error: {}", e)))?;

@@ -6,6 +6,29 @@ use crate::GatewayError;
 use async_trait::async_trait;
 use std::collections::HashMap;
 
+/// Per-request context carrying gateway-internal metadata to the provider layer.
+/// This information is injected as HTTP headers (not in the JSON body) so that
+/// intermediate schedulers (e.g. LLM-LA) can read it, while downstream LLM
+/// instances (e.g. vLLM) simply ignore unknown headers.
+#[derive(Debug, Clone)]
+pub struct RequestContext {
+    /// Numeric priority for this request (0 = normal, 100 = VIP).
+    /// Injected as `X-Gateway-Priority: <value>` header.
+    /// LLM-LA can use this for fine-grained scheduling.
+    pub priority: u32,
+}
+
+impl Default for RequestContext {
+    fn default() -> Self {
+        Self { priority: 0 }
+    }
+}
+
+impl RequestContext {
+    pub const PRIORITY_NORMAL: u32 = 0;
+    pub const PRIORITY_VIP: u32 = 100;
+}
+
 /// Provider trait — each LLM provider implements this.
 ///
 /// The gateway routes a standardized ChatCompletionRequest to the chosen provider,
@@ -13,11 +36,11 @@ use std::collections::HashMap;
 #[async_trait]
 pub trait Provider: Send + Sync + 'static {
     /// Non-streaming chat completion.
-    async fn chat(&self, request: ChatCompletionRequest) -> Result<ChatCompletionResponse, GatewayError>;
+    async fn chat(&self, request: ChatCompletionRequest, ctx: &RequestContext) -> Result<ChatCompletionResponse, GatewayError>;
 
     /// Streaming chat completion. Returns an SSE byte stream from the upstream provider,
     /// already transformed into OpenAI-compatible chunks.
-    async fn chat_stream(&self, request: ChatCompletionRequest) -> Result<ChatStream, GatewayError>;
+    async fn chat_stream(&self, request: ChatCompletionRequest, ctx: &RequestContext) -> Result<ChatStream, GatewayError>;
 
     /// Provider identifier (e.g. "openai", "anthropic").
     fn name(&self) -> &str;
@@ -89,6 +112,41 @@ pub struct Deployment {
     pub weight: u32,
     /// Priority for fallback routing (lower = higher priority).
     pub priority: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_context_default_is_normal_priority() {
+        let ctx = RequestContext::default();
+        assert_eq!(ctx.priority, RequestContext::PRIORITY_NORMAL);
+        assert_eq!(ctx.priority, 0);
+    }
+
+    #[test]
+    fn request_context_vip_constant() {
+        assert_eq!(RequestContext::PRIORITY_VIP, 100);
+    }
+
+    #[test]
+    fn request_context_accepts_arbitrary_priority() {
+        let ctx = RequestContext { priority: 42 };
+        assert_eq!(ctx.priority, 42);
+    }
+
+    #[test]
+    fn request_context_clone() {
+        let ctx = RequestContext { priority: 70 };
+        let cloned = ctx.clone();
+        assert_eq!(cloned.priority, 70);
+    }
+
+    #[test]
+    fn vip_and_normal_are_distinct() {
+        assert_ne!(RequestContext::PRIORITY_VIP, RequestContext::PRIORITY_NORMAL);
+    }
 }
 
 /// Provider of per-deployment queue depth for scheduling decisions.

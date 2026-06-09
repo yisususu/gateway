@@ -1,6 +1,6 @@
 use crate::{generate_response_id, now_timestamp};
 use boom_core::normalize;
-use boom_core::provider::Provider;
+use boom_core::provider::{Provider, RequestContext};
 use boom_core::types::*;
 use boom_core::GatewayError;
 use async_trait::async_trait;
@@ -511,7 +511,7 @@ impl AnthropicProvider {
 
 #[async_trait]
 impl Provider for AnthropicProvider {
-    async fn chat(&self, req: ChatCompletionRequest) -> Result<ChatCompletionResponse, GatewayError> {
+    async fn chat(&self, req: ChatCompletionRequest, _ctx: &RequestContext) -> Result<ChatCompletionResponse, GatewayError> {
         let requested_model = req.model.clone();
         let body = self.to_anthropic_request(&req);
         let url = format!("{}/messages", self.base_url.trim_end_matches('/'));
@@ -559,7 +559,7 @@ impl Provider for AnthropicProvider {
         Ok(self.from_anthropic_response(body, &requested_model))
     }
 
-    async fn chat_stream(&self, req: ChatCompletionRequest) -> Result<ChatStream, GatewayError> {
+    async fn chat_stream(&self, req: ChatCompletionRequest, _ctx: &RequestContext) -> Result<ChatStream, GatewayError> {
         let requested_model = req.model.clone();
         let mut body = self.to_anthropic_request(&req);
         body["stream"] = serde_json::json!(true);
